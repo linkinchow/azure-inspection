@@ -13,9 +13,20 @@ from ..core import charts as cs
 from .views import REGION_LABELS
 
 
-def files(labels):
+def group_label(model):
+    """Compare business groups when the customer defined them; with a single group (no rules), compare subscriptions instead."""
+    return '业务组' if len(model['groups']) > 1 else '订阅'
+
+
+def group_rows(model):
+    if group_label(model) == '业务组':
+        return model['groups']
+    return [r for r in model['subscriptions'] if r['prev'] is not None and r['cur'] is not None]
+
+
+def files(labels, group='业务组'):
     return {'daily': f'01_1_{labels["prev"]}至{labels["cur"]}每日费用.png', 'forecast': f'01_2_{labels["next"]}每日费用实际与预测.png',
-            'groups': f'01_3_各业务组{labels["prev"]}与{labels["cur"]}费用.png', 'services': '01_4_费用增减最大的服务.png', 'regions': '01_5_各区域费用增减.png'}
+            'groups': f'01_3_各{group}{labels["prev"]}与{labels["cur"]}费用.png', 'services': '01_4_费用增减最大的服务.png', 'regions': '01_5_各区域费用增减.png'}
 
 
 def _k(x, _=None):
@@ -38,7 +49,7 @@ def chart_data(model, sup, period):
                         + [(date(cur.year, cur.month, d), (daily.get(d) or {}).get('cur')) for d in range(1, cur.days + 1)],
             'prevDailyAverage': model['comparableTotals']['prevDaily'], 'curDailyAverage': model['comparableTotals']['curDaily'],
             'next': [(d, nxt[d]['actual'] if nxt[d]['actual'] else None, nxt[d]['forecast'] if nxt[d]['forecast'] else None) for d in range(1, following.days + 1)],
-            'groups': [(r['name'], r['prev'], r['cur']) for r in model['groups']],
+            'groupLabel': group_label(model), 'groups': [(r['name'], r['prev'], r['cur']) for r in group_rows(model)],
             'services': [(r['name'], r['delta']) for r in services],
             'regions': [(REGION_LABELS.get(r['location'], r['location']), r['cur'] - r['prev']) for r in regions]}
 
@@ -48,7 +59,7 @@ def _line(ax, x, y, color, **kw):
 
 
 def make_pngs(data, labels, chart_dir):
-    names = files(labels)
+    names = files(labels, data['groupLabel'])
     Lp, Lc, Ln = labels['prev'], labels['cur'], labels['next']
     fig, ax = cs.figure(11, 4)
     cs.style(ax)
@@ -103,7 +114,7 @@ def make_pngs(data, labels, chart_dir):
     ax.set_yticks(list(y), [g[0] for g in groups], fontsize=10, color=cs.INK)
     ax.xaxis.set_major_formatter(FuncFormatter(_k))
     ax.set_xlim(0, max([max(g[1], g[2]) for g in groups] or [1]) * 1.22)
-    ax.set_title(f'各业务组{Lp}与{Lc}费用（USD；括号内为月度变化）', loc='left', fontsize=11, color=cs.INK, pad=10)
+    ax.set_title(f'各{data["groupLabel"]}{Lp}与{Lc}费用（USD；括号内为月度变化）', loc='left', fontsize=11, color=cs.INK, pad=10)
     ax.legend(loc='lower right', frameon=False, fontsize=9, labelcolor=cs.INK2)
     cs.save(fig, chart_dir / names['groups'])
 
@@ -152,7 +163,7 @@ def add_excel_sheet(sheet, data, labels):
         ws.cell(i, 8, data['curDailyAverage'])
     n, on = 3 + len(data['timeline']), 3 + len(data['next'])
     blocks, row = {}, n + 3
-    for key, header, rows in [('groups', ['业务组', f'{Lp}USD', f'{Lc}USD'], data['groups']), ('services', ['服务', '增减USD'], data['services']),
+    for key, header, rows in [('groups', [data['groupLabel'], f'{Lp}USD', f'{Lc}USD'], data['groups']), ('services', ['服务', '增减USD'], data['services']),
                               ('regions', ['区域', '增减USD'], data['regions'])]:
         for c, h in enumerate(header, 1):
             ws.cell(row, c, h)
@@ -209,7 +220,7 @@ def add_excel_sheet(sheet, data, labels):
         ch.x_axis.delete = ch.y_axis.delete = False
         ch.y_axis.crosses = 'max'
         ws.add_chart(ch, anchor)
-    bar_chart(f'各业务组{Lp}与{Lc}费用（USD）', 'groups', [2, 3], ['A09F98', '2A78D6'], 'J39')
+    bar_chart(f'各{data["groupLabel"]}{Lp}与{Lc}费用（USD）', 'groups', [2, 3], ['A09F98', '2A78D6'], 'J39')
     bar_chart(f'费用增减最大的 {len(data["services"])} 个服务（红色增加，蓝色减少）', 'services', [2], ['2A78D6'], 'J56', diverging=True)
     bar_chart(f'费用增减最大的 {len(data["regions"])} 个区域（红色增加，蓝色减少）', 'regions', [2], ['2A78D6'], 'J73', diverging=True)
     return ws

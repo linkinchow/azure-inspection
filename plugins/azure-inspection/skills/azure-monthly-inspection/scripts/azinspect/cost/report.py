@@ -13,6 +13,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter as L
 from openpyxl.workbook.properties import CalcProperties
 
+from ..core.charts import clear as clear_charts
 from ..core.excel import MONEY, verify
 from ..core.fmt_md import format_and_check
 from ..core.io import read_json, write_json
@@ -365,6 +366,7 @@ def build(ws, cfg, period, narrative=None, log=print):
         aw.append([a['topic'], a['scope'], a['finding'], a['recommendation'], a['saving'], a['owner'], a['status'], a['evidencePeriod'], None, None, None, None])
     extra_formats = sr.add_sheets(sheet, formula, sup, model, labels, narrative, cfg)
     data = cost_charts.chart_data(model, sup, period)
+    clear_charts(out / 'charts', '01')
     pngs = cost_charts.make_pngs(data, labels, out / 'charts')
     cost_charts.add_excel_sheet(sheet, data, labels)
     rr = model.get('resourceReview') or {}
@@ -547,12 +549,13 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None):
         if ups and ups[-1]['delta'] < 0:
             r = ups[-1]
             highlights.append(f'**减少最多：{r["subscriptionName"]} / {r["serviceName"]}**，USD {amount(r["delta"])}。')
-    lines += [f'- {h}' for h in highlights] + ['', '## 2. 哪些业务、服务和区域变化最大', '',
-                                               f'|业务组|{Lp}费用USD|{Lc}费用USD|增减USD|变化率|日均变化率|', '|---|---:|---:|---:|---:|---:|']
-    for r in m['groups']:
+    group = cost_charts.group_label(m)
+    lines += [f'- {h}' for h in highlights] + ['', f'## 2. 哪些{"业务" if group == "业务组" else "订阅"}、服务和区域变化最大', '',
+                                               f'|{group}|{Lp}费用USD|{Lc}费用USD|增减USD|变化率|日均变化率|', '|---|---:|---:|---:|---:|---:|']
+    for r in cost_charts.group_rows(m):
         lines.append(row([r['name'], amount(r['prev']), amount(r['cur']), amount(r['delta']), percent(r['changeRate']), percent(r['dailyChangeRate'])]))
     if 'groups' in pngs:
-        lines += ['', f'![各业务组{Lp}与{Lc}费用]({pngs["groups"]})']
+        lines += ['', f'![各{group}{Lp}与{Lc}费用]({pngs["groups"]})']
     lines += ['', '### 主要服务', '', f'|服务|{Lp}费用USD|{Lc}费用USD|增减USD|日均变化率|', '|---|---:|---:|---:|---:|']
     for r in m['services'][:15]:
         lines.append(row([r['name'], amount(r['prev']), amount(r['cur']), amount(r['delta']), percent(r['dailyChangeRate'])]))

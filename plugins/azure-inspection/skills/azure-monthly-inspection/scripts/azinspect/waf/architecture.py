@@ -86,7 +86,9 @@ def section(arch: dict | None, narrative: dict) -> list[str]:
         have = [f'{label} {n} 个' for label, n in net if n]
         missing = [label for label, n in net if not n and label in ('专线', 'VPN 或专线网关', 'Virtual WAN 中心', 'Azure Firewall')]
         text = '网络：' + ('、'.join(have) if have else '没有读到虚拟网络')
-        if arch['peerings'] is not None:
+        if arch['peerings'] == 0:
+            text += '；虚拟网络之间没有对等连接'
+        elif arch['peerings']:
             text += f'；虚拟网络对等 {arch["peerings"]} 个' + (f'，其中跨区域 {arch["crossRegionPeerings"]} 个' if arch['crossRegionPeerings'] else '')
         if missing:
             text += f'。Azure 中没有{"、".join(missing)}；Azure 之外是否有专线、VPN 或第三方防火墙，需要客户确认'

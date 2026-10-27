@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .core import charts as cs
+from .core.charts import clear as clear_charts
 from .core.fmt_md import format_and_check
 from .core.io import read_json, write_json
 from .waf.report import default_top_issues, recommendation_text
@@ -220,6 +221,7 @@ def build(ws, cfg, period, narrative=None, log=print):
     d = gather(ws, period)
     n = narrative or {}
     out = ws.month_dir('reports')
+    clear_charts(out / 'charts', '00')
     pngs = {'pillars': chart(pillar_counts(d), out / 'charts' / '00_1_各支柱问题数量.png')}
     daily = sorted((out / 'charts').glob('01_1_*.png'))
     if daily:

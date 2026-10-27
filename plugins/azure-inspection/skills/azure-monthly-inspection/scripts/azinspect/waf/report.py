@@ -14,6 +14,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter as L
 
+from ..core.charts import clear as clear_charts
 from ..core.excel import SEVERITY_FILL, verify
 from ..core.fmt_md import format_and_check
 from ..core.io import write_json
@@ -493,6 +494,7 @@ def build(ws, cfg, report, narrative=None, log=print):
     out = ws.month_dir('reports')
     md_stem, xlsx_stem = stems(report)
     ssh_rows, ssh_open, ssh_pwd = ssh_cross(datasets) if report == '03' else ([], 0, 0)
+    clear_charts(out / 'charts', report)
     pngs = waf_charts.make_pngs(report, findings, checks, out / 'charts')
     alert_png = waf_charts.alert_coverage_png(datasets.get('operations'), out / 'charts') if report == '04' else None
     xlsx = out / f'{xlsx_stem}.xlsx'

@@ -38,6 +38,12 @@ def figure(width: float = 10, height: float = 4):
     return fig, ax
 
 
+def clear(chart_dir: Path, report: str) -> None:
+    """Remove this report's charts from an earlier build, so a chart that is no longer drawn does not linger in the package."""
+    for old in Path(chart_dir).glob(f'{report}_*.png'):
+        old.unlink()
+
+
 def save(fig, path: Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

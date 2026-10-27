@@ -15,6 +15,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter as L
 
 from ..core import charts as cs
+from ..core.charts import clear as clear_charts
 from ..core.excel import verify
 from ..core.fmt_md import format_and_check
 from ..core.io import read_json, write_json
@@ -519,6 +520,7 @@ def build(ws, cfg, narrative=None, log=print):
     labels = {'standard': data['methodLabels']['standard'], 'standardTag': (data['method'].get('standardDetection') or '').replace('标签 ', '')
               if (data['method'].get('standardDetection') or '').startswith('标签') else None}
     out = ws.month_dir('reports')
+    clear_charts(out / 'charts', '05')
     pngs = make_charts(data['crossTypeStatistics']['highImpactDeviations'], out / 'charts', bool(cfg.business_lines))
     xlsx = out / f'{STEM_XLSX}.xlsx'
     expected = write_excel(xlsx, cfg, data, narrative, labels)

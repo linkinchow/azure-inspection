@@ -9,6 +9,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter as L
 from openpyxl.workbook.properties import CalcProperties
 
+from ..core.charts import clear as clear_charts
 from ..core.excel import MONEY, verify
 from ..core.fmt_md import format_and_check
 from ..core.io import write_json
@@ -233,6 +234,7 @@ def build(ws, cfg, narrative=None, log=print):
         method.append(row)
     data = vm_charts.chart_data(vms, recs, portfolio)
     data['commitmentCoverage'] = cc_info
+    clear_charts(out / 'charts', '02')
     pngs = vm_charts.make_pngs(data, out / 'charts')
     chart_sheet = vm_charts.add_excel_sheet(sheet, data)
     for s in wb:

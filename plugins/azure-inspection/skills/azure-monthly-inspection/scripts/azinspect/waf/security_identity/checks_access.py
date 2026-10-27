@@ -188,7 +188,7 @@ def roles(ctx, assessments):
         e = ctx.sub_env(s['name'])
         inventory.append({'subscription': s['name'], 'environment': e, 'counts': counts,
                           'effectiveOwnerPrincipals': len(owners), 'directSubscriptionOwnerUsers': len(direct_owner_users)})
-        if len(direct_owner_users) >= 3:
+        if direct_owner_users and len(owners) > 3:   # Microsoft: at most 3 owners per subscription
             ctx.add('S-I5', '中' if is_prod(e) else '低', sid, None, s['name'], RA_TYPE, e,
                     finding=f'订阅 {s["name"]} 在订阅范围直接给 {len(direct_owner_users)} 个用户账户分配了 Owner，加上从管理组继承的 Owner 共有 {len(owners)} 个 Owner 主体，超过建议的 3 个。',
                     evidence={'directSubscriptionOwnerUsers': len(direct_owner_users), 'effectiveOwnerPrincipals': len(owners),
