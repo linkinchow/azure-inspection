@@ -1,0 +1,21 @@
+// Azure Resource Graph Query
+// Find all VPN Virtual Network Gateways without Maintenance Configurations
+
+resources
+| where type =~ "Microsoft.Network/virtualNetworkGateways"
+| where properties.gatewayType =~ "Vpn"
+| extend resourceId = tolower(id)
+| join kind=leftouter  (
+    maintenanceresources
+    | where type =~ "Microsoft.Maintenance/configurationAssignments"
+    | project JsonData = parse_json(properties)
+    | extend maintenanceConfigurationId = tolower(tostring(JsonData.maintenanceConfigurationId))
+    | join kind=inner (
+        resources
+        | where type =~ "Microsoft.Maintenance/maintenanceConfigurations"
+        | project maintenanceConfigurationId=tolower(id)
+    ) on maintenanceConfigurationId
+    | project maintenanceConfigurationId, resourceId=tolower(tostring(JsonData.resourceId))
+) on resourceId
+| where isempty(maintenanceConfigurationId)
+| project recommendationId = "f8c2e6d9-4b3a-45d6-b9e2-8e7f3a1c2d04", name, id, tags, param1= strcat("sku-tier: " , properties.sku.tier), param2=location

@@ -1,0 +1,429 @@
+{
+  "repository": "https://github.com/Azure/review-checklists",
+  "commit": "f131b93418892102b00c247fd9cf685e3d356522",
+  "commitDate": "2026-10-26",
+  "license": "MIT (see LICENSE)",
+  "source": "checklists/alz_checklist.en.json, items whose graph query returns a compliant column",
+  "items": [
+    {
+      "guid": "4b69bad3-3aad-45e8-a68e-1d76667313b4",
+      "id": "B03.03",
+      "category": "Identity and Access Management",
+      "subcategory": "Identity",
+      "severity": "Medium",
+      "text": "Use Microsoft Entra groups to assign permissions. Add on-premises groups to the Entra ID only group if a group management system is already in place.",
+      "link": "https://learn.microsoft.com/entra/fundamentals/how-to-manage-groups",
+      "graph": "resourcecontainers | where type == 'microsoft.resources/subscriptions' | project subscriptionId = id | join kind=inner (authorizationresources | where type == 'microsoft.authorization/roleassignments' | extend principalType = tostring(properties.principalType), roleDefinitionName = tostring(properties.roleDefinitionName), principalName = tostring(properties.principalName), scope = tostring(properties.scope), compliant = iff(principalType == 'Group', 1, 0)) on $left.subscriptionId == $right.scope | project subscriptionId, principalName, roleDefinitionName, principalType, compliant"
+    },
+    {
+      "guid": "1559ab91-53e8-4908-ae28-c84c33b6b780",
+      "id": "B03.09",
+      "category": "Identity and Access Management",
+      "subcategory": "Identity",
+      "severity": "High",
+      "text": "When deploying Active Directory Domain Controllers, use a location with Availability Zones and deploy at least two VMs across these zones. If not available, deploy in an Availability Set.",
+      "link": "https://learn.microsoft.com/azure/architecture/reference-architectures/identity/adds-extend-domain#vm-recommendations",
+      "graph": "resources | where type == 'microsoft.compute/virtualmachines' | where tolower(name) has 'dc' or tostring(tags['Role']) has 'domain' | extend zoneConfigured = iff(isnotempty(tostring(zones)), true, false), availSetConfigured = iff(isnotempty(tostring(properties.availabilitySet.id)), true, false) | extend compliant = iff(zoneConfigured or availSetConfigured, 1, 0) | project name, location, zoneConfigured, availSetConfigured, compliant"
+    },
+    {
+      "guid": "f5664b5e-984a-4859-a773-e7d261623a76",
+      "id": "B03.11",
+      "category": "Identity and Access Management",
+      "subcategory": "Identity",
+      "severity": "Medium",
+      "text": "Use Azure custom RBAC roles for the following key roles to provide fine-grain access across your ALZ: Azure platform owner, network management, security operations, subscription owner, application owner. Align these roles to teams and responsibilities within your business.",
+      "link": "https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/design-area/identity-access#prerequisites-for-a-landing-zone---design-recommendations",
+      "graph": "authorizationresources | where type == 'microsoft.authorization/roledefinitions' | where tostring(properties.type) == 'CustomRole' | extend roleName = tostring(properties.roleName), compliant = 1 | project roleName, compliant"
+    },
+    {
+      "guid": "9cf5418b-1520-4b7b-add7-88eb28f833e8",
+      "id": "B04.01",
+      "category": "Identity and Access Management",
+      "subcategory": "Landing zones",
+      "severity": "High",
+      "text": "Configure Identity network segmentation through the use of a virtual Network and peer back to the hub. Providing authentication inside application landing zone (legacy).",
+      "link": "https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/design-area/identity-access-landing-zones#identity-and-access-management-in-the-azure-landing-zone-accelerator",
+      "graph": "resources | where type == 'microsoft.network/virtualnetworks/virtualnetworkpeerings' | extend remoteVnetId = tostring(properties.remoteVirtualNetwork.id), peeringName = name | extend compliant = iff(tolower(peeringName) has 'hub' or tolower(remoteVnetId) has 'hub', 1, 0) | project name, remoteVnetId, compliant"
+    },
+    {
+      "guid": "0ce74f19-9abb-47e4-ae95-6b057a1d2be9",
+      "id": "B04.04",
+      "category": "Identity and Access Management",
+      "subcategory": "Landing zones",
+      "severity": "Medium",
+      "text": "Restrict and minimize the number of account owners within the enrollment to limit administrator access to subscriptions and associated Azure resources.",
+      "link": "https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/design-area/azure-billing-enterprise-agreement",
+      "graph": "authorizationresources | where type == 'microsoft.authorization/roleassignments' | extend roleDefinitionId = tostring(properties.roleDefinitionId), scope = tostring(properties.scope) | where roleDefinitionId has '8e3af657-a8ff-443c-a75c-2fe8c4bcb635' | summarize ownerCount = count() by scope | extend compliant = iff(ownerCount > 3, 0, 1)"
+    },
+    {
+      "guid": "2df27ee4-12e7-4f98-9f63-04722dd69c5b",
+      "id": "C02.01",
+      "category": "Resource Organization",
+      "subcategory": "Subscriptions",
+      "severity": "Medium",
+      "text": "Enforce reasonably flat management group hierarchy with no more than four levels.",
+      "link": "https://learn.microsoft.com/azure/cloud-adoption-framework/ready/landing-zone/design-area/resource-org-management-groups",
+      "graph": "resourcecontainers| where type == 'microsoft.resources/subscriptions'| extend ManagementGroup = tostring(tags),mgmtChain = properties.managementGroupAncestorsChain| extend compliant =( array_length(mgmtChain) <= 4 and array_length(mgmtChain) > 1)"
+    },
+    {
+      "guid": "33b6b780-8b9f-4e5c-9104-9d403a923c34",
+      "id": "C02.05",
+      "category": "Resource Organization",
+      "subcategory": "Subscriptions",
+      "severity": "Medium",
+      "text": "Enforce no subscriptions are placed under the root management group.",
+      "link": "https://learn.microsoft.com/azure/governance/management-groups/how-to/protect-resource-hierarchy#setting---default-management-group",
+      "graph": "resourcecontainers| where type == 'microsoft.resources/subscriptions'| extend ManagementGroup = tostring(tags),mgmtChain = properties.managementGroupAncestorsChain| extend compliant = (array_length(mgmtChain) > 1)"
+    },
+    {
+      "guid": "5de32c19-9248-4160-9d5d-1e4e614658d3",
+      "id": "C02.14",
+      "category": "Resource Organization",
+      "subcategory": "Subscriptions",
+      "severity": "Medium",
+      "text": "Ensure tags are used for billing and cost management.",
+      "link": "https://learn.microsoft.com/azure/cloud-adoption-framework/ready/azure-best-practices/track-costs",
+      "graph": "resources | extend compliant = isnotnull(['tags']) | project name, id, subscriptionId, resourceGroup, tags, compliant"
+    },
+    {
+      "guid": "91b9d7d5-91e1-4dcb-8f1f-fa7e465646cc",
+      "id": "D01.08",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Hub and spoke",
+      "severity": "Low",
+      "text": "If using Route Server, use a /27 prefix for the Route Server subnet.",
+      "link": "https://learn.microsoft.com/azure/route-server/quickstart-configure-route-server-portal#create-a-route-server-1",
+      "graph": "resources | where type=='microsoft.network/virtualnetworks' | project id,subnets=properties.subnets | mv-expand subnets | project id, subnetName = subnets.name, subnetPrefix = subnets.properties.addressPrefix | extend subnetPrefixLength = split(subnetPrefix, '/')[1] | where subnetName == 'RouteServerSubnet' | extend compliant = (subnetPrefixLength <= 27) | distinct id, compliant"
+    },
+    {
+      "guid": "0e7c28ec-9366-4572-83b0-f4664b1d944a",
+      "id": "D01.11",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Hub and spoke",
+      "severity": "Medium",
+      "text": "If you have more than 400 spoke networks in a region, deploy an additional hub to bypass VNet peering limits (500) and the maximum number of prefixes that can be advertised via ExpressRoute (1000).",
+      "link": "https://learn.microsoft.com/azure/azure-resource-manager/management/azure-subscription-service-limits?toc=/azure/virtual-network/toc.json#azure-resource-manager-virtual-networking-limits",
+      "graph": "resources | where type == 'microsoft.network/virtualnetworks' | mvexpand properties.virtualNetworkPeerings | summarize peeringcount = count() by id | extend compliant = (peeringcount < 450) | distinct id,compliant"
+    },
+    {
+      "guid": "3d457936-e9b7-41eb-bdff-314b26450b12",
+      "id": "D01.12",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Hub and spoke",
+      "severity": "Medium",
+      "text": "Limit the number of routes per route table to 400.",
+      "link": "https://learn.microsoft.com/azure/azure-resource-manager/management/azure-subscription-service-limits?toc=/azure/virtual-network/toc.json#azure-resource-manager-virtual-networking-limits",
+      "graph": "resources | where type=='microsoft.network/routetables' | mvexpand properties.routes | summarize routeCount = count() by id | extend compliant = (routeCount < 360) | distinct id,compliant"
+    },
+    {
+      "guid": "c76cb5a2-abe2-11ed-afa1-0242ac120002",
+      "id": "D01.13",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Hub and spoke",
+      "severity": "High",
+      "text": "Use the setting 'Allow traffic to remote virtual network' when configuring VNet peerings.",
+      "link": "https://learn.microsoft.com/azure/virtual-network/virtual-network-manage-peering",
+      "graph": "resources | where type == 'microsoft.network/virtualnetworks' | mvexpand properties.virtualNetworkPeerings | project id, peeringName=properties_virtualNetworkPeerings.name, compliant = (properties_virtualNetworkPeerings.properties.allowVirtualNetworkAccess == True)"
+    },
+    {
+      "guid": "3f630472-2dd6-49c5-a5c2-622f54b69bad",
+      "id": "D03.02",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "IP plan",
+      "severity": "Medium",
+      "text": "Use IP addresses from the address allocation ranges for private internets (RFC 1918).",
+      "link": "https://learn.microsoft.com/azure/cloud-adoption-framework/ready/azure-best-practices/plan-for-ip-addressing",
+      "graph": "resources | where type == 'microsoft.network/virtualnetworks' | extend addressSpace = todynamic(properties.addressSpace) | extend addressPrefix = todynamic(properties.addressSpace.addressPrefixes) | mvexpand addressSpace | mvexpand addressPrefix | project name, id, location, resourceGroup, subscriptionId, cidr = addressPrefix | extend compliant = (cidr matches regex @'^(10\\\\.|172\\\\.(1[6-9]|2[0-9]|3[01])\\\\.|192\\\\.168\\\\.)')  | project id, compliant, cidr"
+    },
+    {
+      "guid": "33aad5e8-c68e-41d7-9667-313b4f5664b5",
+      "id": "D03.03",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "IP plan",
+      "severity": "High",
+      "text": "Ensure that IP address space isn't wasted, don't create unnecessarily large virtual networks (for example /16).",
+      "link": "https://learn.microsoft.com/azure/cloud-adoption-framework/ready/azure-best-practices/plan-for-ip-addressing",
+      "graph": "resources | where type == 'microsoft.network/virtualnetworks' | extend addressSpace = todynamic(properties.addressSpace) | extend addressPrefix = todynamic(properties.addressSpace.addressPrefixes) | mvexpand addressSpace | mvexpand addressPrefix | extend addressMask = split(addressPrefix,'/')[1] | extend compliant = addressMask > 16 | project name, id, subscriptionId, resourceGroup, addressPrefix, compliant"
+    },
+    {
+      "guid": "6eab9eb6-762b-485e-8ea8-15aa5dba0bd0",
+      "id": "D05.02",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Internet",
+      "severity": "Medium",
+      "text": "Use Azure Bastion in a subnet /26 or larger.",
+      "link": "https://learn.microsoft.com/azure/bastion/bastion-faq#subnet",
+      "graph": "resources | where type=='microsoft.network/virtualnetworks' | project id,subnets=properties.subnets | mv-expand subnets | project id, subnetName = subnets.name, subnetPrefix = subnets.properties.addressPrefix | extend subnetPrefixLength = split(subnetPrefix, '/')[1] | where subnetName == 'AzureBastionSubnet' | extend compliant = (subnetPrefixLength <= 26) | distinct id, compliant"
+    },
+    {
+      "guid": "d4cd21b0-8813-47f5-b6c4-cfd3e504547c",
+      "id": "D06.03",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Hybrid",
+      "severity": "Medium",
+      "text": "Select the right SKU for the ExpressRoute/VPN gateways based on bandwidth and performance requirements.",
+      "link": "https://learn.microsoft.com/azure/expressroute/expressroute-about-virtual-network-gateways?source=recommendations#gwsku",
+      "graph": "resources| where type == 'microsoft.network/virtualnetworkgateways'| where properties.gatewayType =~ 'vpn' or properties.gatewayType == 'ExpressRoute'| extend SKUName = properties.sku.name, SKUTier = properties.sku.tier, Type = properties.gatewayType| extend compliant = SKUTier !in ('Basic', 'Standard')| project name, id, subscriptionId, resourceGroup, compliant"
+    },
+    {
+      "guid": "7025b442-f6e9-4af6-b11f-c9574916016f",
+      "id": "D06.04",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Hybrid",
+      "severity": "High",
+      "text": "Ensure that you're using unlimited-data ExpressRoute circuits only if you reach the bandwidth that justifies their cost.",
+      "link": "https://learn.microsoft.com/azure/expressroute/plan-manage-cost",
+      "graph": "resources | where type=='microsoft.network/expressroutecircuits' | extend compliant = (tolower(sku.family) == 'metereddata' or tolower(sku.tier) == 'local') | distinct id,compliant"
+    },
+    {
+      "guid": "f4e7926a-ec35-476e-a412-5dd17136bd62",
+      "id": "D06.05",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Hybrid",
+      "severity": "High",
+      "text": "Leverage the Local SKU of ExpressRoute to reduce the cost of your circuits, if your circuit peering location supports your Azure regions for the Local SKU.",
+      "link": "https://learn.microsoft.com/azure/expressroute/expressroute-faqs#expressroute-local",
+      "graph": "resources | where type=='microsoft.network/connections' | where properties.connectionType == 'ExpressRoute' | project id, gwid=tostring(properties.virtualNetworkGateway1.id), circuitid=tostring(properties.peer.id) | join (resources | where type=='microsoft.network/expressroutecircuits' | project circuitid=tostring(id), circuitsku=sku.tier) on circuitid | project id=gwid, compliant = (circuitsku == 'Local') | summarize compliant=max(compliant) by id"
+    },
+    {
+      "guid": "2447ec66-138a-4720-8f1c-e16ed301d6e8",
+      "id": "D06.06",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Hybrid",
+      "severity": "Medium",
+      "text": "Deploy a zone-redundant ExpressRoute gateway in the supported Azure regions.",
+      "link": "https://learn.microsoft.com/azure/expressroute/expressroute-about-virtual-network-gateways",
+      "graph": "resources| where type == 'microsoft.network/virtualnetworkgateways'| where properties.gatewayType =~ 'vpn' or properties.gatewayType == 'ExpressRoute'| extend SKUName = properties.sku.name, SKUTier = properties.sku.tier, Type = properties.gatewayType| extend compliant = SKUTier contains 'AZ'| project name, id, subscriptionId, resourceGroup, Type, compliant"
+    },
+    {
+      "guid": "4d873974-8b66-42d6-b15f-512a65498f6d",
+      "id": "D06.09",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Hybrid",
+      "severity": "Medium",
+      "text": "Use zone-redundant VPN gateways to connect branches or remote locations to Azure (where available).",
+      "link": "https://learn.microsoft.com/azure/vpn-gateway/create-zone-redundant-vnet-gateway",
+      "graph": "resources | where type=='microsoft.network/virtualnetworkgateways' | where properties.gatewayType == 'Vpn' | extend compliant = (tolower(properties.sku.name) contains 'az') | distinct id, compliant"
+    },
+    {
+      "guid": "e0d5973c-d4cd-421b-8881-37f5e6c4cfd3",
+      "id": "D06.15",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Hybrid",
+      "severity": "Medium",
+      "text": "Use ExpressRoute circuits from different peering locations for redundancy.",
+      "link": "https://learn.microsoft.com/azure/expressroute/designing-for-disaster-recovery-with-expressroute-privatepeering#need-for-redundant-connectivity-solution",
+      "graph": "resources | where type=='microsoft.network/connections' | where properties.connectionType == 'ExpressRoute' | project cxId=id, gwId=tostring(properties.virtualNetworkGateway1.id), circuitId=tostring(properties.peer.id) | join (resources | where type=='microsoft.network/expressroutecircuits' | project circuitId=tostring(id), circuitLocation=tostring(properties.serviceProviderProperties.peeringLocation)) on circuitId | distinct gwId, circuitLocation | summarize countErLocations=count() by id=gwId | extend compliant = (countErLocations >= 2)"
+    },
+    {
+      "guid": "72105cc8-aaea-4ee1-8c7a-ad25977afcaf",
+      "id": "D06.17",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Hybrid",
+      "severity": "High",
+      "text": "If you are using a route table in the GatewaySubnet, make sure that gateway routes are propagated.",
+      "link": "https://learn.microsoft.com/azure/vpn-gateway/vpn-gateway-about-vpn-gateway-settings#gwsub",
+      "graph": "resources | where type=='microsoft.network/virtualnetworks' | project id,resourceGroup,name,subnets=properties.subnets | mv-expand subnets | project id,resourceGroup,name,subnetName=tostring(subnets.name),routeTableId=tostring(subnets.properties.routeTable.id) | where subnetName == 'GatewaySubnet' | join kind=leftouter (Resources | where type == 'microsoft.network/routetables' | project routeTableName=name,routeTableId=id, disableBgpRoutePropagation=properties.disableBgpRoutePropagation) on routeTableId | project id,compliant = (disableBgpRoutePropagation == False or isnull(disableBgpRoutePropagation))"
+    },
+    {
+      "guid": "14d99880-2f88-47e8-a134-62a7d85c94af",
+      "id": "D07.04",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Firewall",
+      "severity": "High",
+      "text": "Use application rules to filter outbound traffic on destination host name for supported protocols.  Use FQDN-based network rules and Azure Firewall with DNS proxy to filter egress traffic to the Internet over other protocols.",
+      "link": "https://learn.microsoft.com/azure/firewall/fqdn-filtering-network-rules",
+      "graph": "resources | where type=='microsoft.network/firewallpolicies' | extend compliant = (properties.dnsSettings.enableProxy == true) | distinct id,compliant"
+    },
+    {
+      "guid": "c10d51ef-f999-455d-bba0-5c90ece07447",
+      "id": "D07.05",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Firewall",
+      "severity": "High",
+      "text": "Use Azure Firewall Premium to enable additional security features.",
+      "link": "https://learn.microsoft.com/azure/firewall/premium-features",
+      "graph": "resources | where type=='microsoft.network/firewallpolicies' | extend compliant = (properties.sku.tier == 'Premium') | distinct id,compliant"
+    },
+    {
+      "guid": "e9c8f584-6d5e-473b-8dc5-acc9fbaab4e3",
+      "id": "D07.06",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Firewall",
+      "severity": "High",
+      "text": "Configure Azure Firewall Threat Intelligence mode to Alert and Deny for additional protection.",
+      "link": "https://learn.microsoft.com/azure/firewall/premium-features#idps-signature-rules",
+      "graph": "resources | where type=='microsoft.network/firewallpolicies' | extend compliant = (properties.threatIntelMode == 'Deny') | distinct id,compliant"
+    },
+    {
+      "guid": "b9d0dff5-bdd4-4cd8-88ed-5811610b2b2c",
+      "id": "D07.07",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Firewall",
+      "severity": "High",
+      "text": "Configure Azure Firewall IDPS mode to Deny for additional protection.",
+      "link": "https://learn.microsoft.com/azure/firewall/premium-features#idps",
+      "graph": "resources | where type=='microsoft.network/firewallpolicies' | extend compliant = (properties.intrusionDetection.mode == 'Deny') | project id, compliant"
+    },
+    {
+      "guid": "a3784907-9836-4271-aafc-93535f8ec08b",
+      "id": "D07.08",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Firewall",
+      "severity": "High",
+      "text": "For subnets in VNets not connected to Virtual WAN, attach a route table so that Internet traffic is redirected to Azure Firewall or a Network Virtual Appliance.",
+      "link": "https://learn.microsoft.com/azure/virtual-network/virtual-networks-udr-overview",
+      "graph": "resources | where type=='microsoft.network/virtualnetworks' | project id,resourceGroup,name,subnets=properties.subnets | mv-expand subnets | project id,name,subnetId=tostring(subnets.id), subnetName=tostring(subnets.name),subnetRT=subnets.properties.routeTable.id | where not (subnetName in ('GatewaySubnet', 'AzureFirewallSubnet', 'RouteServerSubnet', 'AzureBastionSubnet')) | extend hasRT = isnotnull(subnetRT) | distinct id, hasRT, subnetId | join kind=fullouter (resources | where type == 'microsoft.network/virtualnetworks' | mvexpand properties.virtualNetworkPeerings | extend isVWAN=(tolower(split(properties_virtualNetworkPeerings.name, '_')[0]) == 'remotevnettohubpeering') | mv-expand properties.subnets | project id, isVWAN, name, subnetId=tostring(properties_subnets.id), subnetName=tostring(properties_subnets.name) | summarize PeeredToVWAN=max(isVWAN) by id, subnetId | project id, subnetId, isVWANpeer = (PeeredToVWAN == true)) on subnetId | project id=iff(isnotempty(id), id, id1), subnetId=iff(isnotempty(subnetId), subnetId, subnetId1), hasRT, isVWANpeer | extend compliant = (hasRT==true or isVWANpeer==true) | distinct id, subnetId, compliant"
+    },
+    {
+      "guid": "22d6419e-b627-4d95-9e7d-019fa759387f",
+      "id": "D07.11",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Segmentation",
+      "severity": "High",
+      "text": "Use a /26 prefix for your Azure Firewall subnets.",
+      "link": "https://learn.microsoft.com/azure/firewall/firewall-faq#why-does-azure-firewall-need-a--26-subnet-size",
+      "graph": "resources | where type=='microsoft.network/virtualnetworks' | project id,subnets=properties.subnets | mv-expand subnets | project id, subnetName = subnets.name, subnetPrefix = subnets.properties.addressPrefix | extend subnetPrefixLength = split(subnetPrefix, '/')[1] | where subnetName == 'AzureFirewallSubnet' | extend compliant = (subnetPrefixLength == 26) | distinct id, compliant"
+    },
+    {
+      "guid": "94f3eede-9aa3-4088-92a3-bb9a56509fad",
+      "id": "D07.18",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Firewall",
+      "severity": "Medium",
+      "text": "Enable Azure Firewall DNS proxy configuration.",
+      "link": "https://learn.microsoft.com/azure/firewall/dns-details",
+      "graph": "resources | where type =~ 'Microsoft.Network/firewallPolicies' | where array_length(properties.firewalls) > 0 | extend compliant = (properties.dnsSettings.enableProxy =~ 'true') | distinct id, compliant"
+    },
+    {
+      "guid": "e8143efa-0301-4d62-be54-ca7b5ce566dc",
+      "id": "D07.22",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Firewall",
+      "severity": "High",
+      "text": "Configure DDoS Protection on the Azure Firewall VNet, Associate a DDoS protection plan with the virtual network hosting Azure Firewall to provide enhanced mitigation against DDoS attacks. Azure Firewall Manager integrates the creation of firewall infrastructure and DDoS protection plans. ",
+      "link": "https://learn.microsoft.com/en-gb/azure/ddos-protection/ddos-protection-overview",
+      "graph": "resources | where type =~ 'Microsoft.Network/azureFirewalls' | where isempty(properties.virtualHub.id) or isnull(properties.virtualHub.id) | mv-expand ipConfig = properties.ipConfigurations | project name, firewallId = id, tags, vNetName = split(ipConfig.properties.subnet.id, '/', 8)[0], vNetId = tolower(substring(ipConfig.properties.subnet.id, 0, indexof(ipConfig.properties.subnet.id, '/subnet'))) | join kind=fullouter ( resources | where type =~ 'Microsoft.Network/ddosProtectionPlans' | mv-expand vNet = properties.virtualNetworks | project ddosProtectionPlanId = id, vNetId = tolower(vNet.id) ) on vNetId | extend compliant = iif(isempty(ddosProtectionPlanId), false, true) | project name, compliant, id = firewallId, tags, network = strcat('vNet: ', vNetName)"
+    },
+    {
+      "guid": "4704489a-8042-4d88-b79d-17b73b22a5a6",
+      "id": "D08.04",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "PaaS",
+      "severity": "High",
+      "text": "Don't enable virtual network service endpoints by default on all subnets.",
+      "link": "https://learn.microsoft.com/azure/virtual-network/virtual-network-service-endpoints-overview",
+      "graph": "resources | where type =~ 'microsoft.network/virtualnetworks' | project id,resourceGroup,name,subnets = properties.subnets | mv-expand subnets | project id = subnets.id, resourceGroup, VNet = name, serviceEndpoints = subnets.properties.serviceEndpoints, compliant = (isnull(subnets.properties.serviceEndpoints) or array_length(subnets.properties.serviceEndpoints) == 0) | order by compliant asc"
+    },
+    {
+      "guid": "f2aad7e3-bb03-4adc-8606-4123d342a917",
+      "id": "D09.01",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Segmentation",
+      "severity": "High",
+      "text": "Use at least a /27 prefix for your Gateway subnets.",
+      "link": "https://learn.microsoft.com/azure/expressroute/expressroute-howto-add-gateway-resource-manager#add-a-gateway",
+      "graph": "resources | where type=='microsoft.network/virtualnetworks' | project id,subnets=properties.subnets | mv-expand subnets | project id, subnetName = subnets.name, subnetPrefix = subnets.properties.addressPrefix | extend subnetPrefixLength = split(subnetPrefix, '/')[1] | where subnetName == 'GatewaySubnet' | extend compliant = (subnetPrefixLength <= 27) | distinct id, compliant"
+    },
+    {
+      "guid": "11deb39d-8299-4e47-bbe0-0fb5a36318a8",
+      "id": "D09.02",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Segmentation",
+      "severity": "High",
+      "text": "Don't rely on the NSG inbound default rules using the VirtualNetwork service tag to limit connectivity.",
+      "link": "https://learn.microsoft.com/azure/virtual-network/service-tags-overview#available-service-tags",
+      "graph": "resources | where type=='microsoft.network/networksecuritygroups' | mvexpand properties.securityRules | project id,name,ruleAction=properties_securityRules.properties.access,rulePriority=properties_securityRules.properties.priority,ruleDst=properties_securityRules.properties.destinationAddressPrefix,ruleSrc=properties_securityRules.properties.sourceAddressPrefix,ruleProt=properties_securityRules.properties.protocol,ruleDirection=properties_securityRules.properties.direction,rulePort=properties_securityRules.properties.destinationPortRange | summarize StarDenies=countif(ruleAction=='Deny' and ruleDst=='*' and ruleSrc=='*' and ruleProt=='*' and rulePort=='*') by id,tostring(ruleDirection) | where ruleDirection == 'Inbound' | project id,compliant=(StarDenies>0) | union (resources | where type=='microsoft.network/networksecuritygroups' | where array_length(properties.securityRules)==0 | extend compliant=false | project id,compliant)"
+    },
+    {
+      "guid": "872e52e3-611c-4c58-a5a4-b1511e43a58a",
+      "id": "D09.04",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Segmentation",
+      "severity": "Medium",
+      "text": "Use NSGs to help protect traffic across subnets, as well as east/west traffic across the platform (traffic between landing zones).",
+      "link": "https://learn.microsoft.com/azure/cloud-adoption-framework/ready/azure-best-practices/plan-for-landing-zone-network-segmentation",
+      "graph": "resources | where type == 'microsoft.network/virtualnetworks' | mv-expand subnet = properties.subnets | where subnet.name !in~ ('GatewaySubnet', 'AzureFirewallSubnet', 'AzureFirewallManagementSubnet', 'RouteServerSubnet') | extend compliant = iff(isnotnull(subnet.properties.networkSecurityGroup.id), true, false) | project id, subnetName = subnet.name, vnetName = name, NSG = subnet.properties.networkSecurityGroup.id, compliant"
+    },
+    {
+      "guid": "dfe237de-143b-416c-91d7-aa9b64704489",
+      "id": "D09.06",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Segmentation",
+      "severity": "Medium",
+      "text": "Enable VNet Flow Logs and feed them into Traffic Analytics to gain insights into internal and external traffic flows.",
+      "link": "https://learn.microsoft.com/azure/network-watcher/vnet-flow-logs-overview",
+      "graph": "resources | where type =~ 'Microsoft.Network/virtualnetworks' | project subscriptionId, lowerCaseVNetId = tolower(id) | join kind = leftouter (    resources    | where type =~ 'microsoft.network/networkwatchers/flowlogs' and properties.enabled == true and properties.provisioningState =~ 'succeeded'    | where properties.targetResourceId contains '/Microsoft.Network/virtualNetworks/'    | project flowlogId = id, trafficAnalyticsEnabled = properties.flowAnalyticsConfiguration.networkWatcherFlowAnalyticsConfiguration.enabled, lowerCaseTargetVNetId = tolower(properties.targetResourceId)    )    on $left.lowerCaseVNetId == $right.lowerCaseTargetVNetId | extend compliant = iff(isnotempty(lowerCaseTargetVNetId), true, false) | project id = lowerCaseVNetId, flowlogId, trafficAnalyticsEnabled, compliant"
+    },
+    {
+      "guid": "0390417d-53dc-44d9-b3f4-c8832f359b41",
+      "id": "D09.07",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Segmentation",
+      "severity": "Medium",
+      "text": "Do not implement more than 900 NSG rules per NSG, due to the limit of 1000 rules.",
+      "link": "https://learn.microsoft.com/azure/azure-resource-manager/management/azure-subscription-service-limits",
+      "graph": "resources | where type == 'microsoft.network/networksecuritygroups' | project id, rules = array_length(properties.securityRules) | project id, compliant = (rules < 900)"
+    },
+    {
+      "guid": "7d5d1e4e-6146-458d-9558-fd77249b8211",
+      "id": "D10.03",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Virtual WAN",
+      "severity": "High",
+      "text": "For outbound Internet traffic protection and filtering, deploy Azure Firewall in secured hubs.",
+      "link": "https://learn.microsoft.com/azure/virtual-wan/howto-firewall",
+      "graph": "resources | where type=='microsoft.network/virtualhubs' | extend compliant = isnotnull(properties.azureFirewall.id) | project id, compliant"
+    },
+    {
+      "guid": "727c77e1-b9aa-4a37-a024-129d042422c1",
+      "id": "D10.06",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Virtual WAN",
+      "severity": "Medium",
+      "text": "Do not disable branch-to-branch traffic in Virtual WAN, unless these flows should be explicitly blocked.",
+      "link": "https://learn.microsoft.com/azure/virtual-wan/virtual-wan-faq#is-branch-to-branch-connectivity-allowed-in-virtual-wan",
+      "graph": "resources| where type =~ 'microsoft.network/virtualwans' | extend compliant= (properties.allowBranchToBranchTraffic == 'true') | distinct id,compliant"
+    },
+    {
+      "guid": "d49ac006-6670-4bc9-9948-d3e0a3a94f4d",
+      "id": "D10.07",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Virtual WAN",
+      "severity": "Medium",
+      "text": "Use AS-Path as hub routing preference, since it is more flexible than ExpressRoute or VPN.",
+      "link": "https://learn.microsoft.com/azure/virtual-wan/about-virtual-hub-routing-preference",
+      "graph": "resources | where type =~ 'microsoft.network/virtualhubs'| extend compliant= (properties.hubRoutingPreference =~ 'ASPath') | distinct id,compliant"
+    },
+    {
+      "guid": "9c75dfef-573c-461c-a698-68598595581a",
+      "id": "D10.09",
+      "category": "Network Topology and Connectivity",
+      "subcategory": "Virtual WAN",
+      "severity": "High",
+      "text": "Assign at least a /23 prefix to virtual hubs to ensure enough IP space is available.",
+      "link": "https://learn.microsoft.com/azure/virtual-wan/virtual-wan-faq#what-is-the-recommended-hub-address-space-during-hub-creation",
+      "graph": "resources | where type =~ 'microsoft.network/virtualhubs' | extend addressSpace = properties.addressPrefix | extend compliant= (toint(substring(addressSpace, indexof(addressSpace, '/') + 1)) < 23) | distinct name, id, compliant"
+    },
+    {
+      "guid": "a0477a20-9945-4bda-9333-4f2491163418",
+      "id": "G02.02",
+      "category": "Security",
+      "subcategory": "Encryption and keys",
+      "severity": "Medium",
+      "text": "Use different Azure Key Vaults for different applications, environments and regions to avoid transaction scale limits and restrict access to secrets.",
+      "link": "https://learn.microsoft.com/azure/key-vault/general/overview-throttling",
+      "graph": "ResourceContainers | where type=='microsoft.resources/subscriptions'| parse id with '/subscriptions/' SubscriptionID| project subscriptionId, SubscriptionName = name| join kind=leftouter (Resources| where type == 'microsoft.keyvault/vaults'| project id, name, subscriptionId) on subscriptionId| join kind= leftouter (Resources| where type == 'microsoft.keyvault/vaults'| summarize ResourceCount = count() by subscriptionId) on subscriptionId| extend RCount = iff(isnull(ResourceCount), 0, ResourceCount)| project-away ResourceCount| extend compliant = (RCount <> 1)"
+    },
+    {
+      "guid": "a56888b2-7e83-4404-bd31-b886528502d1",
+      "id": "G03.09",
+      "category": "Security",
+      "subcategory": "Operations",
+      "severity": "High",
+      "text": "Centralized threat detection with correlated logs -  consolidate security data in a central location where it can be correlated across various services via SIEM (security information and event management)",
+      "link": "https://learn.microsoft.com/azure/well-architected/security/monitor-threats#centralized-threat-detection-with-correlated-logs",
+      "graph": "resources| where type == 'microsoft.operationalinsights/workspaces'| extend wsid = properties.customerId| project workspaceResourceId = tolower(id), name, wsid| join (resources| where type == 'microsoft.operationsmanagement/solutions'| where name has 'SecurityInsights'| extend workspaceResourceId = tostring(tolower(properties.workspaceResourceId))| project workspaceResourceId | summarize ResourceCount = count() by workspaceResourceId) on workspaceResourceId| extend RCount = iff(isnull(ResourceCount), 0, ResourceCount)| project-away ResourceCount| extend compliant = (RCount <> 0)"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.tmp
+~$*
+.DS_Store
+# customer data must never be committed to this repository
+customer.yaml
+**/raw/
+**/findings/
+**/narrative/
+**/reports/
+**/package/

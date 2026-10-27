@@ -1,0 +1,169 @@
+{
+  "repository": "https://github.com/Azure/Azure-Proactive-Resiliency-Library-v2",
+  "commit": "771b1888b1b49ea6b1a2fe15a4d5b55ae46b7d82",
+  "commitDate": "2026-10-26",
+  "license": "MIT (see LICENSE)",
+  "note": "Only the reviewed whitelist queries are copied; see scripts/azinspect/waf/aprl/rules.py.",
+  "rules": [
+    {
+      "aprlGuid": "5a44bd30-ae6a-4b81-9b68-dc3a8ffca4d8",
+      "resourceType": "Microsoft.Cache/Redis",
+      "impact": "High",
+      "description": "Enable zone redundancy for Azure Cache for Redis",
+      "learnMoreLink": "https://learn.microsoft.com/azure/azure-cache-for-redis/cache-how-to-zone-redundancy",
+      "source": "azure-resources/Cache/Redis/kql/5a44bd30-ae6a-4b81-9b68-dc3a8ffca4d8.kql"
+    },
+    {
+      "aprlGuid": "41a22a5e-5e08-9647-92d0-2ffe9ef1bdad",
+      "resourceType": "Microsoft.Compute/virtualMachines",
+      "impact": "Medium",
+      "description": "IP Forwarding should only be enabled for Network Virtual Appliances",
+      "learnMoreLink": "https://learn.microsoft.com/azure/virtual-network/virtual-network-network-interface?tabs=network-interface-portal#enable-or-disable-ip-forwarding",
+      "source": "azure-resources/Compute/virtualMachines/kql/41a22a5e-5e08-9647-92d0-2ffe9ef1bdad.kql"
+    },
+    {
+      "aprlGuid": "3201dba8-d1da-4826-98a4-104066545170",
+      "resourceType": "Microsoft.Compute/virtualMachines",
+      "impact": "High",
+      "description": "Don't use A or B-Series VMs for production needing constant full CPU performance",
+      "learnMoreLink": "https://learn.microsoft.com/azure/virtual-machines/sizes-b-series-burstable",
+      "source": "azure-resources/Compute/virtualMachines/kql/3201dba8-d1da-4826-98a4-104066545170.kql"
+    },
+    {
+      "aprlGuid": "df0ff862-814d-45a3-95e4-4fad5a244ba6",
+      "resourceType": "Microsoft.Compute/virtualMachines",
+      "impact": "High",
+      "description": "Mission Critical Workloads should consider using Premium or Ultra Disks",
+      "learnMoreLink": "https://learn.microsoft.com/azure/virtual-machines/disks-types#disk-type-comparison",
+      "source": "azure-resources/Compute/virtualMachines/kql/df0ff862-814d-45a3-95e4-4fad5a244ba6.kql"
+    },
+    {
+      "aprlGuid": "eb005943-40a8-194b-9db2-474d430046b7",
+      "resourceType": "Microsoft.ContainerRegistry/registries",
+      "impact": "High",
+      "description": "Use Premium tier for critical production workloads",
+      "learnMoreLink": "https://learn.microsoft.com/azure/container-registry/container-registry-best-practices",
+      "source": "azure-resources/ContainerRegistry/registries/kql/eb005943-40a8-194b-9db2-474d430046b7.kql"
+    },
+    {
+      "aprlGuid": "63491f70-22e4-3b4a-8b0c-845450e46fac",
+      "resourceType": "Microsoft.ContainerRegistry/registries",
+      "impact": "Medium",
+      "description": "Enable zone redundancy",
+      "learnMoreLink": "https://learn.microsoft.com/azure/container-registry/zone-redundancy?toc=%2Fazure%2Freliability%2Ftoc.json&bc=%2Fazure%2Freliability%2Fbreadcrumb%2Ftoc.json&branch=main",
+      "source": "azure-resources/ContainerRegistry/registries/kql/63491f70-22e4-3b4a-8b0c-845450e46fac.kql"
+    },
+    {
+      "aprlGuid": "e7f0fd54-fba0-054e-9ab8-e676f2851f88",
+      "resourceType": "Microsoft.ContainerRegistry/registries",
+      "impact": "Low",
+      "description": "Enable soft delete policy",
+      "learnMoreLink": "https://learn.microsoft.com/azure/container-registry/container-registry-soft-delete-policy",
+      "source": "azure-resources/ContainerRegistry/registries/kql/e7f0fd54-fba0-054e-9ab8-e676f2851f88.kql"
+    },
+    {
+      "aprlGuid": "902c82ff-4910-4b61-942d-0d6ef7f39b67",
+      "resourceType": "Microsoft.ContainerService/managedClusters",
+      "impact": "High",
+      "description": "Enable the cluster auto-scaler on an existing cluster",
+      "learnMoreLink": "https://learn.microsoft.com/azure/aks/cluster-autoscaler?tabs=azure-cli",
+      "source": "azure-resources/ContainerService/managedClusters/kql/902c82ff-4910-4b61-942d-0d6ef7f39b67.kql"
+    },
+    {
+      "aprlGuid": "269a9f1a-6675-460a-831e-b05a887a8c4b",
+      "resourceType": "Microsoft.ContainerService/managedClusters",
+      "impact": "Low",
+      "description": "Back up Azure Kubernetes Service",
+      "learnMoreLink": "https://learn.microsoft.com/azure/backup/azure-kubernetes-service-cluster-backup",
+      "source": "azure-resources/ContainerService/managedClusters/kql/269a9f1a-6675-460a-831e-b05a887a8c4b.kql"
+    },
+    {
+      "aprlGuid": "005ccbbd-aeab-46ef-80bd-9bd4479412ec",
+      "resourceType": "Microsoft.ContainerService/managedClusters",
+      "impact": "High",
+      "description": "Configure user nodepool count",
+      "learnMoreLink": "https://learn.microsoft.com/azure/well-architected/service-guides/azure-kubernetes-service#design-checklist",
+      "source": "azure-resources/ContainerService/managedClusters/kql/005ccbbd-aeab-46ef-80bd-9bd4479412ec.kql"
+    },
+    {
+      "aprlGuid": "b2bad57d-7e03-4c0f-9024-597c9eb295bb",
+      "resourceType": "Microsoft.DBforPostgreSQL/flexibleServers",
+      "impact": "High",
+      "description": "Enable custom maintenance schedule",
+      "learnMoreLink": "https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-maintenance",
+      "source": "azure-resources/DBforPostgreSQL/flexibleServers/kql/b2bad57d-7e03-4c0f-9024-597c9eb295bb.kql"
+    },
+    {
+      "aprlGuid": "6293a3cc-6b4a-4c0f-9ea7-b8ae8d7dd3d5",
+      "resourceType": "Microsoft.DBforPostgreSQL/flexibleServers",
+      "impact": "High",
+      "description": "Configure storage auto-grow",
+      "learnMoreLink": "https://learn.microsoft.com/azure/postgresql/flexible-server/how-to-auto-grow-storage-portal",
+      "source": "azure-resources/DBforPostgreSQL/flexibleServers/kql/6293a3cc-6b4a-4c0f-9ea7-b8ae8d7dd3d5.kql"
+    },
+    {
+      "aprlGuid": "fbfef3df-04a5-41b2-a8fd-b8541eb04956",
+      "resourceType": "Microsoft.EventHub/namespaces",
+      "impact": "High",
+      "description": "Enable auto-inflate on Event Hub Standard tier",
+      "learnMoreLink": "https://learn.microsoft.com/azure/event-hubs/event-hubs-auto-inflate",
+      "source": "azure-resources/EventHub/namespaces/kql/fbfef3df-04a5-41b2-a8fd-b8541eb04956.kql"
+    },
+    {
+      "aprlGuid": "847a8d88-21c4-bc48-a94e-562206edd767",
+      "resourceType": "Microsoft.Network/applicationGateways",
+      "impact": "High",
+      "description": "Use Health Probes to detect backend availability",
+      "learnMoreLink": "https://learn.microsoft.com/azure/application-gateway/application-gateway-probe-overview",
+      "source": "azure-resources/Network/applicationGateways/kql/847a8d88-21c4-bc48-a94e-562206edd767.kql"
+    },
+    {
+      "aprlGuid": "6d82d042-6d61-ad49-86f0-6a5455398081",
+      "resourceType": "Microsoft.Network/loadBalancers",
+      "impact": "High",
+      "description": "Ensure the Backend Pool contains at least two instances",
+      "learnMoreLink": "https://learn.microsoft.com/azure/architecture/checklist/resiliency-per-service#azure-load-balancer",
+      "source": "azure-resources/Network/loadBalancers/kql/6d82d042-6d61-ad49-86f0-6a5455398081.kql"
+    },
+    {
+      "aprlGuid": "621dbc78-3745-4d32-8eac-9e65b27b7512",
+      "resourceType": "Microsoft.Network/loadBalancers",
+      "impact": "High",
+      "description": "Ensure Standard Load Balancer is zone-redundant",
+      "learnMoreLink": "https://learn.microsoft.com/azure/load-balancer/load-balancer-standard-availability-zones#zone-redundant",
+      "source": "azure-resources/Network/loadBalancers/kql/621dbc78-3745-4d32-8eac-9e65b27b7512.kql"
+    },
+    {
+      "aprlGuid": "23b2dfc7-7e5d-9443-9f62-980ca621b561",
+      "resourceType": "Microsoft.Network/routeTables",
+      "impact": "Medium",
+      "description": "Monitor changes in Route Tables with Azure Monitor",
+      "learnMoreLink": "https://learn.microsoft.com/azure/azure-monitor/essentials/activity-log?tabs=powershell",
+      "source": "azure-resources/Network/routeTables/kql/23b2dfc7-7e5d-9443-9f62-980ca621b561.kql"
+    },
+    {
+      "aprlGuid": "d37db635-157f-584d-9bce-4f6fc8c65ce5",
+      "resourceType": "Microsoft.Network/virtualNetworkGateways",
+      "impact": "High",
+      "description": "Connect ExpressRoute gateway with circuits from diverse peering locations",
+      "learnMoreLink": "https://learn.microsoft.com/azure/expressroute/designing-for-disaster-recovery-with-expressroute-privatepeering",
+      "source": "azure-resources/Network/virtualNetworkGateways/kql/d37db635-157f-584d-9bce-4f6fc8c65ce5.kql"
+    },
+    {
+      "aprlGuid": "3e115044-a3aa-433e-be01-ce17d67e50da",
+      "resourceType": "Microsoft.Network/virtualNetworkGateways",
+      "impact": "Medium",
+      "description": "Configure customer-controlled ExpressRoute gateway maintenance",
+      "learnMoreLink": "https://learn.microsoft.com/azure/expressroute/customer-controlled-gateway-maintenance#azure-portal-steps",
+      "source": "azure-resources/Network/virtualNetworkGateways/kql/3e115044-a3aa-433e-be01-ce17d67e50da.kql"
+    },
+    {
+      "aprlGuid": "f8c2e6d9-4b3a-45d6-b9e2-8e7f3a1c2d04",
+      "resourceType": "Microsoft.Network/virtualNetworkGateways",
+      "impact": "Medium",
+      "description": "Configure customer-controlled VPN gateway maintenance",
+      "learnMoreLink": "https://learn.microsoft.com/azure/vpn-gateway/customer-controlled-gateway-maintenance",
+      "source": "azure-resources/Network/virtualNetworkGateways/kql/f8c2e6d9-4b3a-45d6-b9e2-8e7f3a1c2d04.kql"
+    }
+  ]
+}

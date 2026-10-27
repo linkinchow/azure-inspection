@@ -1,0 +1,63 @@
+# 客户巡检配置。每个客户一份，放在客户工作目录根下，文件名 customer.yaml。
+# 不要把这个文件提交到插件仓库：里面有客户的租户和账号信息。
+
+customer:
+  name: 示例客户            # 报告标题里显示的客户名
+  fileName: Contoso          # 文件名前缀，只用字母、数字、- 和 _
+
+access:
+  tenantId: 00000000-0000-0000-0000-000000000000          # 客户租户 ID
+  readonlyAccount: readonly@contoso.onmicrosoft.com       # 只读账号的 UPN；用服务主体时填 appId
+  tokenSubscription: 00000000-0000-0000-0000-000000000000 # 只读账号能访问的任意一个订阅，用来取令牌（不会切换你的默认账号）
+
+scope:
+  includeSubscriptions: []   # 为空表示只读账号能看到的全部已启用订阅；也可以列订阅名称（支持 * 通配）或 ID
+  excludeSubscriptions: []   # 不纳入巡检的订阅，例如 ["sandbox-*"]
+
+rules:
+  # 环境判断：先看资源标签（environmentTagKeys），再看资源名称，最后看订阅名称；按顺序匹配，第一条命中即用。
+  # label 只能是 prod、test、dev、dr、unknown。判断结果在报告中写成“生产（推断）”等，并请客户确认。
+  environmentTagKeys: [environment, env]
+  environments:
+    - {label: test, match: '(^|[-_ ])(test|devtest|stg|staging|uat|qa)\d*([-_ ]|$)'}
+    - {label: dev,  match: '(^|[-_])(dev|sandbox|poc)\d*([-_]|$)'}
+    - {label: dr,   match: '(^|[-_])dr\d*([-_]|$)'}
+    - {label: prod, match: '(^|[-_])(prod|prd|production)\d*([-_]|$)'}
+    # appliesTo 可选：subscription（只匹配订阅名）、resource（只匹配资源名和标签）、any（默认）。
+    # 例如只想按订阅名前缀判断生产，不让同样的前缀误匹配资源名：
+    #  - {label: prod, match: '^(prd|live)[_-]', appliesTo: subscription}
+
+  # 可选：除通用关键字（mysql、redis、kafka、clickhouse、bigdata 等）外，名称表示“保存数据”的虚拟机。用于判断哪些虚拟机必须备份。
+  # statefulVmNames: 'etl|warehouse'
+
+  # 可选：客户自定义的管理或中间件端口（端口: 说明）。对公网开放时与 SSH、数据库端口一样列为问题。
+  # extraRiskyPorts: {9999: '内部管理后台'}
+
+  # 可选：有意对外公开（例如供下载分发）的存储账户名称（正则）。同类对比（05）不把它们的匿名访问列为偏差，改为请客户确认。
+  # publicStorageAccounts: '^contoso(public|download)'
+
+  # 业务线：按订阅名称、资源组名称或资源名称匹配，用于按业务汇总费用和问题。可留空。
+  businessLines: []
+  #  - {label: 电商, match: 'shop'}
+  #  - {label: 支付, match: 'pay'}
+
+  # 区域中文名（报告里显示）。未列出的区域显示原名。
+  regionLabels:
+    eastasia: 中国香港
+    japaneast: 日本东部
+    eastus: 美国东部
+    westus2: 美国西部 2
+    westeurope: 西欧
+    chinanorth3: 中国北部 3
+
+  # 客户自己的标准创建方式（同类资源对比时作为“标准做法”的线索），例如 Terraform 标签。可留空。
+  standardDeploymentTag: {}
+  #  key: managed_by
+  #  value: terraform
+
+  # 由供应商创建或托管的资源（对比时单独说明，建议与供应商一起对齐）。可留空。
+  vendorManaged: []
+  #  - {label: 某托管服务厂商, match: 'vendorx'}
+
+report:
+  currency: USD

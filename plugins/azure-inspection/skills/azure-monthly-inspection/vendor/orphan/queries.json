@@ -1,0 +1,147 @@
+{
+  "repository": "https://github.com/dolevshor/azure-orphan-resources",
+  "commit": "629aea4b21b26ab0df7554f79154d7695ee966b9",
+  "commitDate": "2026-10-26",
+  "license": "MIT (see LICENSE)",
+  "source": "Queries/orphan-resources-queries.md (KQL blocks copied verbatim)",
+  "queries": [
+    {
+      "key": "app-service-plans",
+      "title": "App Service Plans",
+      "description": "App Service plans without hosting Apps.",
+      "kql": "resources\n| where type =~ \"microsoft.web/serverfarms\"\n| where properties.numberOfSites == 0\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, Sku=sku.name, Tier=sku.tier, tags ,Details"
+    },
+    {
+      "key": "availability-set",
+      "title": "Availability Set",
+      "description": "Availability Sets that not associated to any Virtual Machine (VM) or Virtual Machine Scale Set (VMSS) and not related to Azure Site Recovery.",
+      "kql": "Resources\n| where type =~ 'Microsoft.Compute/availabilitySets'\n| where properties.virtualMachines == \"[]\"\n| where not(name endswith \"-asr\")\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, tags, Details"
+    },
+    {
+      "key": "managed-disks",
+      "title": "Managed Disks",
+      "description": "Managed Disks with 'Unattached' state and not related to Azure Site Recovery.",
+      "kql": "Resources\n| where type has \"microsoft.compute/disks\"\n| extend diskState = tostring(properties.diskState)\n| where (managedBy == \"\" and diskState != 'ActiveSAS') or (diskState == 'Unattached' and diskState != 'ActiveSAS')\n| where not(name endswith \"-ASRReplica\" or name startswith \"ms-asr-\" or name startswith \"asrseeddisk-\")\n| where (tags !contains \"kubernetes.io-created-for-pvc\") and tags !contains \"ASR-ReplicaDisk\" and tags !contains \"asrseeddisk\" and tags !contains \"RSVaultBackup\"\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, diskType=sku.name, diskSizeGB=properties.diskSizeGB, timeCreated=properties.timeCreated, tags, Details"
+    },
+    {
+      "key": "sql-elastic-pool",
+      "title": "SQL elastic pool",
+      "description": "SQL elastic pool without databases.",
+      "kql": "resources\n| where type =~ 'microsoft.sql/servers/elasticpools'\n| project elasticPoolId = tolower(id), Resource = id, resourceGroup, location, subscriptionId, tags, properties, Details = pack_all()\n| join kind=leftouter (resources\n| where type =~ 'Microsoft.Sql/servers/databases'\n| project id, properties\n| extend elasticPoolId = tolower(properties.elasticPoolId)) on elasticPoolId\n| summarize databaseCount = countif(id != '') by Resource, resourceGroup, location, subscriptionId, tostring(tags), tostring(Details)\n| where databaseCount == 0\n| project-away databaseCount"
+    },
+    {
+      "key": "public-ips",
+      "title": "Public IPs",
+      "description": "Public IPs that are not attached to any resource (VM, NAT Gateway, Load Balancer, Application Gateway, Public IP Prefix, etc.).",
+      "kql": "Resources\n| where type == \"microsoft.network/publicipaddresses\"\n| where properties.ipConfiguration == \"\" and properties.natGateway == \"\" and properties.publicIPPrefix == \"\"\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, Type=tostring(sku.name), AllocationMethod=tostring(properties.publicIPAllocationMethod), tags, Details"
+    },
+    {
+      "key": "network-interfaces",
+      "title": "Network Interfaces",
+      "description": "Network Interfaces that are not attached to any resource.",
+      "kql": "Resources\n| where type has \"microsoft.network/networkinterfaces\"\n| where isnull(properties.privateEndpoint)\n| where isnull(properties.privateLinkService)\n| where properties.hostedWorkloads == \"[]\"\n| where properties !has 'virtualmachine'\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, kind, tags, Details"
+    },
+    {
+      "key": "network-security-groups",
+      "title": "Network Security Groups",
+      "description": "Network Security Group (NSGs)] that are not attached to any network interface or subnet.",
+      "kql": "Resources\n| where type == \"microsoft.network/networksecuritygroups\" and isnull(properties.networkInterfaces) and isnull(properties.subnets)\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, tags, Details"
+    },
+    {
+      "key": "route-tables",
+      "title": "Route Tables",
+      "description": "Route Tables that not attached to any subnet.",
+      "kql": "resources\n| where type == \"microsoft.network/routetables\"\n| where isnull(properties.subnets)\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, tags, Details"
+    },
+    {
+      "key": "load-balancers",
+      "title": "Load Balancers",
+      "description": "Load Balancers without backend address pools and without Inbound NAT Rules.",
+      "kql": "resources\n| where type == \"microsoft.network/loadbalancers\"\n| where properties.backendAddressPools == \"[]\" and properties.inboundNatRules == \"[]\"\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, Type=tostring(sku.name), tags, Details"
+    },
+    {
+      "key": "front-door-waf-policy",
+      "title": "Front Door WAF Policy",
+      "description": "Front Door WAF Policy without Security Policy Links association.",
+      "kql": "resources\n| where type == \"microsoft.network/frontdoorwebapplicationfirewallpolicies\"\n| where properties.securityPolicyLinks == \"[]\"\n| extend Details = pack_all()\n| project Resource=id, resourceGroup, location, subscriptionId, Sku=sku.name, tags, Details"
+    },
+    {
+      "key": "traffic-manager-profiles",
+      "title": "Traffic Manager Profiles",
+      "description": "Traffic Manager without endpoints.",
+      "kql": "resources\n| where type == \"microsoft.network/trafficmanagerprofiles\"\n| where properties.endpoints == \"[]\"\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, tags, Details"
+    },
+    {
+      "key": "application-gateways",
+      "title": "Application Gateways",
+      "description": "Application Gateways without backend targets. (in backend pools)",
+      "kql": "resources\n| where type =~ 'microsoft.network/applicationgateways'\n| extend backendPoolsCount = array_length(properties.backendAddressPools),SKUName= tostring(properties.sku.name), SKUTier= tostring(properties.sku.tier),SKUCapacity=properties.sku.capacity,backendPools=properties.backendAddressPools , AppGwId = tostring(id)\n| project AppGwId, resourceGroup, location, subscriptionId, tags, name, SKUName, SKUTier, SKUCapacity\n| join (\n    resources\n    | where type =~ 'microsoft.network/applicationgateways'\n    | mvexpand backendPools = properties.backendAddressPools\n    | extend backendIPCount = array_length(backendPools.properties.backendIPConfigurations)\n    | extend backendAddressesCount = array_length(backendPools.properties.backendAddresses)\n    | extend backendPoolName  = backendPools.properties.backendAddressPools.name\n    | extend AppGwId = tostring(id)\n    | summarize backendIPCount = sum(backendIPCount) ,backendAddressesCount=sum(backendAddressesCount) by AppGwId\n) on AppGwId\n| project-away AppGwId1\n| where  (backendIPCount == 0 or isempty(backendIPCount)) and (backendAddressesCount==0 or isempty(backendAddressesCount))\n| extend Details = pack_all()\n| project subscriptionId, Resource=AppGwId, resourceGroup, location, SKUTier, SKUCapacity, tags, Details"
+    },
+    {
+      "key": "virtual-networks",
+      "title": "Virtual Networks",
+      "description": "Virtual Networks (VNETs) without subnets.",
+      "kql": "resources\n| where type == \"microsoft.network/virtualnetworks\"\n| where properties.subnets == \"[]\"\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, tags, Details"
+    },
+    {
+      "key": "subnets",
+      "title": "Subnets",
+      "description": "Subnets without Connected Devices or Delegation. (Empty Subnets)",
+      "kql": "resources\n| where type =~ \"microsoft.network/virtualnetworks\"\n| extend subnet = properties.subnets\n| mv-expand subnet\n| extend ipConfigurations = subnet.properties.ipConfigurations\n| extend delegations = subnet.properties.delegations\n| extend applicationGatewayIPConfigurations = subnet.properties.applicationGatewayIPConfigurations\n| where isnull(ipConfigurations) and delegations == \"[]\" and isnull(applicationGatewayIPConfigurations) \n| extend SubnetName = subnet.name, SubnetId = subnet.id\n| extend Details = pack_all()\n| project subscriptionId, SubnetName, vNetId=id, SubnetId ,resourceGroup, location, vNetName=name, Details"
+    },
+    {
+      "key": "nat-gateways",
+      "title": "NAT Gateways",
+      "description": "NAT Gateways that not attached to any subnet.",
+      "kql": "resources\n| where type == \"microsoft.network/natgateways\"\n| where isnull(properties.subnets)\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, Sku=tostring(sku.name), Tier=tostring(sku.tier), tags, Details"
+    },
+    {
+      "key": "ip-groups",
+      "title": "IP Groups",
+      "description": "IP Groups that not attached to any Azure Firewall.",
+      "kql": "resources\n| where type == \"microsoft.network/ipgroups\"\n| where properties.firewalls == \"[]\" and properties.firewallPolicies == \"[]\"\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, tags, Details"
+    },
+    {
+      "key": "private-dns-zones",
+      "title": "Private DNS zones",
+      "description": "Private DNS zones without Virtual Network Links.",
+      "kql": "resources\n| where type == \"microsoft.network/privatednszones\"\n| where properties.numberOfVirtualNetworkLinks == 0\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, NumberOfRecordSets=properties.numberOfRecordSets, tags, Details"
+    },
+    {
+      "key": "private-endpoints",
+      "title": "Private Endpoints",
+      "description": "Private Endpoints that are not connected to any resource.",
+      "kql": "resources\n| where type =~ \"microsoft.network/privateendpoints\"\n| extend connection = iff(array_length(properties.manualPrivateLinkServiceConnections) > 0, properties.manualPrivateLinkServiceConnections[0], properties.privateLinkServiceConnections[0])\n| extend subnetId = properties.subnet.id\n| extend subnetName = tostring(split(subnetId, \"/\")[-1])\n| extend subnetIdSplit = split(subnetId, \"/\")\n| extend vnetId = strcat_array(array_slice(subnetIdSplit,0,8), \"/\")\n| extend vnetName = tostring(split(vnetId, \"/\")[-1])\n| extend serviceId = tostring(connection.properties.privateLinkServiceId)\n| extend serviceIdSplit = split(serviceId, \"/\")\n| extend serviceName = tostring(serviceIdSplit[8])\n| extend serviceTypeEnum = iff(isnotnull(serviceIdSplit[6]), tolower(strcat(serviceIdSplit[6], \"/\", serviceIdSplit[7])), \"microsoft.network/privatelinkservices\")\n| extend stateEnum = tostring(connection.properties.privateLinkServiceConnectionState.status)\n| extend groupIds = tostring(connection.properties.groupIds[0])\n| where stateEnum == \"Disconnected\"\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, serviceName, serviceTypeEnum, groupIds, vnetId, vnetName, subnetId, subnetName, tags, Details"
+    },
+    {
+      "key": "virtual-network-gateways",
+      "title": "Virtual Network Gateways",
+      "description": "Virtual Network Gateways without Point-to-site configuration or Connections.",
+      "kql": "resources\n| where type =~ \"microsoft.network/virtualnetworkgateways\"\n| extend Details = pack_all()\n| extend SKU = tostring(properties.sku.name)\n| extend Tier = tostring(properties.sku.tier)\n| extend GatewayType = tostring(properties.gatewayType)\n| extend vpnClientConfiguration = properties.vpnClientConfiguration\n| extend Resource = id\n| join kind=leftouter (\n    resources\n    | where type =~ \"microsoft.network/connections\"\n    | mv-expand Resource = pack_array(properties.virtualNetworkGateway1.id, properties.virtualNetworkGateway2.id) to typeof(string)\n    | project Resource, connectionId = id, ConnectionProperties=properties\n    ) on Resource                  \n| where isempty(vpnClientConfiguration) and isempty(connectionId)\n| project subscriptionId, Resource, resourceGroup, location, GatewayType, SKU, Tier, tags, Details"
+    },
+    {
+      "key": "ddos-protections",
+      "title": "DDoS Protections",
+      "description": "DDoS protection without protected resources. (=without Virtual Networks accosiated)",
+      "kql": "resources\n| where type == \"microsoft.network/ddosprotectionplans\"\n| where isnull(properties.virtualNetworks)\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, tags, Details"
+    },
+    {
+      "key": "resource-groups",
+      "title": "Resource Groups",
+      "description": "Resource Groups without resources (including hidden types resources).",
+      "kql": "ResourceContainers\n | where type == \"microsoft.resources/subscriptions/resourcegroups\"\n | extend rgAndSub = strcat(resourceGroup, \"--\", subscriptionId)\n | join kind=leftouter (\n     Resources\n     | extend rgAndSub = strcat(resourceGroup, \"--\", subscriptionId)\n     | summarize count() by rgAndSub\n ) on rgAndSub\n | where isnull(count_)\n | extend Details = pack_all()\n | project subscriptionId, Resource=id, resourceGroup, location, tags ,Details"
+    },
+    {
+      "key": "api-connections",
+      "title": "API Connections",
+      "description": "API Connections that not related to any Logic App.",
+      "kql": "resources\n| where type =~ 'Microsoft.Web/connections'\n| project subscriptionId, Resource = id , apiName = name, resourceGroup, tags, location\n| join kind = leftouter (\n    resources\n    | where type == 'microsoft.logic/workflows'\n    | extend resourceGroup, location, subscriptionId, properties\n    | extend var_json = properties[\"parameters\"][\"$connections\"][\"value\"]\n\t| mvexpand var_connection = var_json\n    | where notnull(var_connection)\n    | extend connectionId = extract(\"connectionId\\\":\\\"(.*?)\\\"\", 1, tostring(var_connection))\n    | project connectionId, name\n    )\n    on $left.Resource == $right.connectionId\n| where connectionId == \"\"\n| extend Details = pack_all()\n| project subscriptionId, Resource, resourceGroup, location, tags, Details"
+    },
+    {
+      "key": "certificates",
+      "title": "Certificates",
+      "description": "Expired certificates.",
+      "kql": "resources\n| where type == 'microsoft.web/certificates'\n| extend expiresOn = todatetime(properties.expirationDate)\n| where expiresOn <= now()\n| extend Details = pack_all()\n| project subscriptionId, Resource=id, resourceGroup, location, Details"
+    }
+  ]
+}

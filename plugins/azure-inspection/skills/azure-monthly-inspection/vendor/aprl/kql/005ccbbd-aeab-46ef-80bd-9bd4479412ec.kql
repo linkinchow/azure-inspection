@@ -1,0 +1,18 @@
+// Azure Resource Graph Query
+// Returns each AKS cluster with nodepools that have user nodepools with less than 2 nodes
+resources
+| where type =~ "Microsoft.ContainerService/managedClusters"
+| mv-expand agentPoolProfile = properties.agentPoolProfiles
+| extend
+    taints = tostring(parse_json(agentPoolProfile.nodeTaints)),
+    nodePool = tostring(parse_json(agentPoolProfile.name))
+| where taints !has "CriticalAddonsOnly=true:NoSchedule"
+| where (agentPoolProfile.enableAutoScaling == true and agentPoolProfile["minCount"] < 2) or (agentPoolProfile.enableAutoScaling == false and agentPoolProfile["count"] < 2)
+| project
+    recommendationId = "005ccbbd-aeab-46ef-80bd-9bd4479412ec",
+    name,
+    id,
+    tags,
+    param1 = strcat("nodePoolName: ", nodePool),
+    param2 = strcat("enableAutoScaling: ", agentPoolProfile.enableAutoScaling),
+    param3 = iff(tobool(agentPoolProfile.enableAutoScaling), strcat("nodePoolMinNodeCount: ", agentPoolProfile["minCount"]), strcat("nodePoolNodeCount: ", agentPoolProfile["count"]))
