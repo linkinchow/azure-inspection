@@ -114,3 +114,7 @@ plugins/azure-inspection/skills/azure-monthly-inspection/
   scripts/azinspect_cli.py                      命令入口
   templates/customer.example.yaml               客户配置模板
 ```
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。`vendor/` 下的微软规则库各自保留原 MIT 许可证。

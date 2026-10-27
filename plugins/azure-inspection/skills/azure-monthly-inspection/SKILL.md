@@ -1,6 +1,7 @@
 ---
 name: azure-monthly-inspection
 description: Read-only monthly Azure inspection for a customer tenant, producing Chinese customer reports (cost review, VM rightsizing, reliability, security, operational excellence, performance, peer comparison, summary). Use when the user asks to run or prepare an Azure 月度巡检/成本巡检/WAF 巡检/健康检查 for a customer, set up a new customer for inspection, check read-only access, or quality-check inspection reports before delivery.
+license: MIT
 metadata:
   version: 0.6.3
 ---

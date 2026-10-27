@@ -33,10 +33,10 @@ class WriteRoleTests(unittest.TestCase):
 class RegionTests(unittest.TestCase):
     def test_default_and_override(self):
         cfg = config.load(TEMPLATE)
-        self.assertEqual(cfg.region('UAENorth'), '阿联酋北部')
+        self.assertEqual(cfg.region('JapanEast'), '日本东部')
         self.assertEqual(cfg.region('somewhere'), 'somewhere')
-        cfg.region_labels['uaenorth'] = '迪拜'
-        self.assertEqual(cfg.region('uaenorth'), '迪拜')
+        cfg.region_labels['japaneast'] = '东京'
+        self.assertEqual(cfg.region('japaneast'), '东京')
 
 
 class ArchitectureTests(unittest.TestCase):
@@ -46,14 +46,14 @@ class ArchitectureTests(unittest.TestCase):
             ws = io.Workspace(d, '2026-09')
             ws.create()
             io.write_json(ws.raw('waf/scope.json'), {'subscriptions': [{'id': SUB, 'name': 'app-prod', 'state': 'Enabled'}]})
-            rows = [{'id': f'/x/{i}', 'type': t, 'subscriptionId': SUB, 'location': 'uaenorth'} for i, t in enumerate(
+            rows = [{'id': f'/x/{i}', 'type': t, 'subscriptionId': SUB, 'location': 'japaneast'} for i, t in enumerate(
                 ['microsoft.containerservice/managedclusters', 'microsoft.compute/virtualmachines', 'microsoft.compute/virtualmachines',
                  'microsoft.network/virtualnetworks', 'microsoft.network/privateendpoints'])]
             io.write_json(ws.raw('waf/operations/arg/resources.json'), {'rows': rows, 'error': None})
             arch = architecture.summary(ws, cfg)
             lines = architecture.section(arch, {'architecture': '业务运行在 AKS 上。'})
             text = '\n'.join(lines)
-            self.assertIn('|app-prod|5|阿联酋北部|AKS 集群 1 个、虚拟机 2 个|', text)
+            self.assertIn('|app-prod|5|日本东部|AKS 集群 1 个、虚拟机 2 个|', text)
             self.assertIn('虚拟网络 1 个', text)
             self.assertIn('Azure 中没有专线', text)
             self.assertTrue(text.endswith('业务运行在 AKS 上。'))
