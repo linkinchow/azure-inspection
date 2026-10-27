@@ -11,6 +11,7 @@ from .core import charts as cs
 from .core.charts import clear as clear_charts
 from .core.fmt_md import format_and_check
 from .core.io import read_json, write_json
+from .waf.checks import CHECKS
 from .waf.report import default_top_issues, recommendation_text
 
 GROUPS = ['可靠性', '安全', '卓越运营', '性能效率']
@@ -37,7 +38,7 @@ def gather(ws, period):
     f = ws.month_dir('findings')
     d = {'model': _load(f / 'cost' / 'model.json'), 'vm': _load(f / 'vm' / 'summary.json'), 'prices': _load(f / 'vm' / 'price-summary.json'),
          'forecast': _load(ws.raw('cost/supplement/forecast.json')), 'r03': _load(f / 'waf' / 'report-03.json'),
-         'r04': _load(f / 'waf' / 'report-04.json'), 'peer': _load(f / 'peer' / 'baseline.json'), 'actions': _load(f / 'cost' / 'actions.json')}
+         'r04': _load(f / 'waf' / 'report-04.json'), 'peer': _load(f / 'peer' / 'baseline.json'), 'peerReport': _load(f / 'peer' / 'report.json'), 'actions': _load(f / 'cost' / 'actions.json')}
     d['narrative'] = {code: _load(ws.month_dir('narrative') / f'{code}.json') or {} for code in ('01', '03', '04', '05')}
     waf = []
     for p in sorted((f / 'waf').glob('*.json')):
@@ -89,7 +90,8 @@ def default_immediate(d):
     for code in ('03', '04'):
         issues += (d['narrative'][code].get('topIssues') or [])[:5]
     if not issues:
-        issues = default_top_issues(sorted([f for f in d['waf'] if f['severity'] == '高'], key=lambda f: f['check']))
+        high = sorted([f for f in d['waf'] if f['severity'] == '高'], key=lambda f: f['check'])
+        issues = default_top_issues([{**f, 'checkName': CHECKS.get(f['check'], f['check'])} for f in high])
     return issues[:10]
 
 
@@ -151,9 +153,9 @@ def markdown(cfg, period, d, n, pngs, scope):
     if tracked and not tracked.get('first'):
         c = tracking_summary(tracked)['all']
         rows.append([f'与 {tracked["previous"]} 相比', '，'.join(f'{k} {c[k]} 项' for k in c)])
-    peer = d['peer'] or {}
-    if peer.get('summary', {}).get('deviations'):
-        rows.append(['同类资源配置对比', f'{peer["summary"]["deviations"]} 处配置偏差'])
+    peer = d['peerReport'] or {}
+    if peer.get('deviations'):
+        rows.append(['同类资源配置对比', f'{peer["deviations"]} 处配置偏差，其中高风险 {peer.get("highImpact", 0)} 处'])
     lines += table(['项目', '结果'], rows, ['---', '---'])
     if pngs.get('pillars'):
         lines += ['', f'![各支柱发现的问题数量]({pngs["pillars"]})']

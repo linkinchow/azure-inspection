@@ -17,7 +17,6 @@ def format_prose(text: str) -> str:
     text = re.sub(r'([' + CJK + r'])([A-Za-z0-9])', r'\1 \2', text)
     text = re.sub(r'([A-Za-z0-9])([' + CJK + r'])', r'\1 \2', text)
     text = re.sub(r'(?<=[A-Za-z0-9' + CJK + r'])\s*([×＝≠≤÷＋])\s*(?=[A-Za-z0-9' + CJK + r'])', r' \1 ', text)
-    text = re.sub(r'(?<=[A-Za-z0-9])\s*=\s*(?=[A-Za-z0-9])', ' = ', text)
     text = re.sub(r'([，。；：、])\s+(?=[^\s])', r'\1', text)
     return fix_bold(text)
 

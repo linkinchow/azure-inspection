@@ -60,5 +60,25 @@ class ArchitectureTests(unittest.TestCase):
             self.assertEqual(architecture.section(None, {}), [])
 
 
+
+class SshExposureTests(unittest.TestCase):
+    def test_password_finding_states_port_22_result(self):
+        from azinspect.waf.pipeline import SSH_PENDING, resolve_ssh_exposure
+        with tempfile.TemporaryDirectory() as d:
+            ws = io.Workspace(d, '2026-09')
+            ws.create()
+            fdir = ws.month_dir('findings') / 'waf'
+            io.write_json(fdir / 'security_network.json', {'findings': [{'check': 'S-N3', 'evidence': {'vmsWithDirectPublicIp': [
+                {'endpoint': 'VM ops-01', 'internetReachableMgmtPorts': []}, {'endpoint': 'VM ops-02', 'internetReachableMgmtPorts': [22]}]}}]})
+            io.write_json(fdir / 'security_identity.json', {'findings': [{'check': 'S-I8', 'finding': '有被暴力破解的风险' + SSH_PENDING,
+                'evidence': {'vms': [{'name': 'ops-01'}, {'name': 'ops-02'}, {'name': 'ops-03'}]}}]})
+            resolve_ssh_exposure(ws, log=lambda *_: None)
+            text = io.read_json(fdir / 'security_identity.json')['findings'][0]['finding']
+        self.assertIn('ops-02 的 22 端口对公网开放', text)
+        self.assertIn('按当前 NSG，ops-01 的 22 端口没有对公网开放', text)
+        self.assertIn('ops-03 的 22 端口是否对公网开放未能核对', text)
+        self.assertNotIn('以网络检查结果为准', text)
+
+
 if __name__ == '__main__':
     unittest.main()
