@@ -20,7 +20,19 @@ def extra_note(vm, notes):
     return out
 
 
-def combined_rows(vms, recommendations, pools, catalog, extra_notes=None):
+COVERED_SHARE = 0.5   # at least half of the month's amortized cost under RI/SP
+
+
+def committed_share(record, coverage):
+    """Share of the review month's amortized cost covered by RI/SP: VMSS instances are billed on the scale set."""
+    if coverage is None:
+        return None
+    rid = str(record.get('pool') or record['vmId']).lower()
+    item = coverage.get(rid)
+    return item['share'] if item else 0.0
+
+
+def combined_rows(vms, recommendations, pools, catalog, extra_notes=None, coverage=None, month_label='巡检月份'):
     lookup = {v['id'].lower(): v for v in vms}
     if len(lookup) != len(vms):
         raise ValueError('Duplicate case-insensitive VM ARM IDs in inventory')
@@ -50,6 +62,10 @@ def combined_rows(vms, recommendations, pools, catalog, extra_notes=None):
         note = customer_note(record, vm, pool_name)
         if missing:
             note += '；' + '/'.join(missing) + '无对应官网报价'
+        share = committed_share(record, coverage)
+        if changing and share is not None and share >= COVERED_SHARE:
+            note += (f'；{month_label}该机器 {share:.0%} 的费用由 RI/SP 覆盖：降配不会直接减少预付费用，'
+                     '需先交换预留或调整覆盖范围，节省在此之后才能实现')
         for extra in extra_note(vm, extra_notes):
             note += '；' + extra
         rows.append({
@@ -65,7 +81,7 @@ def combined_rows(vms, recommendations, pools, catalog, extra_notes=None):
             'currentCores': record.get('currentCores'), 'currentMemoryGiB': record.get('currentMemoryGiB'),
             'currentIO': current_io, 'afterIO': after_io,
             'currentMonthlyPAYG': current_month, 'costs': costs, 'quotes': quotes,
-            'monthlyRightsizingSavings': record['monthlySavingsUSD'], 'note': note, 'poolName': pool_name,
+            'monthlyRightsizingSavings': record['monthlySavingsUSD'], 'note': note, 'poolName': pool_name, 'committedShare': share,
             'state': '运行中' if running else '已释放计算资源' if deallocated else '未确认释放（' + str(record.get('state', 'Unknown')) + '）',
             'rawPowerState': record.get('state', 'Unknown'), 'deallocated': deallocated, 'osPriceBasis': os_price_basis(vm),
             'licenseType': vm.get('licenseType'), 'metricsSource': vm.get('metricsSource'),

@@ -18,6 +18,7 @@ from ..core.fmt_md import format_and_check
 from ..core.io import read_json, write_json
 from . import charts as cost_charts
 from .orphan import label as orphan_label
+from . import commitments as cm
 from . import views as sr
 
 PERCENT = '0.0%;(0.0%);"-"'
@@ -131,7 +132,50 @@ def unreadable_text(model):
     return f'另有{sum(map(len, groups.values()))}个订阅的费用无法读取：' + '；'.join(parts)
 
 
-def action_items(ws, model, sup, labels, narrative, period):
+TERMS = {'P1Y': '1 年', 'P3Y': '3 年', 'P5Y': '5 年'}
+
+
+def commitment_spec(c):
+    if c.get('sku') or c['kind'] != '节省计划':
+        return c.get('sku')
+    amount = c.get('commitment')
+    if not isinstance(amount, (int, float)):
+        return None
+    grain = '每小时' if c.get('grain') == 'Hourly' else f"每{c.get('grain') or ''}"
+    return f"{grain}承诺 {c.get('currency') or ''} {amount:,.2f}".replace('  ', ' ')
+
+
+def commitment_text(cs, labels):
+    """Plain sentence on RI/SP coverage, existing orders and Azure's recommendations; None without data."""
+    if not cs:
+        return None
+    parts = []
+    total = sum(cs['byModel'].values())
+    covered = sum(v for k, v in cs['byModel'].items() if k in cm.COMMITTED)
+    if cs['pricingRead'] and total > 0:
+        parts.append(f'{labels["cur"]}分摊费用中 {covered / total:.1%} 由 RI/SP 覆盖' if covered > 0
+                     else f'{labels["cur"]}费用全部按需计费，没有使用 RI/SP')
+    if cs['reservationsRead'] or cs['savingsPlansRead']:
+        items = cs['commitments']
+        low = sum(1 for c in items if any('未用满' in n for n in c['notes']))
+        soon = sum(1 for c in items if any('到期' in n for n in c['notes']))
+        parts.append(f'现有 {sum(1 for c in items if c["kind"] == "预留实例")} 个预留、{sum(1 for c in items if c["kind"] == "节省计划")} 个节省计划'
+                     + (f'，其中 {low} 个近 30 天未用满' if low else '') + (f'，{soon} 个即将到期' if soon else ''))
+    else:
+        parts.append('现有 RI/SP 订单读取权限不足，未能核对使用率和到期时间')
+    recs, totals = cs['recommendations'], cs.get('recommendationTotals') or {}
+    if recs:
+        ri, sp = totals.get('预留实例|P1Y', 0), totals.get('节省计划|P1Y', 0)
+        options = [f'购买 1 年期预留实例约节省 USD {ri:,.2f}' if ri else None, f'购买 1 年期节省计划约节省 USD {sp:,.2f}' if sp else None]
+        parts.append('Azure 基于过去 30 天用量估算，' + '，'.join(x for x in options if x) + '（每 30 天，按当前用量、未计入降配；'
+                     '预留实例和节省计划覆盖同一部分用量，只能选其一，3 年期方案见 Excel）' if any(options) else
+                     f'Azure 给出 {len(recs)} 项 3 年期购买建议，见 Excel')
+    elif cs['recommendationsRead']:
+        parts.append('Azure 没有给出购买建议')
+    return '；'.join(parts)
+
+
+def action_items(ws, model, sup, labels, narrative, period, cs=None):
     Lp, Lc = labels['prev'], labels['cur']
     pairs = {(p['subscriptionName'], p['serviceName']): p for p in sup['drivers']['pairs']}
     items = []
@@ -150,7 +194,8 @@ def action_items(ws, model, sup, labels, narrative, period):
                       'recommendation': '按逐台建议先小范围调整，确认关键任务和同池应用资源要求；费用估算仅用于后续决策',
                       'saving': s['monthlyPotentialSavingsUSD'], 'owner': '云平台/业务负责人', 'status': '待审批，尚未实施',
                       'evidencePeriod': f'{span}用量与当前规格；不是{Lc}已实现节省'})
-    items.append({'topic': 'RI/SP', 'scope': '长期稳定计算、数据库、缓存及可预留存储费用', 'finding': '已有按服务列表价对比；是否有闲置承诺需结合现有订单及使用记录核对',
+    items.append({'topic': 'RI/SP', 'scope': '长期稳定计算、数据库、缓存及可预留存储费用',
+                  'finding': commitment_text(cs, labels) or '已有按服务列表价对比；是否有闲置承诺需结合现有订单及使用记录核对',
                   'recommendation': '先确定调整后的长期用量，再比较适用的1年/3年RI和SP；不要按全年满配估算直接采购',
                   'saving': None, 'owner': '采购/财务/云平台', 'status': '待核对现有订单和业务计划', 'evidencePeriod': f'当前采购建议，非{Lc}采购结果'})
     rr = model.get('resourceReview') or {}
@@ -170,7 +215,8 @@ def action_items(ws, model, sup, labels, narrative, period):
     gaps = []
     if unreadable(model):
         gaps.append(unreadable_text(model).replace('另有', ''))
-    if any(c.get('status') == 'not-verified' for c in rr.get('commitmentStatus', [])):
+    if (cs and not (cs['reservationsRead'] or cs['savingsPlansRead'])) or \
+            (not cs and any(c.get('status') == 'not-verified' for c in rr.get('commitmentStatus', []))):
         gaps.append('RI/SP订单读取权限不足')
     gaps.append(f'未取得{Lc}月度预算目标和资源负责人')
     items.append({'topic': '数据与权限', 'scope': '无法读取的订阅、RI/SP订单、预算和资源负责人',
@@ -198,7 +244,9 @@ def build(ws, cfg, period, narrative=None, log=print):
     fdir, out = ws.month_dir('findings') / 'cost', ws.month_dir('reports')
     tot = model['comparableTotals']
     tot['amortizedCur'] = model['totals']['amortizedCur']
-    actions = action_items(ws, model, sup, labels, narrative, period)
+    raw_commitments = cm.load(ws)
+    cs = cm.summary(raw_commitments) if raw_commitments else None
+    actions = action_items(ws, model, sup, labels, narrative, period, cs)
     write_json(fdir / 'model.json', model)
     write_json(fdir / 'actions.json', actions)
     wb, expected = Workbook(), {}
@@ -292,6 +340,25 @@ def build(ws, cfg, period, narrative=None, log=print):
         am.append(['分摊费用/服务', r['serviceName'], r['cost']])
     for r in model['pricingModels']:
         am.append(['实际费用/计价方式', r['pricingModel'], r['cost']])
+    if cs:
+        for k, v in sorted(cs['byModel'].items(), key=lambda kv: -kv[1]):
+            am.append(['分摊费用/计价方式（按资源汇总）', k, v])
+        ri = sheet('RI与SP', '现有预留实例（RI）和节省计划（SP）', '使用率来自 Azure；近 30 天低于 80% 视为未用满，90 天内到期单独提示。读不到订单时不代表没有购买。',
+                   ['类别', '名称', '规格或承诺', '范围', '期限', '近7天使用率%', '近30天使用率%', '到期日期', '提示'])
+        for c in cs['commitments']:
+            spec = commitment_spec(c)
+            u = c.get('utilization') or {}
+            ri.append([c['kind'], c.get('name'), spec, c.get('scope'), TERMS.get(c.get('term'), c.get('term')), u.get('days7'), u.get('days30'), c.get('expiryDate'),
+                       '；'.join(c['notes']) or '正常'])
+        if not cs['commitments']:
+            ri.append(['说明', '预留订单' + ('读取成功，没有预留' if cs['reservationsRead'] else '读取权限不足，未能核对'), None, None, None, None, None, None,
+                       '节省计划' + ('读取成功，没有节省计划' if cs['savingsPlansRead'] else '读取权限不足，未能核对')])
+        rs = sheet('Azure购买建议', 'Azure 基于过去 30 天用量的 RI/SP 购买建议', '金额为 Azure 估算的 30 天费用和节省（约等于每月），按当前用量计算，未考虑降配；'
+                   '先降配并稳定后再按新的用量采购。同一订阅的 1 年和 3 年、预留实例和节省计划是互相替代的方案，节省不能相加。',
+                   ['类型', '订阅', '资源类型', '规格', '区域', '期限', '建议数量或每小时承诺', '30天按需费用USD', '购买后费用USD', '估算节省USD（30天）'])
+        for r in cs['recommendations']:
+            rs.append([r['kind'], r['subscription'], r.get('resourceType'), r.get('sku'), r.get('region'), TERMS.get(r.get('term'), r.get('term')), r.get('quantity'),
+                       r.get('costWithout'), r.get('costWith'), r.get('saving')])
     aw = sheet('建议与跟踪', '建议清单和执行跟踪', '预计节省不是已实现节省；当前检查建议与历史费用分别标注。',
                ['类别', '范围', '发现', '建议怎么做', '预计每月节省USD', '负责人', '状态', '证据时间', '客户决定', '实施日期', '实际节省USD', '业务验收结果'])
     for a in actions:
@@ -343,8 +410,14 @@ def build(ws, cfg, period, narrative=None, log=print):
                ['实际效果', '尚未提供执行及验收记录，不填已实现节省'], ['WAF参考', 'https://learn.microsoft.com/en-us/azure/well-architected/cost-optimization/checklist']]:
         coverage.append(r_)
     coverage.append(['预算读取', budget_text(model, labels)])
-    for c in rr.get('commitmentStatus', []):
-        coverage.append(['RI/SP订单读取', c.get('kind', '') + ('：读取权限不足，未能核对现有订单和使用率' if c.get('status') == 'not-verified' else '：' + c.get('status', '未核对'))])
+    if cs:
+        coverage.append(['RI/SP 覆盖（按资源）', f'{cs["pricingRead"]} 个有费用的订阅读取成功（{Lc}分摊费用，按资源和计价方式）'])
+        coverage.append(['RI/SP 现有订单', ('预留：读取成功；' if cs['reservationsRead'] else '预留：读取权限不足，未能核对使用率和到期；')
+                         + ('节省计划：读取成功' if cs['savingsPlansRead'] else '节省计划：读取权限不足，未能核对')])
+        coverage.append(['Azure 购买建议', f'{cs["recommendationsRead"]}/{cs["recommendationsTried"]} 次查询成功，共 {len(cs["recommendations"])} 条建议'])
+    else:
+        for c in rr.get('commitmentStatus', []):
+            coverage.append(['RI/SP订单读取', c.get('kind', '') + ('：读取权限不足，未能核对现有订单和使用率' if c.get('status') == 'not-verified' else '：' + c.get('status', '未核对'))])
     for r_ in sr.coverage_rows(sup, model, labels):
         coverage.append(r_)
     if disabled:
@@ -404,7 +477,7 @@ def build(ws, cfg, period, narrative=None, log=print):
     for name, col in [('数据库与缓存用量', 13), ('变化原因拆解', 12), ('日志摄取与保留', 8), ('存储容量与层级', 12)]:
         wb[name].column_dimensions[L(col)].width = 80
     order = ['月度总览', '图表', '订阅对比', '业务组对比', '服务对比', '区域对比', '变化原因拆解', '主要计量变化', '增长与下降来源', '资源组对比', f'{Lc}资源费用', '每日费用',
-             f'{Ln}费用预测', '分摊与计价方式', '建议与跟踪', f'{Lc}VM使用情况', '数据库与缓存用量', '存储容量与层级', '日志摄取与保留', '当前闲置资源待确认', '预算检查', '数据覆盖与说明']
+             f'{Ln}费用预测', '分摊与计价方式', 'RI与SP', 'Azure购买建议', '建议与跟踪', f'{Lc}VM使用情况', '数据库与缓存用量', '存储容量与层级', '日志摄取与保留', '当前闲置资源待确认', '预算检查', '数据覆盖与说明']
     wb._sheets = [wb[n] for n in order if n in wb.sheetnames]
     aw.column_dimensions['B'].width, aw.column_dimensions['C'].width, aw.column_dimensions['D'].width, aw.column_dimensions['H'].width = 60, 85, 100, 65
     for i in range(4, aw.max_row + 1):
@@ -414,7 +487,7 @@ def build(ws, cfg, period, narrative=None, log=print):
     wb.calculation = CalcProperties(fullCalcOnLoad=True)
     wb.save(path)
     write_json(fdir / 'expected-formulas.json', expected)
-    md = markdown(cfg, period, labels, model, actions, sup, pngs, narrative)
+    md = markdown(cfg, period, labels, model, actions, sup, pngs, narrative, cs)
     (out / f'{stem(period)}.md').write_text(md, encoding='utf-8')
     result = verify(path, expected, fdir / 'verification.json')
     log(f'01 报告：{Lc}费用 USD {tot["cur"]:,.2f}（{n_comp}个订阅），较{Lp} {percent(tot["changeRate"])}；Excel 公式 {result["formulaCount"]} 个'
@@ -426,7 +499,7 @@ def _day(d):
     return f'{d.year}年{d.month}月{d.day}日'
 
 
-def markdown(cfg, period, labels, m, actions, sup, pngs, narrative):
+def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None):
     Lp, Lc, Ln = labels['prev'], labels['cur'], labels['next']
     dp, dc, dn = labels['prevDays'], labels['curDays'], labels['nextDays']
     t, cov = m['comparableTotals'], m['scope']['coverage']
@@ -541,7 +614,20 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative):
         lines.append(row([a['topic'] + ' / ' + a['scope'], a['finding'], a['recommendation'], a['status']]))
     lines += ['', f'其中VM规格调整建议的预计节省按**官网公开列表价**计算，仅供后续调整决策，不是{Lc}实际费用减少。数据库、缓存、存储和日志的建议需先确认业务要求，暂不估算节省金额。', '']
     commitments = rr.get('commitmentStatus', [])
-    if any(c.get('status') == 'not-verified' for c in commitments):
+    text = commitment_text(cs, labels)
+    if text:
+        lines += ['### RI 与 SP', '', text + '。', '']
+        flagged = [c for c in cs['commitments'] if c['notes']]
+        if flagged:
+            lines += ['|类别|名称|规格或承诺|近30天使用率|到期日期|提示|', '|---|---|---|---:|---|---|']
+            for c in flagged[:10]:
+                u30 = (c.get('utilization') or {}).get('days30')
+                lines.append(row([c['kind'], c.get('name'), commitment_spec(c), f'{u30:.0f}%' if isinstance(u30, (int, float)) else '未取得',
+                                  c.get('expiryDate') or '-', '；'.join(c['notes'])]))
+            lines.append('')
+        if cs['recommendations']:
+            lines += ['Azure 的购买建议按当前用量计算，没有考虑降配。建议先完成降配并观察稳定，再按新的长期用量确定 RI 或 SP 的数量和期限。明细见 Excel“Azure购买建议”。', '']
+    elif any(c.get('status') == 'not-verified' for c in commitments):
         lines += ['RI/SP现有订单清单读取权限不足，未能核对是否已购买、是否用满及到期时间；成本分摊查询可用，但不能代替订单使用率检查。', '']
     lines += ['## 6. 存储、备份与日志', '', '### 存储', '', f'共{st["coverage"]["found"]}个存储账户，{Lc}费用USD {amount(st["coverage"]["curCostUSD"])}。{Lc}费用USD 50以上的账户：', '',
               f'|订阅|存储账户|冗余|{Lc}底容量|{Lc}增长|层级|生命周期策略|{Lc}费用USD（含带宽）|', '|---|---|---|---:|---:|---|---|---:|']

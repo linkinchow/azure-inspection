@@ -2,7 +2,7 @@
 name: azure-monthly-inspection
 description: Read-only monthly Azure inspection for a customer tenant, producing Chinese customer reports (cost review, VM rightsizing, reliability, security, operational excellence, performance, peer comparison, summary). Use when the user asks to run or prepare an Azure 月度巡检/成本巡检/WAF 巡检/健康检查 for a customer, set up a new customer for inspection, check read-only access, or quality-check inspection reports before delivery.
 metadata:
-  version: 0.5.0
+  version: 0.6.0
 ---
 
 # Azure 月度巡检（只读）
@@ -20,11 +20,12 @@ metadata:
 
 ## 当前版本能做什么
 
-版本 0.5.0 可以：
+版本 0.6.0 可以：
 
 - 准备：环境检查、建客户工作目录、核对只读访问
 - 生成全部 6 份报告：**00 汇总**、**01 月度成本**、**02 虚拟机规格**、**03 可靠性与安全**、**04 卓越运营与性能效率**、**05 同类资源配置对比**（采集、分析、生成、核对）
 - 跨报告交叉核对（X1–X9）和打包
+- RI/SP：分摊费用中的覆盖比例、现有预留和节省计划的使用率与到期、Azure 购买建议；02 标出已被 RI/SP 覆盖、降配节省不能直接实现的机器
 - 跨月跟踪：03/04 自动与上月比，分出新增问题、新增检查项发现、仍未处理、已解决、本月未检查
 - 检查 Markdown 报告
 
@@ -93,6 +94,19 @@ python "<skill>/scripts/azinspect_cli.py" <命令> [参数]
    - 能看到多少订阅：纳入、已停用、被排除各多少
    - 资源能否读取
    - 费用能否读取
+
+   只读账号建议的权限（都只读）：
+
+   | 权限 | 范围 | 用于 |
+   |---|---|---|
+   | 读者（Reader） | 各订阅或根管理组 | 配置、指标、活动日志 |
+   | 成本管理读者（Cost Management Reader） | 各订阅 | 01 费用、按资源的 RI/SP 覆盖、Azure 购买建议 |
+   | Log Analytics 读者 | 日志工作区 | 日志摄取来源、AKS 调度事件 |
+   | 安全读者（Security Reader） | 各订阅 | Defender 建议 |
+   | 预留读取者（Reservations Reader） | 租户 | 现有 RI/SP 的使用率和到期（可选） |
+   | Microsoft Graph 目录读取 | 租户 | 高权限账号、来宾、凭据到期（可选） |
+
+   缺少可选权限时，对应检查如实写“未能核对”，不影响其他报告。
 
 ## 第二步：月度巡检
 

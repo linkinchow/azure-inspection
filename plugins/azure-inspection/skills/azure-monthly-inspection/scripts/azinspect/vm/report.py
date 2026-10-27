@@ -59,7 +59,17 @@ def build(ws, cfg, narrative=None, log=print):
     subscriptions = read('subscriptions.json')
     from .prices import price_catalog
     catalog = price_catalog(ws.raw('vm/prices'), read('summary.json')['priceAsOfDate'])
-    unified = combined_rows(vms, recs, pools, catalog, narrative.get('crossCheckNotes'))
+    from ..cost.commitments import load as load_commitments, vm_coverage
+    coverage, commitments = vm_coverage(ws), load_commitments(ws)
+    month = (commitments or {}).get('month')
+    unified = combined_rows(vms, recs, pools, catalog, narrative.get('crossCheckNotes'), coverage,
+                            f'{int(month[5:])}月' if month else '巡检月份')
+    covered = [u for u in unified if u['changing'] and (u.get('committedShare') or 0) >= 0.5]
+    cc_info = {
+        'read': coverage is not None, 'attempted': commitments is not None, 'month': month, 'coveredCount': len(covered),
+        'coveredSavingsUSD': sum(u['monthlyRightsizingSavings'] or 0 for u in covered),
+        'machines': [{'name': u['name'], 'subscription': u['subscriptionName'], 'share': u['committedShare']} for u in covered]}
+    write_json(fdir / 'commitment-coverage.json', cc_info)
     unified.sort(key=lambda r: (str(r['subscriptionName']).lower(), str(r['resourceGroup']).lower(), r['name'].lower(), r['vmId'].lower()))
     portfolio = portfolio_totals(unified)
     write_json(fdir / 'rows.json', unified)
@@ -222,6 +232,7 @@ def build(ws, cfg, narrative=None, log=print):
     ]:
         method.append(row)
     data = vm_charts.chart_data(vms, recs, portfolio)
+    data['commitmentCoverage'] = cc_info
     pngs = vm_charts.make_pngs(data, out / 'charts')
     chart_sheet = vm_charts.add_excel_sheet(sheet, data)
     for s in wb:
@@ -350,6 +361,15 @@ def markdown(cfg, rows, recs, subs, manifest, pools, total, portfolio, data, png
         values = [u['subscriptionName'], u['resourceGroup'], u['name'], u['region'], u['currentSKU'], u['effectiveSKU'] if u['changing'] else '不更换', u['status'],
                   change(u['cpuCurrent'], u['cpuAfter']), change(u['memoryCurrent'], u['memoryAfter']), disk(u, 0), disk(u, 2)] + [price_and_saving(u, k) for k in KEYS] + [u['note']]
         lines.append('|' + '|'.join(esc(v) for v in values) + '|')
+    cc = data.get('commitmentCoverage') or {}
+    if cc.get('read') and cc.get('coveredCount'):
+        lines += ['', f'其中 {cc["coveredCount"]} 台建议调整的机器在 {int(cc["month"][5:])} 月有一半以上费用由 RI/SP 覆盖，涉及预计节省 '
+                      f'USD {cc["coveredSavingsUSD"]:,.2f}/月。这些机器降配后，预留或节省计划的额度会转去覆盖其他机器或闲置，不会直接减少费用；'
+                      '需先交换预留或调整覆盖范围，节省在此之后才能实现。逐台情况见表中“说明”列。']
+    elif cc.get('read') and cc.get('month'):
+        lines += ['', f'按 {int(cc["month"][5:])} 月分摊费用，建议调整的机器都没有被 RI/SP 覆盖，降配后的节省可以直接体现在账单上。']
+    elif cc.get('attempted') and not cc.get('read'):
+        lines += ['', '未能读取按资源的计价方式，无法判断哪些机器已被 RI/SP 覆盖；如已购买 RI/SP，实际节省可能低于预计。']
     if narrative.get('crossCheckParagraph'):
         lines += ['', narrative['crossCheckParagraph']]
     lines += ['', '## 3. 使用的规则', '',

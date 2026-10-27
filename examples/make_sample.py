@@ -697,6 +697,42 @@ NARRATIVE = {
 
 # ---------------------------------------------------------------- run
 
+def commitments_part(ws):
+    """Invented RI/SP data in the format of cost/commitments.collect: two reserved web VMs, an unused reservation,
+    a savings plan close to expiry and a few Azure purchase recommendations."""
+    covered = {'shop-web-01', 'shop-web-02'}
+    pricing = []
+    for name, sub, rg, _region, _size, price, _first, last in VMS:
+        if last:
+            continue
+        cost = round(price * 24 * 30, 2)
+        pricing.append({'subscriptionId': SUB_ID[sub], 'resourceId': rid(sub, rg, VM_TYPE, name).lower(),
+                        'pricingModel': 'Reservation' if name in covered else 'OnDemand', 'cost': round(cost * 0.6, 2) if name in covered else cost})
+    reservations = [
+        {'orderId': 'ri-order-1', 'name': 'shop-web-d4sv5', 'sku': 'Standard_D4s_v5', 'description': 'Reserved VM Instance, Standard_D4s_v5, 1 Year',
+         'resourceType': 'VirtualMachines', 'quantity': 2, 'term': 'P1Y', 'scope': 'Single', 'expiry': '2027-03-31T00:00:00Z', 'renew': False,
+         'state': 'Succeeded', 'utilization': {'trend': 'SAME', 'days7': 99.0, 'days30': 98.5}, 'readStatus': {'ok': True, 'httpStatus': 200}},
+        {'orderId': 'ri-order-2', 'name': 'legacy-report-e16sv5', 'sku': 'Standard_E16s_v5', 'description': 'Reserved VM Instance, Standard_E16s_v5, 1 Year',
+         'resourceType': 'VirtualMachines', 'quantity': 1, 'term': 'P1Y', 'scope': 'Shared', 'expiry': '2027-05-31T00:00:00Z', 'renew': False,
+         'state': 'Succeeded', 'utilization': {'trend': 'SAME', 'days7': 0.0, 'days30': 0.0}, 'readStatus': {'ok': True, 'httpStatus': 200}}]
+    plans = [{'orderId': 'sp-order-1', 'name': 'compute-sp-2025', 'commitment': 1.2, 'currency': 'USD', 'grain': 'Hourly', 'term': 'P1Y',
+              'scope': 'Shared', 'expiry': '2026-12-15T00:00:00Z', 'renew': False, 'state': 'Succeeded',
+              'utilization': {'trend': 'SAME', 'days7': 99.6, 'days30': 99.2}, 'readStatus': {'ok': True, 'httpStatus': 200}}]
+    recs = [
+        {'kind': '预留实例', 'subscription': 'pay-prod', 'resourceType': 'VirtualMachines', 'sku': 'Standard_D4s_v5', 'region': 'japaneast',
+         'term': 'P1Y', 'quantity': 2, 'costWithout': 357.12, 'costWith': 228.5, 'saving': 128.62, 'lookBack': 'Last30Days'},
+        {'kind': '预留实例', 'subscription': 'pay-prod', 'resourceType': 'VirtualMachines', 'sku': 'Standard_D4s_v5', 'region': 'japaneast',
+         'term': 'P3Y', 'quantity': 2, 'costWithout': 357.12, 'costWith': 146.4, 'saving': 210.72, 'lookBack': 'Last30Days'},
+        {'kind': '节省计划', 'subscription': 'shop-prod', 'resourceType': 'Compute_Savings_Plan', 'sku': '每小时承诺 0.95', 'region': None,
+         'term': 'P1Y', 'quantity': 0.95, 'costWithout': 1062.0, 'costWith': 873.4, 'saving': 188.6, 'coverage': 71.0, 'utilization': 99.1, 'lookBack': 'Last30Days'}]
+    write_json(ws.raw('cost/commitments.json'), {
+        'collectedAt': '2026-10-26T12:00:00+00:00', 'month': MONTH, 'subscriptionsQueried': len({p['subscriptionId'] for p in pricing}),
+        'pricingByResource': pricing, 'pricingStatus': {p['subscriptionId']: {'ok': True, 'error': None} for p in pricing},
+        'reservations': reservations, 'savingsPlans': plans, 'reservationStatus': {'ok': True, 'httpStatus': 200, 'error': None},
+        'savingsPlanStatus': {'ok': True, 'httpStatus': 200, 'error': None}, 'recommendations': recs,
+        'recommendationStatus': {f'{sid}|x': {'ok': True} for sid in SUB_ID.values()}})
+
+
 def run(root: Path, log=print):
     root.mkdir(parents=True, exist_ok=True)
     (root / 'customer.yaml').write_text(CUSTOMER_YAML, encoding='utf-8')
@@ -711,6 +747,7 @@ def run(root: Path, log=print):
     ws.create()
     period = ReportPeriod.build(MONTH, dt.date(2026, 10, 27))
     cost_part(ws, cfg, period, lines)
+    commitments_part(ws)
     vm_part(ws)
     waf_part(ws, cfg, MONTH)
     peer_part(ws)
