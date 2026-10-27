@@ -7,6 +7,7 @@ import json
 import platform
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -214,8 +215,10 @@ def cmd_analyze(args) -> int:
 
 def cmd_build(args) -> int:
     from .core import config as config_mod
+    from .package import record_build
     ws, period = _month_workspace(args)
     cfg = config_mod.load(ws.config_path)
+    started = time.time()
     if args.part in ('vm', 'all'):
         from .vm.audit import audit
         from .vm.report import build
@@ -236,6 +239,7 @@ def cmd_build(args) -> int:
     if args.part in ('summary', 'all'):   # last: 00 reads every other report's numbers
         from .summary import build as build_summary
         build_summary(ws, cfg, period, _narrative(ws, '00'))
+    record_build(ws, started)
     return 0
 
 

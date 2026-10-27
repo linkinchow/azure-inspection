@@ -2,7 +2,7 @@
 name: azure-monthly-inspection
 description: Read-only monthly Azure inspection for a customer tenant, producing Chinese customer reports (cost review, VM rightsizing, reliability, security, operational excellence, performance, peer comparison, summary). Use when the user asks to run or prepare an Azure 月度巡检/成本巡检/WAF 巡检/健康检查 for a customer, set up a new customer for inspection, check read-only access, or quality-check inspection reports before delivery.
 metadata:
-  version: 0.6.2
+  version: 0.6.3
 ---
 
 # Azure 月度巡检（只读）
@@ -20,7 +20,7 @@ metadata:
 
 ## 当前版本能做什么
 
-版本 0.6.2 可以：
+版本 0.6.3 可以：
 
 - 准备：环境检查、建客户工作目录、核对只读访问
 - 生成全部 6 份报告：**00 汇总**、**01 月度成本**、**02 虚拟机规格**、**03 可靠性与安全**、**04 卓越运营与性能效率**、**05 同类资源配置对比**（采集、分析、生成、核对）
@@ -154,7 +154,15 @@ python "<skill>/scripts/azinspect_cli.py" <命令> [参数]
    python "<skill>/scripts/azinspect_cli.py" quality-check --path "<工作目录>/<YYYY-MM>/reports"
    ```
 
-   有问题就修改再检查，直到通过。
+   除格式外，还检查写法，不通过就不能打包：
+   - 内部用语和巡检过程用语（如“跨报告”“命中”“未自行”）
+   - “需客户确认后执行”每份报告最多 2 次
+   - 否定和保留说法（“不等于”“不能据此”等）每万字最多约 6 处
+   - 00 的立即处理问题、03/04 的前十大问题，标题或描述里必须点名具体资源或订阅；“影响”每条都写或都不写
+   - 00 结论要有金额，并点名最需要处理的资源
+   - 报告生成后不能手工修改
+
+   有问题就改 `narrative/*.json`，重新 build 后再检查，直到通过。脚本自动生成的文字触发检查时，告诉用户这是插件问题。
 
 7. **打包**：
 
@@ -178,7 +186,7 @@ python "<skill>/scripts/azinspect_cli.py" <命令> [参数]
 | 4 撰写说明 | **由你根据数据写**，格式见 `references/narrative-format.md` | — | 01–04 可用 |
 | 5 生成报告 | 生成 Markdown、Excel、图表并核对 | `build` | 00–05 可用 |
 | 6 交叉核对 | 检查报告之间的矛盾 | `crosscheck` | 可用 |
-| 7 质量检查 | 星号、图片、表格列数、内部用语、邮箱 | `quality-check` | 可用 |
+| 7 质量检查 | 星号、图片、表格列数、内部用语、邮箱、保守说法、点名资源、手工修改 | `quality-check`、`package` | 可用 |
 | 8 打包 | 中文文件夹和压缩包，逐字节核对 | `package` | 可用 |
 | 9 跨月跟踪 | 与上月比：新增、已解决、仍未处理 | build 时自动 | 可用 |
 

@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 
 from .core.io import read_json, write_json
-from .core.quality import check_markdown
+from .core.quality import check_markdown, check_narratives
 
 REPORT = re.compile(r'^0[0-5]_.+\.(md|xlsx)$')
 IMAGE = re.compile(r'!\[[^\]]*\]\((charts/[^)]+)\)')
@@ -22,6 +22,17 @@ IMAGE = re.compile(r'!\[[^\]]*\]\((charts/[^)]+)\)')
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def record_build(ws, started: float) -> None:
+    """Fingerprint the report files this build wrote, so packaging can tell when one was edited by hand afterwards."""
+    reports = ws.month_dir('reports')
+    path = ws.month_dir('findings') / 'build-hashes.json'
+    hashes = read_json(path) if path.exists() else {}
+    for p in reports.iterdir():
+        if p.is_file() and REPORT.match(p.name) and p.stat().st_mtime >= started - 1:
+            hashes[p.name] = _sha(p)
+    write_json(path, hashes)
 
 
 def build(ws, cfg, period, allow_open=False, log=print):
@@ -37,6 +48,12 @@ def build(ws, cfg, period, allow_open=False, log=print):
             if not (reports / rel).exists():
                 problems.append(f'{md.name}：图片不存在 {rel}')
             charts.add(rel)
+    problems += [f'说明文件：{x}' for x in check_narratives(ws.month_dir())]
+    hashes_path = ws.month_dir('findings') / 'build-hashes.json'
+    hashes = read_json(hashes_path) if hashes_path.exists() else None
+    for f in files if hashes is not None else []:
+        if hashes.get(f.name) != _sha(f):
+            problems.append(f'{f.name}：生成后被手工修改过，或不是 build 生成的。要改文字，请改 narrative/*.json 后重新 build')
     cross = ws.month_dir('findings') / 'crosscheck.json'
     if not cross.exists():
         problems.append('还没有运行 crosscheck')
