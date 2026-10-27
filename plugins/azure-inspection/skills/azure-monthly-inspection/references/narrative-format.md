@@ -53,6 +53,7 @@
 - `checkNotes`：每个有问题的检查项写一句话，用于汇总表的“主要发现”列；缺省时脚本根据数据生成默认文字。
 - `severityOverrides`：只在有外部证据时使用，必须写 `reason`，脚本会把理由写进问题清单。
 - `findingTextOverrides`：修正某条问题的描述，例如补充证据，不能改动数字含义。可改 `finding`、`recommendation`、`needsConfirmation`、`acceptance`（验收标准）。
+- `architecture`（03）：“架构总览”一节的说明，一段或段落列表，放在脚本生成的订阅/区域/组件表和网络概况之后。写主要业务跑在哪些组件上、各订阅的分工、网络怎么连，再说和 Landing Zone 设计的主要差距。只写从数据能看出来的事，不确定的写明需要确认。
 - `landingZoneNote`（03）：Landing Zone 对照一节表格下的解读，例如哪些不符合项是客户有意的设计选择、哪些值得规划调整。
 - `sectionNotes`：加在“可靠性”“安全”“卓越运营”“性能效率”各节表格下的说明，键为节名，值为一句话或句子列表。
 - `limitations`：补充到“检查范围与限制”的条目；未启用订阅、离线判断端口等通用限制由脚本自动写。

@@ -24,6 +24,23 @@ class Rule:
     applies_to: str = 'any'   # any | subscription | resource (environment rules only)
 
 
+# Chinese names for common public regions; customer.yaml regionLabels overrides or adds to these.
+REGION_LABELS = {
+    'eastasia': '中国香港', 'southeastasia': '新加坡', 'japaneast': '日本东部', 'japanwest': '日本西部', 'koreacentral': '韩国中部',
+    'koreasouth': '韩国南部', 'centralindia': '印度中部', 'southindia': '印度南部', 'westindia': '印度西部', 'indonesiacentral': '印度尼西亚中部',
+    'malaysiawest': '马来西亚西部', 'australiaeast': '澳大利亚东部', 'australiasoutheast': '澳大利亚东南部', 'newzealandnorth': '新西兰北部',
+    'uaenorth': '阿联酋北部', 'uaecentral': '阿联酋中部', 'qatarcentral': '卡塔尔中部', 'israelcentral': '以色列中部',
+    'saudiarabiaeast': '沙特阿拉伯东部', 'southafricanorth': '南非北部', 'westeurope': '西欧', 'northeurope': '北欧',
+    'uksouth': '英国南部', 'ukwest': '英国西部', 'francecentral': '法国中部', 'germanywestcentral': '德国中西部',
+    'swedencentral': '瑞典中部', 'switzerlandnorth': '瑞士北部', 'norwayeast': '挪威东部', 'polandcentral': '波兰中部',
+    'italynorth': '意大利北部', 'spaincentral': '西班牙中部', 'eastus': '美国东部', 'eastus2': '美国东部 2', 'centralus': '美国中部',
+    'northcentralus': '美国中北部', 'southcentralus': '美国中南部', 'westcentralus': '美国中西部', 'westus': '美国西部',
+    'westus2': '美国西部 2', 'westus3': '美国西部 3', 'canadacentral': '加拿大中部', 'canadaeast': '加拿大东部',
+    'brazilsouth': '巴西南部', 'mexicocentral': '墨西哥中部', 'chinaeast2': '中国东部 2', 'chinaeast3': '中国东部 3',
+    'chinanorth2': '中国北部 2', 'chinanorth3': '中国北部 3',
+}
+
+
 @dataclass
 class CustomerConfig:
     name: str
@@ -80,7 +97,8 @@ class CustomerConfig:
         return None
 
     def region(self, location: str) -> str:
-        return self.region_labels.get((location or '').lower(), location)
+        key = (location or '').lower()
+        return self.region_labels.get(key) or REGION_LABELS.get(key, location)
 
     def created_by_standard(self, tags: dict | None) -> bool | None:
         if not self.standard_tag:

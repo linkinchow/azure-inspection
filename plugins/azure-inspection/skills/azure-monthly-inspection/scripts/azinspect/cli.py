@@ -79,6 +79,42 @@ def _client(workspace):
     return cfg, tokens, ReadOnlyClient(tokens, user_agent=f'azure-inspection-readonly/{__version__}')
 
 
+def _writes(permissions) -> bool:
+    """Can this role change resources? Microsoft.Support/* (opening support tickets) is part of several read-only roles."""
+    actions = [a.lower() for p in permissions or [] for a in p.get('actions') or []]
+    return any(a == '*' or a.endswith(('/write', '/delete')) or a.endswith('/*') and a != 'microsoft.support/*' for a in actions)
+
+
+def _roles(client, object_id, sub_ids, names):
+    """Roles the account holds (directly, through groups or inherited) on each subscription in scope; flags roles that can write."""
+    if not object_id:
+        return {'read': False, 'error': '令牌里没有对象 ID'}
+    defs, rows, denied = {}, [], []
+    for sid in sub_ids:
+        items, status, error = client.get_all(f"/subscriptions/{sid}/providers/Microsoft.Authorization/roleAssignments"
+                                              f"?api-version=2022-04-01&$filter=assignedTo('{object_id}')", 'access', 'role-assignments')
+        if items is None:
+            denied.append({'subscriptionId': sid, 'status': status})
+            continue
+        for a in items:
+            rid = a['properties']['roleDefinitionId']
+            if rid not in defs:
+                _status, d, _error = client.get(f'{rid}?api-version=2022-04-01', 'access', 'role-definition')
+                props = (d or {}).get('properties') or {}
+                defs[rid] = {'role': props.get('roleName') or rid.rsplit('/', 1)[-1], 'writes': _writes(props.get('permissions')) if d else None}
+            rows.append({'subscription': names.get(sid, sid), 'scope': a['properties'].get('scope'), **defs[rid]})
+    write = sorted({r['role'] for r in rows if r['writes']})
+    subs = sorted({r['subscription'] for r in rows if r['writes']})
+    if write:
+        print(f'注意：该账号在 {len(subs)} 个订阅有可写角色（{"、".join(write)}）。巡检脚本只发读请求，'
+              '但建议改用读者等只读角色；由 AI agent 执行巡检时，可写角色的风险更高。')
+    elif rows:
+        print('角色核对：只有只读角色。')
+    if denied:
+        print(f'  {len(denied)} 个订阅的角色分配读取失败，未能核对是否有可写角色')
+    return {'read': not denied, 'assignments': rows, 'writeRoles': write, 'writeSubscriptions': subs, 'denied': denied}
+
+
 def cmd_access_check(args) -> int:
     from .core.io import Workspace, write_json
     ws = Workspace(args.workspace)
@@ -109,6 +145,7 @@ def cmd_access_check(args) -> int:
                                               'access', 'cost-management', body=body)
         result['costManagement'] = {'probeSubscription': probe, 'status': status, 'error': error}
         print('费用读取（Cost Management）：' + ('通过' if status == 200 else f'失败（{status} {error}），月度成本巡检需要“成本管理读者”或“读者”权限'))
+        result['roles'] = _roles(client, identity.get('objectId'), in_scope, {r['subscriptionId']: r['displayName'] for r in rows})
     write_json(ws.access_dir / 'access-check.json', result)
     ws.save_calls('access-check', client.calls)
     print(f'结果已保存：{ws.access_dir / "access-check.json"}')

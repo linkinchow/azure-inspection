@@ -41,14 +41,8 @@ rules:
   #  - {label: 电商, match: 'shop'}
   #  - {label: 支付, match: 'pay'}
 
-  # 区域中文名（报告里显示）。未列出的区域显示原名。
-  regionLabels:
-    eastasia: 中国香港
-    japaneast: 日本东部
-    eastus: 美国东部
-    westus2: 美国西部 2
-    westeurope: 西欧
-    chinanorth3: 中国北部 3
+  # 区域中文名（报告里显示）。常用区域已内置中文名，这里只需补充或改写，例如 {uaenorth: 阿联酋北部}。
+  regionLabels: {}
 
   # 客户自己的标准创建方式（同类资源对比时作为“标准做法”的线索），例如 Terraform 标签。可留空。
   standardDeploymentTag: {}

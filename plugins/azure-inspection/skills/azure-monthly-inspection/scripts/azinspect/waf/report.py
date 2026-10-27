@@ -17,6 +17,7 @@ from openpyxl.utils import get_column_letter as L
 from ..core.excel import SEVERITY_FILL, verify
 from ..core.fmt_md import format_and_check
 from ..core.io import write_json
+from . import architecture
 from . import charts as waf_charts
 from .checks import ACCEPTANCE, CHECKS, check_number, count_text, group_of, report_of, type_label
 from .common import PILLARS, REPORT_OF, env_text, load_findings, load_scope
@@ -400,7 +401,7 @@ def month_sentence(tracked, report):
 
 
 def markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows=None,
-             tracked=None):
+             tracked=None, arch=None):
     meta = REPORTS[report]
     c = Counter((f['group'], f['severity']) for f in findings)
     pending = sum(1 for f in findings if f.get('needsConfirmation'))
@@ -438,6 +439,10 @@ def markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_
         for text in [extra] if isinstance(extra, str) else extra:
             lines += ['', text]
     n = len(groups) + 2
+    arch_lines = architecture.section(arch, narrative) if report == '03' else []
+    if arch_lines:
+        lines += ['', f'## {n}. 架构总览', ''] + arch_lines
+        n += 1
     if lz_rows:
         gaps = [r for r in lz_rows if r['status'] == '有不符合项']
         counts = Counter(r['status'] for r in lz_rows)
@@ -495,7 +500,9 @@ def build(ws, cfg, report, narrative=None, log=print):
     tracked = load_tracking(ws)
     expected = write_excel(xlsx, cfg, report, findings, by_check, datasets, checks, snapshot, scope_note, ssh_rows, tracked)
     lz_rows = ((datasets.get('landing_zone') or {}).get('inventory') or {}).get('landingZone')
-    md = markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows, tracked)
+    arch = architecture.summary(ws, cfg) if report == '03' else None
+    md = markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows, tracked,
+                  arch)
     (out / f'{md_stem}.md').write_text(md, encoding='utf-8')
     fdir = ws.month_dir('findings') / 'waf'
     result = verify(xlsx, expected, fdir / f'verification-{report}.json')

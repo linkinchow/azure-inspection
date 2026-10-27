@@ -197,14 +197,14 @@ def default_modules(types):
             for (tn, label), g in sorted(groups.items(), key=lambda kv: -len(kv[1]['resources']))]
 
 
-def default_conclusions(data, stats, standard_name):
+def default_conclusions(data, stats, standard_name, by_line=True):
     hi = stats['highImpactDeviations']
     out = []
     bm = hi['byMethod']
     if bm:
         ordered = sorted(bm.items(), key=lambda kv: -(kv[1]['pct'] or 0))
         out.append('**偏差与创建方式有关。**有高风险偏差的资源：' + '，'.join(f'{method_label(k)}{ratio(v["highImpact"], v["resources"], v["pct"])}' for k, v in ordered) + '。')
-    bl = {k: v for k, v in hi['byLine'].items() if v['resources'] >= 5}
+    bl = {k: v for k, v in hi['byLine'].items() if v['resources'] >= 5} if by_line else {}
     if bl:
         ordered = sorted(bl.items(), key=lambda kv: -(kv[1]['pct'] or 0))
         out.append('**各业务线的情况不同。**有高风险偏差的资源：' + '，'.join(f'{k}{ratio(v["highImpact"], v["resources"], v["pct"])}' for k, v in ordered) + '。')
@@ -233,7 +233,7 @@ def bar_chart(rows, title, subtitle, path):
     cs.save(fig, path)
 
 
-def make_charts(hi, chart_dir):
+def make_charts(hi, chart_dir, by_line=True):
     m = sorted(((method_label(k).replace('的资源', ''), v['highImpact'], v['resources'], v['pct']) for k, v in hi['byMethod'].items()),
                key=lambda r: -(r[3] or 0))
     total = sum(v['resources'] for v in hi['byMethod'].values())
@@ -242,7 +242,7 @@ def make_charts(hi, chart_dir):
         bar_chart(m, '按创建方式：有高风险偏差的资源占比', f'AKS、数据库、缓存、存储、ACR、应用网关、Front Door，共 {total} 个资源', chart_dir / CHARTS['method'])
         out['method'] = f'charts/{CHARTS["method"]}'
     lines = sorted(((k, v['highImpact'], v['resources'], v['pct']) for k, v in hi['byLine'].items() if v['resources'] >= 5), key=lambda r: -(r[3] or 0))
-    if lines:
+    if by_line and lines:
         bar_chart(lines, '按业务线：有高风险偏差的资源占比', '同一范围，只列资源数不少于 5 个的业务线', chart_dir / CHARTS['line'])
         out['line'] = f'charts/{CHARTS["line"]}'
     return out
@@ -268,7 +268,7 @@ def markdown(ws, cfg, data, narrative, pngs, labels):
              f'本报告把同一类资源放在一起比较（共 {len(types)} 类），找出客户自己已经在用的好做法，列出和它不一样的资源，并说明原因和怎么对齐。'
              f'共列出 {n_dev} 项偏差，逐项明细见 Excel“偏差明细”。', '']
     sec = 1
-    lines += [f'## {sec}. 结论', ''] + [f'- {x}' for x in (narrative.get('conclusions') or default_conclusions(data, stats, standard_name))] + ['']
+    lines += [f'## {sec}. 结论', ''] + [f'- {x}' for x in (narrative.get('conclusions') or default_conclusions(data, stats, standard_name, bool(cfg.business_lines)))] + ['']
     notes = narrative.get('chartNotes') or {}
     for key, title in (('method', '各创建方式高风险偏差比例'), ('line', '各业务线高风险偏差比例')):
         if key in pngs:
@@ -305,8 +305,18 @@ def markdown(ws, cfg, data, narrative, pngs, labels):
         lines += table(['模板/业务线', '当前默认值', '应改为', '影响的资源'], [(m['module'], m['current'], m['target'], m['resources']) for m in modules])
         if narrative.get('moduleNote'):
             lines += ['', narrative['moduleNote']]
+    elif not cfg.standard_tag:
+        sec += 1
+        lines += ['', f'## {sec}. 需要修正的模板默认值', '',
+                  '贵司没有提供标准创建方式（例如 Terraform 等部署工具留下的标签），所以无法判断哪些偏差来自模板默认值。'
+                  '提供后，下次巡检会列出需要修正的模板参数。']
     vendor = stats['vendorManaged']
-    if vendor['resources']:
+    if not cfg.vendor_managed:
+        sec += 1
+        lines += ['', f'## {sec}. 供应商创建的资源', '',
+                  '贵司没有提供供应商维护资源的命名或资源组规则，本报告把全部资源当作贵司自己的资源。'
+                  '如果有供应商维护的资源，请提供规则，下次巡检会单独列出；这类资源应与供应商确认后再修改。']
+    elif vendor['resources']:
         sec += 1
         lines += ['', f'## {sec}. 供应商创建的资源', '']
         vnote = narrative.get('vendorNote')
@@ -509,7 +519,7 @@ def build(ws, cfg, narrative=None, log=print):
     labels = {'standard': data['methodLabels']['standard'], 'standardTag': (data['method'].get('standardDetection') or '').replace('标签 ', '')
               if (data['method'].get('standardDetection') or '').startswith('标签') else None}
     out = ws.month_dir('reports')
-    pngs = make_charts(data['crossTypeStatistics']['highImpactDeviations'], out / 'charts')
+    pngs = make_charts(data['crossTypeStatistics']['highImpactDeviations'], out / 'charts', bool(cfg.business_lines))
     xlsx = out / f'{STEM_XLSX}.xlsx'
     expected = write_excel(xlsx, cfg, data, narrative, labels)
     md = markdown(ws, cfg, data, narrative, pngs, labels)

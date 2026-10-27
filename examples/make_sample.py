@@ -632,6 +632,25 @@ def peer_part(ws):
          'value': [{'name': 'MySqlFlexibleServer_2026-3-14T02.11.05', 'timestamp': '2026-03-14T02:11:05Z', 'provisioningState': 'Succeeded',
                     'tags': {'primaryResourceId': rid('pay-prod', 'pay-rg', my, 'pay-mysql-prod')}, 'resourceTypes': ['flexibleServers']}]}])
     write_json(ws.raw('peer/manifest.json'), {'collectedAt': '2026-10-26T09:30:00+00:00', 'sample': True})
+    inventory = [(sub, rg, 'microsoft.compute/virtualmachines', name, region) for name, sub, rg, region, _s, _p, _f, last in VMS if not last]
+    sub_name = {sid: name for name, sid in SUB_ID.items()}
+    inventory += [(sub_name[r['subscriptionId']], r['resourceGroup'], r['type'], r['name'], r['location']) for r in storage]
+    inventory += [('shop-prod', 'shop-rg', 'microsoft.containerservice/managedclusters', 'shop-aks', 'japaneast'),
+                  ('shop-prod', 'shop-rg', my.lower(), 'shop-mysql-prod', 'japaneast'), ('pay-prod', 'pay-rg', my.lower(), 'pay-mysql-prod', 'japaneast'),
+                  ('shop-test', 'shop-test-rg', my.lower(), 'shop-mysql-test', 'japaneast'), ('data-prod', 'data-rg', pg.lower(), 'data-pg-prod', 'eastus'),
+                  ('pay-prod', 'pay-rg', pg.lower(), 'pay-pg-prod', 'japaneast'), ('shop-prod', 'shop-rg', 'microsoft.cache/redis', 'shop-cache', 'japaneast'),
+                  ('shared-network', 'network-rg', 'microsoft.network/virtualnetworks', 'hub-vnet', 'japaneast'),
+                  ('shop-prod', 'shop-rg', 'microsoft.network/virtualnetworks', 'shop-vnet', 'japaneast'),
+                  ('data-prod', 'data-rg', 'microsoft.network/virtualnetworks', 'data-vnet', 'eastus'),
+                  ('shared-network', 'network-rg', 'microsoft.network/virtualnetworkgateways', 'hub-vpngw', 'japaneast'),
+                  ('shop-prod', 'shop-rg', 'microsoft.network/applicationgateways', 'shop-appgw', 'japaneast')]
+    write_json(ws.raw('waf/operations/arg/resources.json'), {'query': 'sample', 'status': 200, 'error': None, 'rows': [
+        {'id': rid(sub, rg, t, n).lower(), 'name': n, 'type': t, 'subscriptionId': SUB_ID[sub], 'resourceGroup': rg, 'location': loc}
+        for sub, rg, t, n, loc in inventory]})
+    vnet = lambda sub, rg, n: rid(sub, rg, 'Microsoft.Network/virtualNetworks', n)
+    write_json(ws.raw('waf/performance/arg/peerings.json'), {'query': 'sample', 'status': 200, 'error': None, 'rows': [
+        {'id': vnet('shared-network', 'network-rg', 'hub-vnet'), 'location': 'japaneast', 'remote': vnet('shop-prod', 'shop-rg', 'shop-vnet')},
+        {'id': vnet('shared-network', 'network-rg', 'hub-vnet'), 'location': 'japaneast', 'remote': vnet('data-prod', 'data-rg', 'data-vnet')}]})
 
 
 # ---------------------------------------------------------------- narratives (what the agent writes)
@@ -656,6 +675,10 @@ NARRATIVE = {
     '02': {'crossCheckNotes': [{'subscription': 'data-prod', 'namePrefix': 'data-etl-01',
                                 'note': '夜间批处理时数据盘带宽经常打满（见卓越运营与性能效率巡检报告 P4）；降配前先确认新规格的磁盘吞吐上限足够'}]},
     '03': {
+        'architecture': ['网店和支付都运行在日本东部：网店前端在 shop-aks 和 shop-web 虚拟机上，经应用网关对外；支付服务在 pay-api 虚拟机上，'
+                         '数据库按业务分开。数据分析在美国东部的 data-prod 订阅。shared-network 订阅里的中心网络通过 VPN 网关连接办公网，'
+                         '并与网店、数据两个虚拟网络对等。',
+                         '与 Landing Zone 设计相比，网络已经按中心辐射结构划分，主要差距在身份和数据保护：生产数据库还有公网入口，管理入口缺少统一的来源限制。'],
         'topIssues': [
             {'title': '支付数据库对全网开放', 'detail': 'pay-mysql-prod 的防火墙规则 AllowAll 放行所有地址，且没有强制加密连接。',
              'impact': '任何人都能连接支付数据库端口，只靠密码防护。',

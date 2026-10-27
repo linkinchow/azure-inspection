@@ -88,4 +88,4 @@ class TokenProvider:
         """Non-secret facts about the ARM token, for the access check report."""
         claims = decode_claims(self.get(ARM))
         return {'account': claims.get('upn') or claims.get('unique_name') or claims.get('appid'),
-                'tenant': claims.get('tid'), 'expiresAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(float(claims['exp'])))}
+                'objectId': claims.get('oid'), 'tenant': claims.get('tid'), 'expiresAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(float(claims['exp'])))}

@@ -13,7 +13,7 @@
 
 全部检查只读。脚本只允许读取，会拦截写操作和取密钥；令牌必须属于客户配置里的只读账号，否则停止。不会切换你的 Azure CLI 默认账号。
 
-> **当前版本 0.6.0**：全部 6 份报告（00 汇总、01 月度成本、02 虚拟机规格、03 可靠性与安全、04 卓越运营与性能效率、05 同类资源配置对比），并入 APRL、Defender/Policy、孤立资源、AMBA、Landing Zone 清单等微软公开规则库；RI/SP 覆盖、使用率和购买建议；跨报告交叉核对、质量检查和打包。跨月跟踪（自动与上月比：新增、已解决、仍未处理）。进度见 SKILL.md 文末。
+> **当前版本 0.6.1**：全部 6 份报告（00 汇总、01 月度成本、02 虚拟机规格、03 可靠性与安全、04 卓越运营与性能效率、05 同类资源配置对比），并入 APRL、Defender/Policy、孤立资源、AMBA、Landing Zone 清单等微软公开规则库；RI/SP 覆盖、使用率和购买建议；跨报告交叉核对、质量检查和打包。跨月跟踪（自动与上月比：新增、已解决、仍未处理）。进度见 SKILL.md 文末。
 
 ## 使用前提
 
@@ -53,6 +53,14 @@ claude plugin install azure-inspection@azure-inspection
 
 Copilot CLI 中执行 `/skills reload` 后，用 `/azure-monthly-inspection` 调用。
 
+非交互运行（`copilot -p`）时，建议只放行 python 和读文件命令，禁止 Copilot 直接调用 Azure CLI 等工具，例如：
+
+```
+copilot -p "<任务说明>" --no-ask-user --allow-tool "shell(python)" --allow-tool "shell(python:*)" --allow-tool write --deny-tool "shell(az)" --deny-tool "shell(az:*)" --deny-tool "shell(curl)" --deny-tool "shell(Invoke-RestMethod)" --deny-tool "shell(Invoke-WebRequest)" --deny-tool "shell(pwsh)" --deny-tool "shell(powershell)" --deny-tool "shell(Remove-Item)"
+```
+
+如果 Copilot 配置了能操作 Azure 的 MCP 服务器，巡检时先停用它；账号最好只有只读角色（`access-check` 会提示可写角色）。
+
 ### OpenAI Codex（CLI、IDE 扩展、Codex 应用）
 
 把 skill 文件夹复制或链接到以下任一位置：
@@ -65,7 +73,7 @@ Copilot CLI 中执行 `/skills reload` 后，用 `/azure-monthly-inspection` 调
 
 `examples/sample-output/` 是用虚构的“示例客户”数据生成的全部 6 份报告，数字和问题都是编的，供第一次使用前了解报告的样子。重新生成方法见 `examples/README.md`。
 
-> 本插件主要在 Claude Code 上测试；GitHub Copilot CLI 1.0.79 已验证能识别并按 skill 回答流程问题，脚本从复制后的位置可直接运行。Codex 读取 skill 的方式（`.agents/skills/`）相同，尚未实测。安全规则由脚本强制执行，与 agent 无关；报告文字质量取决于所用模型，建议首次使用时先试跑一次。
+> 本插件主要在 Claude Code 上测试；GitHub Copilot CLI 1.0.104 已在一个真实客户环境中从准备到打包完整跑通 6 份报告，Azure 请求全部为只读。Codex 读取 skill 的方式（`.agents/skills/`）相同，尚未实测。安全规则由脚本强制执行，与 agent 无关；报告文字质量取决于所用模型，建议首次使用时先试跑一次。
 
 ## 使用流程
 

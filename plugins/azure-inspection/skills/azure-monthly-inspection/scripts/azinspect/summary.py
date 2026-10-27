@@ -122,7 +122,7 @@ def markdown(cfg, period, d, n, pngs, scope):
     cur, prev, nxt = period.current, period.previous, period.following
     lines = [f'# {cfg.name} Azure 巡检汇总报告（{nxt.label}）', '',
              f'**范围**：{cfg.name} {scope["readable"]} 个 Azure 订阅。' + (f'{scope["note"]}。' if scope['note'] else ''), '',
-             '**方式**：使用贵司提供的只读账号读取费用、配置、监控指标和日志，没有修改任何资源，也没有做端口扫描。', '',
+             '**方式**：使用贵司提供的账号，以只读方式读取费用、配置、监控指标和日志，没有修改任何资源，也没有做端口扫描。', '',
              '**时间**：', '',
              f'- 费用：对比 {cur.label}与{prev.short_label if cur.year == prev.year else prev.label}两个完整自然月。'] + ([f'- 配置：{scope["snapshot"]}读取。'] if scope.get('snapshot') else []) + \
             ([f'- 性能：{scope["window"]}的数据。'] if scope.get('window') else []) + [
@@ -157,7 +157,8 @@ def markdown(cfg, period, d, n, pngs, scope):
     if pngs.get('pillars'):
         lines += ['', f'![各支柱发现的问题数量]({pngs["pillars"]})']
     lines += [''] + [x for p in (n.get('conclusion') or []) for x in (p, '')]
-    lines += ['以上金额都是 Azure 官网公开列表价，不是贵司的合同价或实际账单价。' if vm else '', '', '## 2. 需要立即处理的问题', '']
+    lines += ['费用和预计费用来自 Azure 账单和 Azure 预测；规格调整和 RI/SP 的节省按 Azure 官网公开列表价计算，不是贵司的合同价。' if vm else '', '',
+              '## 2. 需要立即处理的问题', '']
     issues = n.get('immediate') or default_immediate(d)
     impact = any(i.get('impact') for i in issues)
     rows = []

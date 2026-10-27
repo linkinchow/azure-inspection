@@ -2,7 +2,7 @@
 name: azure-monthly-inspection
 description: Read-only monthly Azure inspection for a customer tenant, producing Chinese customer reports (cost review, VM rightsizing, reliability, security, operational excellence, performance, peer comparison, summary). Use when the user asks to run or prepare an Azure 月度巡检/成本巡检/WAF 巡检/健康检查 for a customer, set up a new customer for inspection, check read-only access, or quality-check inspection reports before delivery.
 metadata:
-  version: 0.6.0
+  version: 0.6.1
 ---
 
 # Azure 月度巡检（只读）
@@ -20,7 +20,7 @@ metadata:
 
 ## 当前版本能做什么
 
-版本 0.6.0 可以：
+版本 0.6.1 可以：
 
 - 准备：环境检查、建客户工作目录、核对只读访问
 - 生成全部 6 份报告：**00 汇总**、**01 月度成本**、**02 虚拟机规格**、**03 可靠性与安全**、**04 卓越运营与性能效率**、**05 同类资源配置对比**（采集、分析、生成、核对）
@@ -44,7 +44,10 @@ metadata:
    - 脚本会核对令牌属于 `customer.yaml` 里的只读账号和租户，不一致就停止。
 3. **读不到就如实记录**：遇到 401/403/404 记录后继续，不绕过权限。缺数据不当 0：读不到的费用不是 0 元，读不到的指标不是“利用率低”。
 4. **客户数据只放在客户工作目录**，不放进 skill 目录，不上传。报告中不出现邮箱。
-5. **降配、删除、购买 RI/SP 等建议都写成“需客户确认后执行”。**
+5. **降配、删除、购买 RI/SP 等建议需要客户确认后执行**：在建议处理顺序或范围说明里统一写一次，不要每一行都重复。
+6. **只通过说明文件改报告**：不要直接编辑 `reports/` 或 `package/` 里的文件。重新生成会覆盖手改的内容，也绕过了核对。
+   - 要改文字，就改 `narrative/*.json` 后重新 build。
+   - 发现脚本自动生成的文字有错、说明文件改不了时，告诉用户这是插件问题，不要手改报告。
 
 ## 运行脚本
 
@@ -94,6 +97,7 @@ python "<skill>/scripts/azinspect_cli.py" <命令> [参数]
    - 能看到多少订阅：纳入、已停用、被排除各多少
    - 资源能否读取
    - 费用能否读取
+   - 账号有没有可写角色（如所有者、参与者）。有的话明确提醒用户：脚本只发读请求，但建议客户改给只读角色；由 AI agent 执行时风险更高
 
    只读账号建议的权限（都只读）：
 
