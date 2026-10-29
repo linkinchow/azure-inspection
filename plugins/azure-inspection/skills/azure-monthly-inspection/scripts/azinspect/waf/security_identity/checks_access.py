@@ -277,6 +277,8 @@ def _app_principals(ctx, app_priv):
 # ---------------------------------------------------------------------------------------------- S-I6
 CRED_SOURCES = (('spPasswordCredentials', 'spPwdCredentials'), ('spKeyCredentials', 'spKeyCredentials'),
                 ('appPasswordCredentials', 'appPwdCredentials'), ('appKeyCredentials', 'appKeyCredentials'))
+CRED_LABELS = {'spPasswordCredentials': '服务主体上的密码', 'spKeyCredentials': '服务主体上的证书',
+               'appPasswordCredentials': '应用注册的客户端密码', 'appKeyCredentials': '应用注册的证书'}
 
 
 def _credentials(ctx, meta):
@@ -312,7 +314,7 @@ def credentials(ctx, app_priv):
         expired = [c for c in bad if c['status'] == 'expired']
         expiring = [c for c in bad if c['status'] == 'expiring<=60d']
         long_lived = [c for c in bad if c['status'] not in ('expired', 'expiring<=60d')]
-        ends = lambda cs: '、'.join(f'{c["source"]} 于 {(c["endDateTime"] or "")[:10]} 到期' for c in cs)  # noqa: E731
+        ends = lambda cs: '、'.join(f'{CRED_LABELS.get(c["source"], c["source"])}于 {(c["endDateTime"] or "")[:10]} 到期' for c in cs)  # noqa: E731
         parts, steps, confirm = [], [], []
         if expired:
             parts.append(f'{len(expired)} 个凭据已过期（{ends(expired)}）')

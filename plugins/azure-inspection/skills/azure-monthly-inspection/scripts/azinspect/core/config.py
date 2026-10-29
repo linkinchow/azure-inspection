@@ -60,6 +60,7 @@ class CustomerConfig:
     extra_risky_ports: dict = field(default_factory=dict)
     public_storage_names: str | None = None
     currency: str = 'USD'
+    vm_detail_max_rows: int = 500   # 02 Markdown attaches the per-machine table up to this many machines
     path: Path | None = None
 
     # ---------------------------------------------------------------- scope
@@ -162,6 +163,9 @@ def load(path: str | Path) -> CustomerConfig:
         else:
             ports[int(port)] = str(label)
     public_storage = _pattern(rules.get('publicStorageAccounts'), 'rules.publicStorageAccounts', errors)
+    detail_rows = report.get('vmDetailMaxRows', 500)
+    if isinstance(detail_rows, bool) or not isinstance(detail_rows, int) or detail_rows < 0:
+        errors.append('report.vmDetailMaxRows 必须是不小于 0 的整数')
     if errors:
         raise ConfigError('customer.yaml 有误：\n- ' + '\n- '.join(errors))
     return CustomerConfig(
@@ -177,4 +181,4 @@ def load(path: str | Path) -> CustomerConfig:
         standard_tag=dict(rules.get('standardDeploymentTag') or {}),
         vendor_managed=_rules(rules.get('vendorManaged'), 'rules.vendorManaged'), stateful_vm_names=stateful, extra_risky_ports=ports,
         public_storage_names=public_storage,
-        currency=str(report.get('currency') or 'USD'), path=path)
+        currency=str(report.get('currency') or 'USD'), vm_detail_max_rows=detail_rows, path=path)

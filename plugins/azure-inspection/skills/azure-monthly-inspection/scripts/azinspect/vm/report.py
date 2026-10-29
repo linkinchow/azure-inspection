@@ -1,7 +1,7 @@
 """02 虚拟机利用率与规格优化: Excel (with formulas verified) and Markdown."""
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -19,6 +19,7 @@ from .rules import IO
 from .table import combined_rows, portfolio_totals, price_and_saving
 
 STEM = '02_虚拟机利用率与规格优化'
+DETAIL_SHEET = 'VM建议指标价格总表'
 PRICE_NOTE = '所有价格均为Azure官网公开列表价（USD），包括按需、RI和SP；不是客户合同价或实际账单价。节省也按列表价计算，未考虑客户已有折扣。'
 
 
@@ -169,7 +170,7 @@ def build(ws, cfg, narrative=None, log=print):
                '更换前Cached IOPS平均%', '更换后Cached IOPS平均%（预计）', '更换前Cached吞吐平均%', '更换后Cached吞吐平均%（预计）',
                '调整后规格：按需月价USD（每月节省）', '调整后规格：1年RI月价USD（每月节省）', '调整后规格：3年RI月价USD（每月节省）',
                '调整后规格：1年SP月价USD（每月节省）', '调整后规格：3年SP月价USD（每月节省）', '备注（含VMSS/节点池）', 'VM资源ID']
-    table = wb.create_sheet('VM建议指标价格总表')
+    table = wb.create_sheet(DETAIL_SHEET)
     table.append([f'{cfg.name}：每台机器的规格、VM指标和价格'])
     table.merge_cells(start_row=1, start_column=1, end_row=1, end_column=27)
     table.append([PRICE_NOTE + ' 价格格=月价（比当前规格按需月价每月省多少）；不更换时按当前规格报价。'])
@@ -321,6 +322,97 @@ def build(ws, cfg, narrative=None, log=print):
     return {'markdown': md_path, 'excel': path, 'monthlySavingsUSD': total, 'recommended': len(accepted), 'instances': len(unified)}
 
 
+def _result(u):
+    """Outcome for the summary; '暂不调整：见备注' is split by the first reason in the note."""
+    if u['status'] == '暂不调整：见备注':
+        reason = (u['note'] or '').split('；')[0] or '见备注'
+        if '平均消耗率' in reason:   # one row per measured percentage would split the table: group the disk limits
+            reason = '更换后磁盘 IOPS 或吞吐的平均消耗率超过 50%'
+        return '暂不调整：' + reason
+    return u['status']
+
+
+def _change(a, b):
+    return fmt(a) + ' → ' + fmt(b)
+
+
+def _mean(values):
+    values = [v for v in values if v is not None]
+    return sum(values) / len(values) if values else None
+
+
+def detail_table(rows):
+    """The per-machine table (same content as the Excel sheet), attached only up to cfg.vm_detail_max_rows machines."""
+    def disk(u, start):
+        return '；'.join(label + ' ' + _change(u['currentIO'].get(IO[i][0]), u['afterIO'].get(IO[i][0])) for i, label in [(start, 'IOPS'), (start + 1, '吞吐')])
+    lines = ['- **排序**：依次按订阅名、资源组名、VM名称的字母顺序排列，忽略大小写。',
+             '- **资源定位**：按订阅、资源组和机器名称查找资源；完整资源ID见Excel。',
+             '- **建议更换规格**：建议调整的写新SKU，其余写“不更换”。不更换按当前规格计算指标和价格。',
+             '- **指标箭头**：更换前实测周平均 → 更换后预计周平均；不更换时两边相同。Cached/Uncached各自显示IOPS和吞吐消耗百分比。',
+             '- **五列价格**：均按调整后规格报价；写“不更换”的仍按当前规格。每格为“每台月价（每月节省）”，单位USD。括号里的节省统一与当前规格按需列表价比较，已包含规格调整和所选RI/SP优惠。各列是互斥方案，不能相加。',
+             '- **月价计算**：按需/SP每小时列表价×730，1年RI订单价÷12，3年RI订单价÷36。未找到报价显示“无报价”；已停机机器不建议购买RI/SP。',
+             '- **备注**：说明原因、VMSS或节点池名称；同VMSS所有VM一起调整，不单独改某一个节点。', '',
+             '|订阅|资源组|VM/机器|Region|当前规格|建议更换规格|建议|CPU平均%：前→后（预计）|内存平均%：前→后（预计）|Uncached IOPS/吞吐%：前→后（预计）|Cached IOPS/吞吐%：前→后（预计）|调整后规格：按需月价（每月节省）|调整后规格：1年RI月价（每月节省）|调整后规格：3年RI月价（每月节省）|调整后规格：1年SP月价（每月节省）|调整后规格：3年SP月价（每月节省）|备注（含VMSS）|',
+             '|---|---|---|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---|']
+    for u in rows:
+        values = [u['subscriptionName'], u['resourceGroup'], u['name'], u['region'], u['currentSKU'], u['effectiveSKU'] if u['changing'] else '不更换', u['status'],
+                  _change(u['cpuCurrent'], u['cpuAfter']), _change(u['memoryCurrent'], u['memoryAfter']), disk(u, 0), disk(u, 2)] + [price_and_saving(u, k) for k in KEYS] + [u['note']]
+        lines.append('|' + '|'.join(esc(v) for v in values) + '|')
+    return lines
+
+
+def summary_section(rows, total, limit):
+    """Section 2: four summary tables of fixed size, then the per-machine table when there are at most `limit` machines.
+    A per-machine table for a large tenant runs to megabytes and duplicates the Excel sheet."""
+    changing = [u for u in rows if u['changing']]
+    saving = lambda us: sum(u['monthlyRightsizingSavings'] or 0 for u in us)  # noqa: E731
+    lines = ['## 2. 建议汇总', '',
+             f'下面四张表汇总 {len(rows)} 台机器的建议；每台机器的指标、五种价格和备注见 Excel“{DETAIL_SHEET}”，可按订阅、资源组和建议结果筛选。'
+             '表中节省均为调整规格后、按需列表价每月节省的金额（USD）。', '',
+             '### 2.1 按订阅汇总', '', '|订阅|机器数|运行中|建议调整|每月预计节省USD|', '|---|---:|---:|---:|---:|']
+    by_sub = defaultdict(list)
+    for u in rows:
+        by_sub[(u['subscriptionName'], u['subscriptionId'])].append(u)
+    for (name, _sid), us in sorted(by_sub.items(), key=lambda kv: (-saving(kv[1]), str(kv[0][0]).lower())):
+        lines.append(f'|{esc(name)}|{len(us)}|{sum(u["running"] for u in us)}|{sum(u["changing"] for u in us)}|{fmt(saving(us))}|')
+    lines += [f'|合计|{len(rows)}|{sum(u["running"] for u in rows)}|{len(changing)}|{fmt(total)}|', '',
+              '### 2.2 按建议结果汇总', '', '|建议结果|台数|运行中|每月预计节省USD|', '|---|---:|---:|---:|']
+    by_result = defaultdict(list)
+    for u in rows:
+        by_result[_result(u)].append(u)
+    for result, us in sorted(by_result.items(), key=lambda kv: (not kv[1][0]['changing'], -len(kv[1]), kv[0])):
+        lines.append(f'|{esc(result)}|{len(us)}|{sum(u["running"] for u in us)}|{fmt(saving(us))}|')
+    if changing:
+        by_sku = defaultdict(list)
+        for u in changing:
+            by_sku[(u['currentSKU'], u['effectiveSKU'])].append(u)
+        top = sorted(by_sku.items(), key=lambda kv: (-saving(kv[1]), kv[0]))[:15]
+        lines += ['', '### 2.3 按规格变化汇总', '', '|当前规格|建议规格|台数|每月预计节省USD|', '|---|---|---:|---:|']
+        lines += [f'|{a}|{b}|{len(us)}|{fmt(saving(us))}|' for (a, b), us in top]
+        if len(by_sku) > len(top):
+            lines += ['', f'共 {len(by_sku)} 种规格变化，以上是节省最多的 {len(top)} 种。']
+        items = defaultdict(list)
+        for u in changing:
+            items[(u['subscriptionName'], u['poolName']) if u['poolName'] else (u['subscriptionName'], u['resourceGroup'], u['name'])].append(u)
+        best = sorted(items.values(), key=lambda us: (-saving(us), us[0]['name']))[:20]
+        lines += ['', '### 2.4 节省最多的前 20 项', '', '节点池和 VMSS 的机器需要一起调整，合并为一行。', '',
+                  '|订阅|资源组|VM/节点池|台数|当前规格 → 建议规格|CPU平均%：前→后（预计）|内存平均%：前→后（预计）|每月预计节省USD|备注|',
+                  '|---|---|---|---:|---|---|---|---:|---|']
+        for us in best:
+            u = us[0]
+            name = f'节点池/VMSS {u["poolName"]}' if u['poolName'] else u['name']
+            skus = '、'.join(sorted({f'{x["currentSKU"]} → {x["effectiveSKU"]}' for x in us}))
+            values = [u['subscriptionName'], '、'.join(sorted({x['resourceGroup'] for x in us})), name, len(us), skus,
+                      _change(_mean(x['cpuCurrent'] for x in us), _mean(x['cpuAfter'] for x in us)),
+                      _change(_mean(x['memoryCurrent'] for x in us), _mean(x['memoryAfter'] for x in us)), fmt(saving(us)), u['note']]
+            lines.append('|' + '|'.join(esc(v) for v in values) + '|')
+    if len(rows) <= limit:
+        lines += ['', '### 2.5 逐台明细', ''] + detail_table(rows)
+    else:
+        lines += ['', f'共 {len(rows)} 台，逐台明细见 Excel“{DETAIL_SHEET}”，可按订阅、资源组、建议结果筛选。']
+    return lines
+
+
 def markdown(cfg, rows, recs, subs, manifest, pools, total, portfolio, data, pngs, narrative):
     accepted = [r for r in recs if r['status'] == '建议试点调整']
     state = Counter(r['state'] for r in recs)
@@ -338,7 +430,7 @@ def markdown(cfg, rows, recs, subs, manifest, pools, total, portfolio, data, png
              f'- 数据窗口为 **{manifest["start"]}至{manifest["end"]}（UTC）**，所有订阅使用同一完整7天。',
              f'- 建议调整 **{len(accepted)}台机器**，其中{len(accepted) - pool_nodes}台独立VM，{pool_nodes}台在{pool_count}个节点池中。节点池里的机器已包含在总数中。',
              f'- 仅调整规格、不购买RI/SP，**预计每月节省 USD {fmt(total)}，每年节省 USD {fmt(total * 12)}**。当前费用及五种方案汇总如下。',
-             '- 没有数据或权限不足的机器仍列在表中，明确写“暂不判断”，不把缺数据当成空闲。', '',
+             '- 没有数据或权限不足的机器仍列在逐台明细中，明确写“暂不判断”，不把缺数据当成空闲；数量见 2.2。', '',
              '**先小范围调整，确认业务正常后再推广。**平均用量低不代表每个忙碌时刻都够用；业务团队需确认重要任务、故障接管和AKS资源需求。报告提供分析建议，实际调整需经业务负责人批准。', '',
              '### 当前费用与调整后五种方案', '',
              f'**以下均按Azure官网公开列表价计算，单位USD，不是实际账单。**比较的是同一批{running}台运行机器的基础计算费用；{deallocated}台已释放机器计算费为0。每月按730小时估算。', '',
@@ -347,7 +439,7 @@ def markdown(cfg, rows, recs, subs, manifest, pools, total, portfolio, data, png
     for plan in portfolio['plans']:
         lines.append('|' + '|'.join(esc(v) for v in [plan['label'], fmt(plan['monthlyCost']), fmt(plan['monthlySaving']), fmt(plan['annualCost']), fmt(plan['annualSaving']), plan['note']]) + '|')
     ri1 = next(p for p in portfolio['plans'] if p['key'] == 'ri1')
-    lines += ['', (f'RI方案中，{ri1["fallbackCount"]}台机器没有对应RI报价，这部分仍按调整后规格的按需价计入，每月USD {fmt(ri1["fallbackMonthly"])}；逐台表中仍显示“无报价”。'
+    lines += ['', (f'RI方案中，{ri1["fallbackCount"]}台机器没有对应RI报价，这部分仍按调整后规格的按需价计入，每月USD {fmt(ri1["fallbackMonthly"])}；逐台明细中仍显示“无报价”。'
                    if ri1['fallbackCount'] else '') + '所有方案的节省均与当前规格按需列表价比较。RI/SP方案已包含规格调整的效果，各方案分别选择，不相加。', '']
     for key, alt in [('plans', 'VM 各方案每月费用'), ('distribution', 'VM 平均利用率分布')]:
         if key in pngs:
@@ -358,31 +450,12 @@ def markdown(cfg, rows, recs, subs, manifest, pools, total, portfolio, data, png
     for key, alt in [('status', 'VM 建议结果'), ('subscriptions', '各订阅每月预计节省')]:
         if key in pngs:
             lines += [f'![{alt}]({pngs[key]})', '']
-    lines += ['## 2. 每台机器的建议、指标和价格', '',
-              '- **排序**：依次按订阅名、资源组名、VM名称的字母顺序排列，忽略大小写。',
-              '- **资源定位**：按订阅、资源组和机器名称查找资源；完整资源ID见Excel。',
-              '- **建议更换规格**：建议调整的写新SKU，其余写“不更换”。不更换按当前规格计算指标和价格。',
-              '- **指标箭头**：更换前实测周平均 → 更换后预计周平均；不更换时两边相同。Cached/Uncached各自显示IOPS和吞吐消耗百分比。',
-              '- **五列价格**：均按调整后规格报价；写“不更换”的仍按当前规格。每格为“每台月价（每月节省）”，单位USD。括号里的节省统一与当前规格按需列表价比较，已包含规格调整和所选RI/SP优惠。各列是互斥方案，不能相加。',
-              '- **月价计算**：按需/SP每小时列表价×730，1年RI订单价÷12，3年RI订单价÷36。未找到报价显示“无报价”；已停机机器不建议购买RI/SP。',
-              '- **备注**：说明原因、VMSS或节点池名称；同VMSS所有VM一起调整，不单独改某一个节点。', '',
-              '|订阅|资源组|VM/机器|Region|当前规格|建议更换规格|建议|CPU平均%：前→后（预计）|内存平均%：前→后（预计）|Uncached IOPS/吞吐%：前→后（预计）|Cached IOPS/吞吐%：前→后（预计）|调整后规格：按需月价（每月节省）|调整后规格：1年RI月价（每月节省）|调整后规格：3年RI月价（每月节省）|调整后规格：1年SP月价（每月节省）|调整后规格：3年SP月价（每月节省）|备注（含VMSS）|',
-              '|---|---|---|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---|']
-
-    def change(a, b):
-        return fmt(a) + ' → ' + fmt(b)
-
-    def disk(u, start):
-        return '；'.join(label + ' ' + change(u['currentIO'].get(IO[i][0]), u['afterIO'].get(IO[i][0])) for i, label in [(start, 'IOPS'), (start + 1, '吞吐')])
-    for u in rows:
-        values = [u['subscriptionName'], u['resourceGroup'], u['name'], u['region'], u['currentSKU'], u['effectiveSKU'] if u['changing'] else '不更换', u['status'],
-                  change(u['cpuCurrent'], u['cpuAfter']), change(u['memoryCurrent'], u['memoryAfter']), disk(u, 0), disk(u, 2)] + [price_and_saving(u, k) for k in KEYS] + [u['note']]
-        lines.append('|' + '|'.join(esc(v) for v in values) + '|')
+    lines += summary_section(rows, total, cfg.vm_detail_max_rows)
     cc = data.get('commitmentCoverage') or {}
     if cc.get('read') and cc.get('coveredCount'):
         lines += ['', f'其中 {cc["coveredCount"]} 台建议调整的机器在 {int(cc["month"][5:])} 月有一半以上费用由 RI/SP 覆盖，涉及预计节省 '
                       f'USD {cc["coveredSavingsUSD"]:,.2f}/月。这些机器降配后，预留或节省计划的额度会转去覆盖其他机器或闲置，不会直接减少费用；'
-                      '需先交换预留或调整覆盖范围，节省在此之后才能实现。逐台情况见表中“说明”列。']
+                      f'需先交换预留或调整覆盖范围，节省在此之后才能实现。逐台情况见 Excel“{DETAIL_SHEET}”的备注列。']
     elif cc.get('read') and cc.get('month'):
         lines += ['', f'按 {int(cc["month"][5:])} 月分摊费用，建议调整的机器都没有被 RI/SP 覆盖，降配后的节省可以直接体现在账单上。']
     elif cc.get('attempted') and not cc.get('read'):
@@ -403,8 +476,8 @@ def markdown(cfg, rows, recs, subs, manifest, pools, total, portfolio, data, png
         lines += [unverified_text + '具体订阅见Excel“订阅范围”页。', '']
     if fallback:
         subs_text = '、'.join(sorted({f'`{u["subscriptionName"]}`' for u in fallback}))
-        lines += [f'{subs_text}共{len(fallback)}台机器用批量接口读取指标时被拒绝（HTTP403），已改为逐台读取同一观察期的指标，结果已纳入上表。', '']
-    lines += ['每个订阅的机器数量、建议调整数量和节省见Excel“订阅范围”页。缺数据/权限及目标不满足原因见上表备注。', '',
+        lines += [f'{subs_text}共{len(fallback)}台机器用批量接口读取指标时被拒绝（HTTP403），已改为逐台读取同一观察期的指标，结果已纳入分析。', '']
+    lines += ['每个订阅的机器数量、建议调整数量和节省见 2.1 和Excel“订阅范围”页。缺数据/权限及目标不满足的原因汇总见 2.2，逐台原因见逐台明细的备注。', '',
               '报告仅覆盖VM规格与费用分析。闲置资源清理、其他Azure服务和更全面的架构评估不在此范围。', '',
               '## 官方依据', '',
               '- [Batch API](https://learn.microsoft.com/en-us/rest/api/monitor/metrics-batch/batch?view=rest-monitor-2023-10-01)',

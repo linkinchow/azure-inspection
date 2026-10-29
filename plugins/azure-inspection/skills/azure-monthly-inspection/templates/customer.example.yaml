@@ -57,3 +57,5 @@ rules:
 
 report:
   currency: USD
+  # 02 虚拟机报告的 Markdown 只在机器不超过这个数量时附逐台明细；超过时逐台明细只放在 Excel（文件太大时桌面应用打不开）。
+  # vmDetailMaxRows: 500

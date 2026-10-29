@@ -300,6 +300,11 @@ class CredentialWordingTests(unittest.TestCase):
         for text in ('1 个凭据已过期', '1 个凭据将在 60 天内到期', '1 个凭据有效期长达约 10 年', '删除已过期'):
             self.assertIn(text, f['finding'] + f['recommendation'])
 
+    def test_credential_kind_in_plain_chinese(self):
+        f = self.finding({'startDateTime': '2025-01-01T00:00:00Z', 'endDateTime': '2026-09-01T00:00:00Z'})
+        self.assertIn('服务主体上的密码于 2026-09-01 到期', f['finding'])
+        self.assertNotIn('Credentials', f['finding'])
+
 
 class ExcelRecalculationTests(unittest.TestCase):
     def workbook(self, d):
@@ -384,3 +389,74 @@ class CollectCommandTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def vm_row(name, sub='app-prod', status='建议调整（先小范围试用）', saving=10.0, pool=None, current='Standard_D8s_v5', target='Standard_D4s_v5',
+           note='CPU核数减半，内存容量不变', running=True):
+    changing = status.startswith('建议调整')
+    io = {m: 10.0 for m, _, _ in vm_report.IO}
+    return {'subscriptionName': sub, 'subscriptionId': sub + '-id', 'resourceGroup': 'rg', 'name': name, 'region': 'eastus', 'vmId': '/x/' + name,
+            'currentSKU': current, 'effectiveSKU': target if changing else current, 'changing': changing, 'running': running, 'status': status,
+            'cpuCurrent': 10.0, 'cpuAfter': 20.0 if changing else 10.0, 'memoryCurrent': 50.0, 'memoryAfter': 50.0, 'currentIO': io, 'afterIO': io,
+            'currentMonthlyPAYG': 100.0, 'costs': {k: 100.0 - (saving if changing else 0) for k in prices.KEYS},
+            'monthlyRightsizingSavings': saving if changing else 0, 'note': note, 'poolName': pool}
+
+
+class VmMarkdownSizeTests(unittest.TestCase):
+    """02 keeps fixed summary tables; the per-machine table is only attached up to a configurable number of machines."""
+
+    rows = ([vm_row(f'aks-np-{i}', pool='np-big', saving=30.0) for i in range(3)]
+            + [vm_row('vm-a', saving=50.0), vm_row('vm-b', sub='data-prod', saving=5.0, current='Standard_E8s_v5', target='Standard_E4s_v5'),
+               vm_row('vm-c', status='保持原规格：CPU和内存均不低于20%', note='CPU和内存平均利用率均不低于20%'),
+               vm_row('vm-d', status='暂不调整：见备注', note='目标规格不能挂载现有数量的数据盘；暂不更换为 Standard_D4s_v5'),
+               vm_row('vm-e', status='暂不调整：见备注', note='目标规格没有更便宜'),
+               vm_row('vm-f', status='读取权限不足，暂不判断', note='指标读取权限不足（HTTP403），无法判断利用率')])
+
+    def section(self, limit):
+        return '\n'.join(vm_report.summary_section(self.rows, sum(r['monthlyRightsizingSavings'] for r in self.rows), limit))
+
+    def test_detail_attached_within_limit(self):
+        text = self.section(len(self.rows))
+        self.assertIn('### 2.5 逐台明细', text)
+        self.assertEqual(sum(1 for line in text.splitlines() if line.startswith('|app-prod|rg|aks-np-')), 3)
+
+    def test_detail_replaced_above_limit(self):
+        text = self.section(len(self.rows) - 1)
+        self.assertNotIn('### 2.5', text)
+        self.assertIn(f'共 {len(self.rows)} 台，逐台明细见 Excel“VM建议指标价格总表”', text)
+        self.assertFalse(any(line.startswith('|app-prod|rg|aks-np-') for line in text.splitlines()))
+
+    def test_summary_tables(self):
+        text = self.section(0)
+        self.assertIn('|app-prod|8|8|4|140.00|', text)
+        self.assertIn('|合计|9|9|5|145.00|', text)
+        self.assertIn('|暂不调整：目标规格不能挂载现有数量的数据盘|1|', text)
+        self.assertIn('|暂不调整：目标规格没有更便宜|1|', text)
+        self.assertIn('|读取权限不足，暂不判断|1|', text)
+        self.assertIn('|Standard_D8s_v5|Standard_D4s_v5|4|140.00|', text)
+        top = text.split('### 2.4')[1].split('###')[0]
+        self.assertIn('|节点池/VMSS np-big|3|', top)
+        self.assertLess(top.index('np-big'), top.index('vm-a'))
+
+    def test_reasons_with_numbers_grouped(self):
+        rows = [vm_row(f'vm-{p}', status='暂不调整：见备注', note=f'Uncached MB/s 目标平均消耗率 {p}%超过 50%；暂不更换为 Standard_D4s_v5')
+                for p in ('93.57', '52.04')]
+        text = '\n'.join(vm_report.summary_section(rows, 0, 0))
+        self.assertIn('|暂不调整：更换后磁盘 IOPS 或吞吐的平均消耗率超过 50%|2|', text)
+
+    def test_limit_configurable(self):
+        from azinspect.core import config
+        template = Path(__file__).resolve().parents[2] / 'templates' / 'customer.example.yaml'
+        self.assertEqual(config.load(template).vm_detail_max_rows, 500)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'customer.yaml'
+            p.write_text(template.read_text(encoding='utf-8').replace('  currency: USD', '  currency: USD\n  vmDetailMaxRows: -1'), encoding='utf-8')
+            with self.assertRaises(config.ConfigError):
+                config.load(p)
+
+    def test_quality_check_rejects_large_markdown(self):
+        from azinspect.core.quality import check_markdown
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / '02_报告.md'
+            p.write_text('# 报告\n\n' + '很长的段落。' * 30_000 + '\n', encoding='utf-8')
+            self.assertTrue(any('KB' in x for x in check_markdown(p)))

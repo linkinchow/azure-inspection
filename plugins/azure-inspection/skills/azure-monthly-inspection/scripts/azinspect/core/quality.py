@@ -20,6 +20,8 @@ HEDGES = ['不等于', '不代表', '不能据此', '尚不能', '不能仅', '�
           '不能视为', '不能认定', '不能推定', '不推定', '不能当作']
 HEDGE_MIN, HEDGE_PER_10K = 5, 6
 _EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z.]{2,}')
+# Desktop Markdown viewers stall on multi-megabyte files; long per-resource lists belong in the Excel workbooks.
+MAX_MARKDOWN_KB = 500
 _ONE_CHAR_ITEM = re.compile(r'^\s*[-*+]\s+\S\s*$')
 ONE_CHAR_ITEMS_MAX = 2
 _SEPARATOR = re.compile(r'^\|\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|\s*$')
@@ -34,6 +36,9 @@ def check_markdown(path: Path, banned: list[str] | None = None) -> list[str]:
 
     text = path.read_text(encoding='utf-8')
     issues = []
+    size_kb = path.stat().st_size / 1024
+    if size_kb > MAX_MARKDOWN_KB:
+        issues.append(f'文件有 {size_kb:,.0f} KB，超过 {MAX_MARKDOWN_KB} KB，打开会很慢：逐项明细放在 Excel，Markdown 只保留汇总')
     rendered = re.sub(r'<[^>]+>', '', MarkdownIt('commonmark').enable('table').render(text))
     if '**' in rendered:
         issues.append(f'渲染后仍有 {rendered.count("**")} 处 ** 显示成星号（粗体两侧的标点要放在星号外面）')

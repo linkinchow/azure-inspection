@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import json
 import math
-from collections import Counter
+from collections import Counter, defaultdict
 from decimal import ROUND_HALF_UP, Decimal
 
 from markdown_it import MarkdownIt
 from openpyxl import load_workbook
 
+from ..core import config
 from ..core.excel import unrecalculated_formula
 from ..core.io import read_json, write_json
 from .report import STEM
@@ -24,6 +25,21 @@ def same(a, b):
 def shown(n):
     # same rounding as Excel's TEXT() (15 significant digits, then half up), see table.money
     return format(Decimal(format(n, '.15g')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), ',.2f')
+
+
+def md_tables(md):
+    """{heading: data rows as cell lists} for the Markdown tables; header and separator rows dropped."""
+    out, heading = {}, None
+    for line in md.splitlines():
+        if line.startswith('#'):
+            heading = line.lstrip('#').strip()
+        elif line.startswith('|'):
+            out.setdefault(heading, []).append(line.strip().strip('|').split('|'))
+    return {h: rows[2:] for h, rows in out.items()}
+
+
+def number(text):
+    return float(text.replace(',', ''))
 
 
 def audit(ws, log=print):
@@ -142,9 +158,14 @@ def audit(ws, log=print):
                 saving = u['currentMonthlyPAYG'] - cost
                 assert display == f'{shown(cost)}（{"省" if saving >= 0 else "增加"} {shown(abs(saving))}）', (u['name'], key, display)
     assert calc.sheet_state == 'hidden' and sheet.max_column == 27
+    excel_scope = defaultdict(lambda: [0, 0, 0, 0.0])
+    for r in w['订阅范围'].iter_rows(min_row=4, values_only=True):
+        if r[0] is not None:
+            for k, v in enumerate((r[1], r[2], r[5], r[6] if recalculated else 0)):
+                excel_scope[r[0]][k] += v or 0
     w.close()
     md = (reports / f'{STEM}.md').read_text(encoding='utf-8')
-    assert '官网公开列表价' in md and '|订阅|资源组|' in md
+    assert '官网公开列表价' in md
     tables, inside, ts, columns = [], False, [], 0
     for t in MarkdownIt('commonmark').enable('table').parse(md):
         if t.type == 'table_open':
@@ -159,7 +180,38 @@ def audit(ws, log=print):
             assert len(set(ts)) == 1, 'Markdown table with inconsistent columns'
             tables.append(len(ts))
             inside = False
-    assert tables == [7, len(rows) + 1], tables
+    assert tables[0] == 7, tables
+    # Section 2 summaries: recomputed from the rows and compared with the Excel subscription sheet
+    sections = md_tables(md)
+    by_sub = defaultdict(list)
+    for u in rows:
+        by_sub[u['subscriptionName']].append(u)
+    saving = lambda us: math.fsum(u['monthlyRightsizingSavings'] or 0 for u in us)  # noqa: E731
+    t21 = sections['2.1 按订阅汇总']
+    assert t21[-1][0] == '合计' and [int(x) for x in t21[-1][1:4]] == [len(rows), sum(u['running'] for u in rows), sum(u['changing'] for u in rows)]
+    assert abs(number(t21[-1][4]) - total) < 0.006, (t21[-1], total)
+    shown_subs = defaultdict(lambda: [0, 0, 0, 0.0])
+    for r in t21[:-1]:
+        for k, v in enumerate((int(r[1]), int(r[2]), int(r[3]), number(r[4]))):
+            shown_subs[r[0]][k] += v
+    assert set(shown_subs) == set(by_sub), sorted(set(shown_subs) ^ set(by_sub))
+    for name, us in by_sub.items():
+        expected = [len(us), sum(u['running'] for u in us), sum(u['changing'] for u in us)]
+        assert shown_subs[name][:3] == expected == excel_scope[name][:3], (name, shown_subs[name], expected, excel_scope[name])
+        assert abs(shown_subs[name][3] - saving(us)) < 0.01 * len(t21), name
+        if recalculated:
+            same(excel_scope[name][3], saving(us))
+    t22 = sections['2.2 按建议结果汇总']
+    assert sum(int(r[1]) for r in t22) == len(rows)
+    recommend = {u['status'] for u in rows if u['changing']}
+    assert sum(int(r[1]) for r in t22 if r[0] in recommend) == sum(u['changing'] for u in rows)
+    if any(u['changing'] for u in rows):
+        t24 = sections['2.4 节省最多的前 20 项']
+        assert 0 < len(t24) <= 20 and math.fsum(number(r[7]) for r in t24) <= total + 0.01 * len(t24)
+    if len(rows) <= config.load(ws.config_path).vm_detail_max_rows:
+        assert len(sections['2.5 逐台明细']) == len(rows)
+    else:
+        assert '2.5 逐台明细' not in sections and f'共 {len(rows)} 台，逐台明细见 Excel' in md
     prices = read_json(f / 'price-summary.json')
     baseline = math.fsum(u['currentMonthlyPAYG'] for u in rows if u['running'])
     same(prices['currentMonthly'], baseline)
