@@ -464,6 +464,24 @@ def waf_part(ws, cfg, month):
           resource_name='shop-aks', resource_type=aks, environment=e('shop-prod', 'shop-aks'))
     f.add('R9', '低', 'AKS 集群 shop-aks 的 Kubernetes 版本 1.31 将在 3 个月内结束标准支持。', '规划升级到 1.33，并开启自动升级通道',
           subscription='shop-prod', resource_group='shop-rg', resource_name='shop-aks', resource_type=aks, environment=e('shop-prod', 'shop-aks'))
+    if sep:  # version end of support and retirement notices are checked from this month
+        f.add('R9', '高', '订阅 pay-prod 中的 MySQL 服务器 pay-mysql-prod 使用 MySQL 5.7，标准支持已于 2026-09-30 结束，'
+              '已自动进入付费的延长支持（到 2029-03-31），在升级前会持续产生额外费用。',
+              '升级到仍在标准支持期内的大版本（先在只读副本或测试环境验证，升级前备份）；升级后不再产生延长支持费用。',
+              subscription='pay-prod', resource_group='pay-rg', resource_name='pay-mysql-prod', resource_type='Microsoft.DBforMySQL/flexibleServers',
+              environment=e('pay-prod', 'pay-mysql-prod'), key='lifecycle|mysql|5.7|pay-prod')
+        f.add('R9', '高', '订阅 data-prod 中的虚拟机 data-worker-01 使用 CentOS 7，标准支持已于 2024-06-30 结束。',
+              '升级到仍受支持的系统版本，或用新镜像重建；完成前可启用延长安全更新作为过渡（Windows Server ESU 在 Azure 上免费，Ubuntu Pro 等需购买）。', subscription='data-prod', resource_group='data-rg',
+              resource_name='data-worker-01', resource_type=vm_t, environment=e('data-prod', 'data-worker-01'), key='lifecycle|os-centos|7|data-prod')
+        f.add('R9', '中', '微软服务退役公告（跟踪 ID SMPL-001）：Retirement notice: Migrate your legacy Azure general-purpose v1 account to a '
+              'general-purpose v2 account。将于 2027-03-31 退役（还有 156 天）；本租户 1 个资源受影响（1 个存储账户）。',
+              '按公告中的迁移指引在退役日期前完成迁移；公告全文可在 Azure 门户“服务运行状况 > 健康公告”中按跟踪 ID SMPL-001 查看。',
+              subscription='shop-prod', resource_name='1 个资源', resource_type=st, environment=e('shop-prod', 'shopassets'),
+              members=m(['shopassets'], st, 'shop-prod'), key='retirement|SMPL-001')
+        f.add('R9', '中', '应用网关 shop-agw 上的证书 cert-shop（CN=www.contoso.com）将于 2026-11-20 过期（还有 25 天），到期后使用该证书的监听器会出现证书错误。',
+              '续期证书并更新到应用网关（建议改为引用 Key Vault 中的证书并开启自动轮换）；确认没有监听器仍在使用旧证书。', subscription='shop-prod',
+              resource_group='shop-rg', resource_name='shop-agw/cert-shop', resource_type='Microsoft.Network/applicationGateways',
+              environment=e('shop-prod', 'shop-agw'), key='appgw-cert|shop-agw|cert-shop')
     if not sep:
         f.add('R2', '中', 'AKS 集群 shop-aks 的系统节点池只有 1 个节点。', '系统节点池至少 2 个节点并跨可用区', subscription='shop-prod',
               resource_group='shop-rg', resource_name='shop-aks/system', resource_type=aks + '/agentPools', environment=e('shop-prod', 'shop-aks'))

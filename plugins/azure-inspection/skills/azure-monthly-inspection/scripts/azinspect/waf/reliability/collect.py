@@ -39,6 +39,60 @@ ARG_QUERIES = {
     'disks': "resources | where type =~ 'microsoft.compute/disks' | project id,name,location,resourceGroup,subscriptionId,sku,zones,managedBy=tostring(managedBy),diskSizeGB=toint(properties.diskSizeGB),diskState=tostring(properties.diskState),tags",
     'health': "healthresources | where type =~ 'microsoft.resourcehealth/availabilitystatuses' | extend rid=tolower(tostring(properties.targetResourceId)), rtype=tolower(tostring(properties.targetResourceType)) | where rtype in~ ('microsoft.containerservice/managedclusters','microsoft.compute/virtualmachines','microsoft.dbformysql/flexibleservers','microsoft.dbforpostgresql/flexibleservers','microsoft.cache/redis','microsoft.cache/redisenterprise','microsoft.documentdb/mongoclusters','microsoft.network/applicationgateways','microsoft.network/loadbalancers','microsoft.storage/storageaccounts','microsoft.compute/virtualmachinescalesets','microsoft.network/natgateways') | project id,subscriptionId,rid,rtype,status=tostring(properties.availabilityState),reason=tostring(properties.reasonType),summary=tostring(properties.summary),occurred=tostring(properties.occurredTime),reported=tostring(properties.reportedTime)",
 }
+# R9 retirements and version end of support (0.6.6). Service Health and Advisor queries follow Microsoft Learn
+# (service-health/resource-graph-samples, service-retirement-unified-impact-queries).
+_RETIREMENT_EVENTS = ("servicehealthresources | where type =~ 'microsoft.resourcehealth/events' | extend p = parse_json(properties) "
+                      "| where tostring(p.EventType) == 'HealthAdvisory' and tostring(p.EventSubType) == 'Retirement'")
+ARG_QUERIES.update({
+    'retirements': _RETIREMENT_EVENTS + " | project id, subscriptionId, trackingId = tostring(p.TrackingId), title = tostring(p.Title), "
+                   "summary = tostring(p.Summary), status = tostring(p.Status), retirementDate = tostring(todatetime(p.ImpactMitigationTime)), "
+                   "impactStart = tostring(todatetime(p.ImpactStartTime)), impact = p.Impact",
+    'retirement_resources': "servicehealthresources | where type =~ 'microsoft.resourcehealth/events/impactedresources' "
+                            "| extend p = parse_json(properties), trackingId = tostring(split(id, '/')[6]) "
+                            "| join kind=inner (" + _RETIREMENT_EVENTS + " | distinct trackingId = tostring(p.TrackingId)) on trackingId "
+                            "| project id, subscriptionId, trackingId, targetResourceId = tostring(p.targetResourceId), "
+                            "targetResourceType = tostring(p.targetResourceType)",
+    'retirement_advisor': """advisorresources
+| where type == "microsoft.advisor/metadata"
+| extend props = parse_json(properties)
+| where props.recommendationCategory == "HighAvailability"
+| where props.recommendationSubCategory == "ServiceUpgradeAndRetirement"
+| where isnotempty(props.sourceProperties.serviceRetirement.serviceHealth.trackingIds)
+| mv-expand trackingId = props.sourceProperties.serviceRetirement.serviceHealth.trackingIds
+| extend trackingId = tostring(trackingId)
+| extend recommendationTypeId = tostring(props.recommendationTypeId)
+| distinct trackingId, recommendationTypeId
+| join kind=inner (
+    advisorresources
+    | where type == "microsoft.advisor/recommendations"
+    | extend props = parse_json(properties)
+    | where props.extendedProperties.recommendationSubCategory == "ServiceUpgradeAndRetirement"
+    | where isempty(props.tracked)
+    | where tostring(props.platformState) == "New"
+    | extend recommendationTypeId = tostring(props.recommendationTypeId)
+    | extend resourceId = tolower(tostring(props.resourceMetadata.resourceId))
+    | distinct recommendationTypeId, resourceId, subscriptionId
+) on recommendationTypeId
+| distinct trackingId, resourceId, subscriptionId""",
+    'webapps': "resources | where type =~ 'microsoft.web/sites' | project id, name, kind, location, resourceGroup, subscriptionId, tags, "
+               "state = tostring(properties.state)",
+    # only the stack version fields: web config can also hold machine keys and storage access keys, which are never read
+    'webconfig': "appserviceresources | where type =~ 'microsoft.web/sites/config' | extend p = parse_json(properties) "
+                 "| project id, subscriptionId, linuxFxVersion = tostring(coalesce(p.LinuxFxVersion, p.linuxFxVersion)), "
+                 "windowsFxVersion = tostring(coalesce(p.WindowsFxVersion, p.windowsFxVersion)), "
+                 "netFrameworkVersion = tostring(coalesce(p.NetFrameworkVersion, p.netFrameworkVersion)), "
+                 "phpVersion = tostring(coalesce(p.PhpVersion, p.phpVersion)), pythonVersion = tostring(coalesce(p.PythonVersion, p.pythonVersion)), "
+                 "nodeVersion = tostring(coalesce(p.NodeVersion, p.nodeVersion)), javaVersion = tostring(coalesce(p.JavaVersion, p.javaVersion)), "
+                 "powerShellVersion = tostring(coalesce(p.PowerShellVersion, p.powerShellVersion))",
+})
+RUNTIME_FIELDS = ('linuxFxVersion', 'windowsFxVersion', 'netFrameworkVersion', 'phpVersion', 'pythonVersion', 'nodeVersion', 'javaVersion',
+                  'powerShellVersion')
+WEB_API = '2023-12-01'
+
+
+def runtime_fields(config: dict) -> dict:
+    """Keep only the stack version fields of a site's web config; everything else is dropped before saving."""
+    return {k: config.get(k) for k in RUNTIME_FIELDS if config.get(k) not in (None, '')}
 
 
 def pmap(fn, items):
@@ -262,6 +316,21 @@ class _Collector:
 
         self.raw.save('health/current-per-resource.json', pmap(one, targets))
 
+    # ------------------------------------------------------------------ App Service stack versions (R9)
+    def app_runtime(self):
+        """Stack versions of sites that Resource Graph did not return: one ARM GET of config/web per site, version fields only."""
+        known = {r['id'].lower().rsplit('/config/', 1)[0] for r in self.rows('webconfig') if runtime_fields(r)}
+        missing = [r for r in self.rows('webapps') if r['id'].lower() not in known]
+
+        def one(site):
+            try:
+                st, d, e = self.c.get(f"{site['id']}/config/web?api-version={WEB_API}", 'R9', site['name'] + ' config/web')
+            except Exception as exc:  # a failed read is recorded, never treated as "no old runtime"
+                st, d, e = None, None, f'{type(exc).__name__}: {exc}'
+            return {'id': site['id'], 'status': st, 'error': e, 'versions': runtime_fields((d or {}).get('properties') or {})}
+
+        self.raw.save('lifecycle/app-config.json', {'collectedAt': now(), 'sites': pmap(one, missing)})
+
     # ------------------------------------------------------------------ Front Door certificates
     def front_door(self):
         """Custom domains of Front Door profiles that Advisor flags for certificates. Only certificate metadata
@@ -326,7 +395,7 @@ def _vnet_summary(d):
     return {'name': d['name'], 'addressSpace': d['properties'].get('addressSpace'), 'subnets': subnets}
 
 
-PHASES = ['arg', 'aks', 'storage', 'databases', 'backup', 'metrics', 'quota', 'advisor', 'health', 'front_door', 'activity']
+PHASES = ['arg', 'aks', 'storage', 'databases', 'backup', 'metrics', 'quota', 'advisor', 'health', 'front_door', 'activity', 'app_runtime']
 
 
 def collect(ws, cfg, client, window, log=print):

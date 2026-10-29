@@ -2,5 +2,7 @@ openpyxl>=3.1
 matplotlib>=3.8
 markdown-it-py>=3.0
 PyYAML>=6.0
+# certificate expiry of Application Gateway certificates (public certificate data only)
+cryptography>=42
 # Windows only, optional: Excel formula recalculation through COM
 pywin32>=306; sys_platform == "win32"

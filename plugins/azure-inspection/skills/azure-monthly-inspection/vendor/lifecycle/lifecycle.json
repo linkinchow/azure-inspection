@@ -1,0 +1,695 @@
+{
+  "reviewedAt": "2026-10-30",
+  "note": "Dates checked by hand on the source pages; review at least every 180 days. Global Azure only.",
+  "entries": [
+    {
+      "product": "mysql",
+      "version": "5.7",
+      "label": "MySQL 5.7",
+      "end": "2026-09-30",
+      "extendedEnd": "2029-03-31",
+      "extendedPaid": true,
+      "source": "https://learn.microsoft.com/en-us/azure/mysql/concepts-version-policy",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "mysql",
+      "version": "8.0",
+      "label": "MySQL 8.0",
+      "end": "2027-01-31",
+      "extendedEnd": "2029-05-31",
+      "extendedPaid": true,
+      "source": "https://learn.microsoft.com/en-us/azure/mysql/concepts-version-policy",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-almalinux",
+      "version": "8",
+      "label": "AlmaLinux 8",
+      "end": "2029-05-31",
+      "extendedEnd": null,
+      "source": "https://wiki.almalinux.org/release-notes/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-almalinux",
+      "version": "9",
+      "label": "AlmaLinux 9",
+      "end": "2032-05-31",
+      "extendedEnd": null,
+      "source": "https://wiki.almalinux.org/release-notes/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-almalinux",
+      "version": "10",
+      "label": "AlmaLinux 10",
+      "end": "2035-05-31",
+      "extendedEnd": null,
+      "source": "https://wiki.almalinux.org/release-notes/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-centos",
+      "version": "7",
+      "label": "CentOS 7",
+      "end": "2024-06-30",
+      "extendedEnd": null,
+      "source": "https://learn.microsoft.com/en-us/azure/virtual-machines/workloads/centos/centos-end-of-life",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-centos",
+      "version": "8",
+      "label": "CentOS 8",
+      "end": "2021-12-31",
+      "extendedEnd": null,
+      "source": "https://learn.microsoft.com/en-us/azure/virtual-machines/workloads/centos/centos-end-of-life",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-debian",
+      "version": "10",
+      "label": "Debian 10 (buster)",
+      "end": "2022-06-30",
+      "extendedEnd": "2024-06-30",
+      "source": "https://www.debian.org/releases/buster/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-debian",
+      "version": "11",
+      "label": "Debian 11 (bullseye)",
+      "end": "2024-08-14",
+      "extendedEnd": "2026-08-31",
+      "source": "https://www.debian.org/releases/bullseye/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-debian",
+      "version": "12",
+      "label": "Debian 12 (bookworm)",
+      "end": "2026-07-11",
+      "extendedEnd": "2028-06-30",
+      "source": "https://www.debian.org/releases/bookworm/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-rhel",
+      "version": "7",
+      "label": "Red Hat Enterprise Linux 7",
+      "end": "2024-06-30",
+      "extendedEnd": "2029-05-31",
+      "extendedPaid": true,
+      "source": "https://access.redhat.com/articles/7005471",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-rhel",
+      "version": "8",
+      "label": "Red Hat Enterprise Linux 8",
+      "end": "2029-05-31",
+      "extendedEnd": "2033-05-31",
+      "extendedPaid": true,
+      "source": "https://access.redhat.com/product-life-cycles/api/v1/products?name=Red%20Hat%20Enterprise%20Linux&all_versions=true",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-rhel",
+      "version": "9",
+      "label": "Red Hat Enterprise Linux 9",
+      "end": "2032-05-31",
+      "extendedEnd": "2036-05-31",
+      "extendedPaid": true,
+      "source": "https://access.redhat.com/product-life-cycles/api/v1/products?name=Red%20Hat%20Enterprise%20Linux&all_versions=true",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-rhel",
+      "version": "10",
+      "label": "Red Hat Enterprise Linux 10",
+      "end": "2035-05-31",
+      "extendedEnd": "2039-05-31",
+      "extendedPaid": true,
+      "source": "https://access.redhat.com/product-life-cycles/api/v1/products?name=Red%20Hat%20Enterprise%20Linux&all_versions=true",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-rocky",
+      "version": "8",
+      "label": "Rocky Linux 8",
+      "end": "2029-05-31",
+      "extendedEnd": null,
+      "source": "https://docs.rockylinux.org/releases/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-rocky",
+      "version": "9",
+      "label": "Rocky Linux 9",
+      "end": "2032-05-31",
+      "extendedEnd": null,
+      "source": "https://docs.rockylinux.org/releases/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-rocky",
+      "version": "10",
+      "label": "Rocky Linux 10",
+      "end": "2035-05-31",
+      "extendedEnd": null,
+      "source": "https://docs.rockylinux.org/releases/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-sles",
+      "version": "12",
+      "label": "SUSE Linux Enterprise Server 12",
+      "end": "2024-10-31",
+      "extendedEnd": "2027-10-31",
+      "extendedPaid": true,
+      "note": "dates for the last service pack (SP5); earlier SPs ended sooner; paid LTSS Core continues to October 2030",
+      "source": "https://www.suse.com/lifecycle/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-sles",
+      "version": "15",
+      "label": "SUSE Linux Enterprise Server 15",
+      "end": "2031-07-31",
+      "extendedEnd": "2034-07-31",
+      "extendedPaid": true,
+      "note": "dates for the last service pack (SP7); earlier SPs ended sooner; paid LTSS Core continues to December 2037",
+      "source": "https://www.suse.com/lifecycle/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-ubuntu",
+      "version": "16.04",
+      "label": "Ubuntu 16.04 LTS",
+      "end": "2021-04-30",
+      "extendedEnd": "2026-05-31",
+      "extendedPaid": true,
+      "note": "month only in source",
+      "source": "https://ubuntu.com/about/release-cycle",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-ubuntu",
+      "version": "18.04",
+      "label": "Ubuntu 18.04 LTS",
+      "end": "2023-05-31",
+      "extendedEnd": "2028-05-31",
+      "extendedPaid": true,
+      "note": "month only in source",
+      "source": "https://ubuntu.com/about/release-cycle",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-ubuntu",
+      "version": "20.04",
+      "label": "Ubuntu 20.04 LTS",
+      "end": "2025-05-31",
+      "extendedEnd": "2030-05-31",
+      "extendedPaid": true,
+      "note": "month only in source",
+      "source": "https://ubuntu.com/about/release-cycle",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-ubuntu",
+      "version": "22.04",
+      "label": "Ubuntu 22.04 LTS",
+      "end": "2027-05-31",
+      "extendedEnd": "2032-05-31",
+      "extendedPaid": true,
+      "note": "month only in source",
+      "source": "https://ubuntu.com/about/release-cycle",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-ubuntu",
+      "version": "24.04",
+      "label": "Ubuntu 24.04 LTS",
+      "end": "2029-05-31",
+      "extendedEnd": "2034-05-31",
+      "extendedPaid": true,
+      "note": "month only in source",
+      "source": "https://ubuntu.com/about/release-cycle",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-windows-server",
+      "version": "2008",
+      "label": "Windows Server 2008",
+      "end": "2020-01-14",
+      "extendedEnd": "2024-01-09",
+      "note": "ESU Year 4 was Azure only; ESU is free for Azure VMs (paid on-premises / Azure Arc)",
+      "source": "https://learn.microsoft.com/en-us/lifecycle/products/windows-server-2008",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-windows-server",
+      "version": "2008 R2",
+      "label": "Windows Server 2008 R2",
+      "end": "2020-01-14",
+      "extendedEnd": "2024-01-09",
+      "note": "ESU Year 4 was Azure only; ESU is free for Azure VMs (paid on-premises / Azure Arc)",
+      "source": "https://learn.microsoft.com/en-us/lifecycle/products/windows-server-2008-r2",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-windows-server",
+      "version": "2012",
+      "label": "Windows Server 2012",
+      "end": "2023-10-10",
+      "extendedEnd": "2026-10-13",
+      "note": "ESU is free for Azure VMs (paid on-premises / Azure Arc)",
+      "source": "https://learn.microsoft.com/en-us/lifecycle/products/windows-server-2012",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-windows-server",
+      "version": "2012 R2",
+      "label": "Windows Server 2012 R2",
+      "end": "2023-10-10",
+      "extendedEnd": "2026-10-13",
+      "note": "ESU is free for Azure VMs (paid on-premises / Azure Arc)",
+      "source": "https://learn.microsoft.com/en-us/lifecycle/products/windows-server-2012-r2",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-windows-server",
+      "version": "2016",
+      "label": "Windows Server 2016",
+      "end": "2027-01-12",
+      "extendedEnd": null,
+      "source": "https://learn.microsoft.com/en-us/lifecycle/products/windows-server-2016",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-windows-server",
+      "version": "2019",
+      "label": "Windows Server 2019",
+      "end": "2029-01-09",
+      "extendedEnd": null,
+      "source": "https://learn.microsoft.com/en-us/lifecycle/products/windows-server-2019",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-windows-server",
+      "version": "2022",
+      "label": "Windows Server 2022",
+      "end": "2031-10-14",
+      "extendedEnd": null,
+      "source": "https://learn.microsoft.com/en-us/lifecycle/products/windows-server-2022",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "os-windows-server",
+      "version": "2025",
+      "label": "Windows Server 2025",
+      "end": "2034-11-14",
+      "extendedEnd": null,
+      "source": "https://learn.microsoft.com/en-us/lifecycle/products/windows-server-2025",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "postgres",
+      "version": "11",
+      "label": "PostgreSQL 11",
+      "end": "2026-07-31",
+      "extendedEnd": "2027-03-31",
+      "extendedPaid": true,
+      "note": "extended support billing starts 2026-09-01 (one-month grace)",
+      "source": "https://learn.microsoft.com/en-us/azure/postgresql/configure-maintain/extended-support",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "postgres",
+      "version": "12",
+      "label": "PostgreSQL 12",
+      "end": "2026-07-31",
+      "extendedEnd": "2027-11-13",
+      "extendedPaid": true,
+      "note": "extended support billing starts 2026-09-01 (one-month grace)",
+      "source": "https://learn.microsoft.com/en-us/azure/postgresql/configure-maintain/extended-support",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "postgres",
+      "version": "13",
+      "label": "PostgreSQL 13",
+      "end": "2026-07-31",
+      "extendedEnd": "2028-11-12",
+      "extendedPaid": true,
+      "note": "extended support billing starts 2026-09-01 (one-month grace)",
+      "source": "https://learn.microsoft.com/en-us/azure/postgresql/configure-maintain/extended-support",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "postgres",
+      "version": "14",
+      "label": "PostgreSQL 14",
+      "end": "2027-01-31",
+      "extendedEnd": "2029-11-11",
+      "extendedPaid": true,
+      "source": "https://learn.microsoft.com/en-us/azure/postgresql/configure-maintain/extended-support",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "postgres",
+      "version": "15",
+      "label": "PostgreSQL 15",
+      "end": "2027-11-11",
+      "extendedEnd": null,
+      "source": "https://learn.microsoft.com/en-us/azure/postgresql/configure-maintain/concepts-version-policy",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "postgres",
+      "version": "16",
+      "label": "PostgreSQL 16",
+      "end": "2028-11-09",
+      "extendedEnd": null,
+      "source": "https://learn.microsoft.com/en-us/azure/postgresql/configure-maintain/concepts-version-policy",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "postgres",
+      "version": "17",
+      "label": "PostgreSQL 17",
+      "end": "2029-11-08",
+      "extendedEnd": null,
+      "source": "https://learn.microsoft.com/en-us/azure/postgresql/configure-maintain/concepts-version-policy",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "postgres",
+      "version": "18",
+      "label": "PostgreSQL 18",
+      "end": "2030-11-14",
+      "extendedEnd": null,
+      "source": "https://learn.microsoft.com/en-us/azure/postgresql/configure-maintain/concepts-version-policy",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "redis",
+      "version": "4",
+      "label": "Azure Cache for Redis version 4",
+      "end": "2023-06-30",
+      "extendedEnd": null,
+      "note": "existing caches were upgraded to Redis 6 automatically",
+      "source": "https://learn.microsoft.com/en-us/azure/azure-cache-for-redis/cache-retired-features",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "redis-tier",
+      "version": "basic-standard-premium",
+      "label": "Azure Cache for Redis Basic/Standard/Premium",
+      "end": "2028-09-30",
+      "extendedEnd": null,
+      "note": "instances disabled from 2028-10-01; move to Azure Managed Redis",
+      "source": "https://learn.microsoft.com/en-us/azure/azure-cache-for-redis/retirement-faq",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "redis-tier",
+      "version": "enterprise",
+      "label": "Azure Cache for Redis Enterprise/Enterprise Flash",
+      "end": "2027-03-31",
+      "extendedEnd": null,
+      "note": "instances disabled from 2027-04-01; move to Azure Managed Redis",
+      "source": "https://learn.microsoft.com/en-us/azure/azure-cache-for-redis/retirement-faq",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-dotnet",
+      "version": "3.1",
+      "label": ".NET Core 3.1",
+      "end": "2022-12-13",
+      "extendedEnd": null,
+      "source": "https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-dotnet",
+      "version": "5.0",
+      "label": ".NET 5",
+      "end": "2022-05-10",
+      "extendedEnd": null,
+      "source": "https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-dotnet",
+      "version": "6.0",
+      "label": ".NET 6",
+      "end": "2024-11-12",
+      "extendedEnd": null,
+      "source": "https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-dotnet",
+      "version": "7.0",
+      "label": ".NET 7",
+      "end": "2024-05-14",
+      "extendedEnd": null,
+      "source": "https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-dotnet",
+      "version": "8.0",
+      "label": ".NET 8",
+      "end": "2026-11-10",
+      "extendedEnd": null,
+      "source": "https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-dotnet",
+      "version": "9.0",
+      "label": ".NET 9",
+      "end": "2026-11-10",
+      "extendedEnd": null,
+      "source": "https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-dotnet",
+      "version": "10.0",
+      "label": ".NET 10",
+      "end": "2028-11-14",
+      "extendedEnd": null,
+      "source": "https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-java",
+      "version": "11",
+      "label": "Java 11 (Microsoft Build of OpenJDK)",
+      "end": "2027-09-30",
+      "extendedEnd": null,
+      "note": "month only in source; earliest end-of-support date, Microsoft may extend",
+      "source": "https://learn.microsoft.com/en-us/java/openjdk/support",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-java",
+      "version": "17",
+      "label": "Java 17 (Microsoft Build of OpenJDK)",
+      "end": "2027-09-30",
+      "extendedEnd": null,
+      "note": "month only in source; earliest end-of-support date, Microsoft may extend",
+      "source": "https://learn.microsoft.com/en-us/java/openjdk/support",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-java",
+      "version": "21",
+      "label": "Java 21 (Microsoft Build of OpenJDK)",
+      "end": "2028-09-30",
+      "extendedEnd": null,
+      "note": "month only in source; earliest end-of-support date, Microsoft may extend",
+      "source": "https://learn.microsoft.com/en-us/java/openjdk/support",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-node",
+      "version": "14",
+      "label": "Node.js 14",
+      "end": "2023-04-30",
+      "extendedEnd": null,
+      "source": "https://github.com/nodejs/release",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-node",
+      "version": "16",
+      "label": "Node.js 16",
+      "end": "2023-09-11",
+      "extendedEnd": null,
+      "source": "https://github.com/nodejs/release",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-node",
+      "version": "18",
+      "label": "Node.js 18",
+      "end": "2025-04-30",
+      "extendedEnd": null,
+      "source": "https://github.com/nodejs/release",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-node",
+      "version": "20",
+      "label": "Node.js 20",
+      "end": "2026-04-30",
+      "extendedEnd": null,
+      "source": "https://github.com/nodejs/release",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-node",
+      "version": "22",
+      "label": "Node.js 22",
+      "end": "2027-04-30",
+      "extendedEnd": null,
+      "source": "https://github.com/nodejs/release",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-node",
+      "version": "24",
+      "label": "Node.js 24",
+      "end": "2028-04-30",
+      "extendedEnd": null,
+      "source": "https://github.com/nodejs/release",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-php",
+      "version": "7.4",
+      "label": "PHP 7.4",
+      "end": "2022-11-28",
+      "extendedEnd": null,
+      "source": "https://www.php.net/eol.php",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-php",
+      "version": "8.0",
+      "label": "PHP 8.0",
+      "end": "2023-11-26",
+      "extendedEnd": null,
+      "source": "https://www.php.net/eol.php",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-php",
+      "version": "8.1",
+      "label": "PHP 8.1",
+      "end": "2025-12-31",
+      "extendedEnd": null,
+      "source": "https://www.php.net/eol.php",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-php",
+      "version": "8.2",
+      "label": "PHP 8.2",
+      "end": "2026-12-31",
+      "extendedEnd": null,
+      "source": "https://www.php.net/supported-versions.php",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-php",
+      "version": "8.3",
+      "label": "PHP 8.3",
+      "end": "2027-12-31",
+      "extendedEnd": null,
+      "source": "https://www.php.net/supported-versions.php",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-php",
+      "version": "8.4",
+      "label": "PHP 8.4",
+      "end": "2028-12-31",
+      "extendedEnd": null,
+      "source": "https://www.php.net/supported-versions.php",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-python",
+      "version": "3.8",
+      "label": "Python 3.8",
+      "end": "2024-10-07",
+      "extendedEnd": null,
+      "source": "https://devguide.python.org/versions/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-python",
+      "version": "3.9",
+      "label": "Python 3.9",
+      "end": "2025-10-31",
+      "extendedEnd": null,
+      "source": "https://devguide.python.org/versions/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-python",
+      "version": "3.10",
+      "label": "Python 3.10",
+      "end": "2026-10-01",
+      "extendedEnd": null,
+      "source": "https://devguide.python.org/versions/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-python",
+      "version": "3.11",
+      "label": "Python 3.11",
+      "end": "2027-10-31",
+      "extendedEnd": null,
+      "note": "month only in source; planned date",
+      "source": "https://devguide.python.org/versions/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-python",
+      "version": "3.12",
+      "label": "Python 3.12",
+      "end": "2028-10-31",
+      "extendedEnd": null,
+      "note": "month only in source; planned date",
+      "source": "https://devguide.python.org/versions/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-python",
+      "version": "3.13",
+      "label": "Python 3.13",
+      "end": "2029-10-31",
+      "extendedEnd": null,
+      "note": "month only in source; planned date",
+      "source": "https://devguide.python.org/versions/",
+      "checkedAt": "2026-10-30"
+    },
+    {
+      "product": "runtime-python",
+      "version": "3.14",
+      "label": "Python 3.14",
+      "end": "2030-10-31",
+      "extendedEnd": null,
+      "note": "month only in source; planned date",
+      "source": "https://devguide.python.org/versions/",
+      "checkedAt": "2026-10-30"
+    }
+  ]
+}

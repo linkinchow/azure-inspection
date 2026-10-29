@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 from ..checks import count_text, type_label
+from . import lifecycle
 from ..common import ADVISOR_NO_TEXT, Findings, Raw, advisor_problem, coverage_entry, enabled, env, load_scope, mixed_env
 
 CHECKS = [f'R{i}' for i in range(1, 13)]
@@ -710,7 +711,7 @@ def r9(run):
             lts_note = f'该小版本只剩 LTS 长期支持，而 LTS 需要 Premium 层，集群当前为 {tier} 层' if 'AKSLongTermSupport' in plans else '该小版本已不在区域可用版本列表中'
             run.add('R9', '低' if nonprod(ce) else '中', cl['id'], CLUSTER, cl['name'], ce,
                     f"集群 {cl['name']} 运行 Kubernetes {ver}，已超出社区支持范围（{lts_note}；当前区域正式支持 {', '.join(official)}），出现问题时 Azure 支持有限，且下次升级需要连续跨多个小版本。",
-                    row, f"按小版本逐级升级到 {official[0] if official else '受支持版本'} 或更高（先在测试集群验证，注意已弃用 API）；升级前先确认节点子网有足够 IP 容纳升级缓冲节点（见 R1）。",
+                    row, f"按小版本逐级升级到 {official[0] if official else '受支持版本'} 或更高（先在测试集群验证；升级前用 AKS 门户“诊断和解决问题”中的弃用 API 检测，或集群内的工具检查是否仍在使用将被移除的 API）；升级前先确认节点子网有足够 IP 容纳升级缓冲节点（见 R1）。",
                     '确认该集群是否为生产集群。' if ce['value'] == 'unknown' else None, key=f"{cl['id']}|k8s-version")
         old = [p for p in pools if (p['imageAgeDays'] or 0) > 120]
         if old:
@@ -721,6 +722,7 @@ def r9(run):
                     '把节点操作系统升级通道设为 NodeImage（或 SecurityPatch）并配置维护窗口，先在测试集群执行；同时规划 Ubuntu 22.04 到 24.04 的迁移（Kubernetes 1.35 起节点不再支持 22.04）。',
                     key=f"{cl['id']}|node-image")
     _advisor(run, inv)
+    lifecycle.check(run, inv, member)
     basic_pip = [r['name'] for r in run.rows('pips') if (r.get('sku') or {}).get('name') == 'Basic']
     basic_lb = [r['name'] for r in run.rows('lbs') if (r.get('sku') or {}).get('name') == 'Basic']
     inv['basicSku'] = {'basicPublicIPs': basic_pip, 'basicLoadBalancers': basic_lb,

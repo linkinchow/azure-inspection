@@ -14,7 +14,7 @@ from pathlib import Path
 from . import __version__
 
 SKILL_DIR = Path(__file__).resolve().parents[2]
-REQUIRED = {'openpyxl': 'openpyxl', 'matplotlib': 'matplotlib', 'markdown_it': 'markdown-it-py', 'yaml': 'PyYAML'}
+REQUIRED = {'openpyxl': 'openpyxl', 'matplotlib': 'matplotlib', 'markdown_it': 'markdown-it-py', 'yaml': 'PyYAML', 'cryptography': 'cryptography'}
 CJK_FONTS = ['Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', 'Source Han Sans SC', 'SimHei', 'Heiti SC']
 
 
