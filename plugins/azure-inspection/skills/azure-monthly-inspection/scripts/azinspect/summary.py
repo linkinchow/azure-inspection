@@ -12,7 +12,7 @@ from .core.charts import clear as clear_charts
 from .core.fmt_md import format_and_check
 from .core.io import read_json, write_json
 from .waf.checks import CHECKS
-from .waf.report import default_top_issues, recommendation_text
+from .waf.report import PLAN_PERIODS, action_plan, default_top_issues, recommendation_text
 
 GROUPS = ['可靠性', '安全', '卓越运营', '性能效率']
 SEVERITY_ORDER = ('高', '中', '低')
@@ -108,9 +108,18 @@ def default_pillar_notes(d):
 def default_plan(d):
     plan = {}
     for code in ('03', '04'):
-        for key, items in (d['narrative'][code].get('actionPlan') or {}).items():
+        for key, items in action_plan(d['narrative'][code].get('actionPlan')).items():
             plan.setdefault(key, []).extend(items)
     return plan
+
+
+def plan_lines(plan):
+    lines = []
+    for key, label in PLAN_PERIODS:
+        items = action_plan(plan).get(key)
+        if items:
+            lines += [f'**{label}**', ''] + [f'- {x}' for x in items] + ['']
+    return lines
 
 
 def table(header, rows, align):
@@ -193,11 +202,7 @@ def markdown(cfg, period, d, n, pngs, scope):
             continue
         lines += ['', f'## {i}. {g}', '', f'共 {sum(c.values())} 项问题：高 {c["高"]} 项、中 {c["中"]} 项、低 {c["低"]} 项。', '']
         lines += [f'- {x}' for x in notes.get(g, [])]
-    plan = n.get('actionPlan') or default_plan(d)
-    lines += ['', '## 8. 建议处理计划', '']
-    for key, label in (('week', '本周内'), ('month', '一个月内'), ('quarter', '一个季度内')):
-        if plan.get(key):
-            lines += [f'**{label}**', ''] + [f'- {x}' for item in plan[key] for x in item.split('；') if x.strip()] + ['']
+    lines += ['', '## 8. 建议处理计划', ''] + plan_lines(action_plan(n.get('actionPlan')) or default_plan(d))
     lines += ['## 9. 需要贵司确认或提供的信息', ''] + [f'- {x}' for x in (n.get('customerQuestions') or [
         '生产和测试环境的划分：本次按订阅、资源名称和标签判断。', 'RI/SP 现有订单和预算目标，以及各资源的负责人。'])]
     lines += ['', '## 10. 后续', '', n.get('followUp') or

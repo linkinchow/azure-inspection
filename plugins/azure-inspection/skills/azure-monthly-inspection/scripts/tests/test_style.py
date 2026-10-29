@@ -37,6 +37,11 @@ class StyleTests(unittest.TestCase):
         self.assertIn('出现 3 次', issues)
         self.assertIn('否定和保留说法太多', issues)
 
+    def test_list_split_into_characters(self):
+        with tempfile.TemporaryDirectory() as d:
+            issues = check_markdown(md(d, '# 报告\n\n**本周内**\n\n- 关\n- 闭\n- 入\n- 口\n\n- 甲\n- 乙项\n'))
+        self.assertEqual(len([x for x in issues if '单个字' in x]), 1)
+
     def test_process_words(self):
         with tempfile.TemporaryDirectory() as d:
             issues = check_markdown(md(d, '# 报告\n\n跨报告复核后，命中检查的实例需要处理。\n'))

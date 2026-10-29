@@ -189,6 +189,22 @@ def default_check_note(fs):
     return first_clause(top['finding'])
 
 
+PLAN_PERIODS = (('week', '本周内'), ('month', '一个月内'), ('quarter', '一个季度内'))
+
+
+def action_plan(plan) -> dict:
+    """{'week'|'month'|'quarter': [items]}. Narratives may give each period as a list or as one string with items
+    separated by '；'; both become a list of non-empty items without a trailing '。' (a string must never be iterated
+    character by character)."""
+    out = {}
+    for key, value in (plan or {}).items():
+        values = [value] if isinstance(value, str) else list(value or [])
+        items = [x.strip().rstrip('。') for v in values for x in str(v).split('；') if x.strip().rstrip('。')]
+        if items:
+            out[key] = items
+    return out
+
+
 def default_action_plan(findings):
     by = defaultdict(list)
     for f in findings:
@@ -459,11 +475,14 @@ def markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_
         if narrative.get('landingZoneNote'):
             lines += ['', narrative['landingZoneNote']]
         n += 1
-    plan = narrative.get('actionPlan') or default_action_plan(findings)
+    plan = action_plan(narrative.get('actionPlan') or default_action_plan(findings))
     lines += ['', f'## {n}. 建议处理顺序', '']
-    for key, label in (('week', '本周内'), ('month', '一个月内'), ('quarter', '一个季度内')):
-        if plan.get(key):
-            lines.append(f'- **{label}：**' + ''.join(plan[key]))
+    for key, label in PLAN_PERIODS:
+        items = plan.get(key) or []
+        if len(items) == 1:
+            lines.append(f'- **{label}：**{items[0]}')
+        elif items:
+            lines += [f'- **{label}：**'] + [f'  - {x}' for x in items]
     lines += ['', '每项问题的资源明细、建议、验收标准和需要客户确认的内容见 Excel“问题清单”，可直接用于分配负责人和跟踪处理状态。', '',
               f'## {n + 1}. 检查范围与限制', '']
     limits = ([f'{scope_note}。'] if scope_note else []) + meta['notes'] + list(limits or []) + [

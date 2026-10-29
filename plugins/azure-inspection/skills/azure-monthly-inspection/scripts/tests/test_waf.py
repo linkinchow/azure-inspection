@@ -103,5 +103,36 @@ class ReportTests(unittest.TestCase):
         self.assertIn(f'- {text}', md.split('检查范围与限制')[1])
 
 
+
+class ActionPlanTests(unittest.TestCase):
+    """actionPlan entries may be a list or a string with items separated by '；' (00, 03 and 04 alike)."""
+
+    def test_string_and_list_normalized(self):
+        self.assertEqual(report.action_plan({'week': '关闭公网入口；开启异地备份；', 'month': ['补齐告警；配置预算', ' '], 'quarter': None}),
+                         {'week': ['关闭公网入口', '开启异地备份'], 'month': ['补齐告警', '配置预算']})
+
+    def test_03_lists_each_item(self):
+        cfg = config.load(TEMPLATE)
+        with tempfile.TemporaryDirectory() as d:
+            ws = workspace(d)
+            sample(ws, cfg)
+            report.build(ws, cfg, '03', {'actionPlan': {'week': ['扩容子网。', '配置备份'], 'month': '整理标签；清理闲置盘'}}, log=lambda *_: None)
+            md = (ws.month_dir('reports') / '03_可靠性与安全巡检报告.md').read_text(encoding='utf-8')
+        section = md.split('建议处理顺序')[1].split('##')[0]
+        for item in ('扩容子网', '配置备份', '整理标签', '清理闲置盘'):
+            self.assertIn(f'  - {item}\n', section)
+        self.assertNotIn('扩容子网。配置备份', section)
+
+    def test_00_plan_never_split_into_characters(self):
+        from azinspect import summary
+        d = {'narrative': {'03': {'actionPlan': {'week': '扩容子网；配置备份'}}, '04': {'actionPlan': {'week': ['补齐告警']}}}}
+        plan = summary.default_plan(d)
+        self.assertEqual(plan, {'week': ['扩容子网', '配置备份', '补齐告警']})
+        lines = summary.plan_lines({'week': '关闭公网入口；开启异地备份', 'month': ['补齐告警']})
+        self.assertIn('- 关闭公网入口', lines)
+        self.assertIn('- 补齐告警', lines)
+        self.assertFalse(any(len(x) == 3 and x.startswith('- ') for x in lines))
+
+
 if __name__ == '__main__':
     unittest.main()

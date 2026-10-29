@@ -20,6 +20,8 @@ HEDGES = ['不等于', '不代表', '不能据此', '尚不能', '不能仅', '�
           '不能视为', '不能认定', '不能推定', '不推定', '不能当作']
 HEDGE_MIN, HEDGE_PER_10K = 5, 6
 _EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z.]{2,}')
+_ONE_CHAR_ITEM = re.compile(r'^\s*[-*+]\s+\S\s*$')
+ONE_CHAR_ITEMS_MAX = 2
 _SEPARATOR = re.compile(r'^\|\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|\s*$')
 
 
@@ -49,6 +51,15 @@ def check_markdown(path: Path, banned: list[str] | None = None) -> list[str]:
                 if _cells(lines[j]) != expected:
                     issues.append(f'第 {j + 1} 行表格列数为 {_cells(lines[j])}，表头为 {expected}')
                 j += 1
+    # a narrative string iterated character by character renders as one list item per character
+    run = 0
+    for i, line in enumerate(lines + ['']):
+        if _ONE_CHAR_ITEM.match(line):
+            run += 1
+            continue
+        if run >= ONE_CHAR_ITEMS_MAX + 1:
+            issues.append(f'第 {i - run + 1}–{i} 行连续 {run} 个列表项都只有单个字（说明文件里的文字可能被逐字拆开）')
+        run = 0
     for word in banned if banned is not None else BANNED:
         for m in re.finditer(re.escape(word), text):
             issues.append(f'内部用语“{word}”：…{text[max(0, m.start() - 15):m.end() + 15]}…'.replace('\n', ' '))
