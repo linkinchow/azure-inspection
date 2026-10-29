@@ -24,7 +24,9 @@ rules:
     - {label: dr,   match: '(^|[-_])dr\d*([-_]|$)'}
     - {label: prod, match: '(^|[-_])(prod|prd|production)\d*([-_]|$)'}
     # appliesTo 可选：subscription（只匹配订阅名）、resource（只匹配资源名和标签）、any（默认）。
-    # 例如只想按订阅名前缀判断生产，不让同样的前缀误匹配资源名：
+    # 核心业务订阅的名称里没有 prod 等字样时，其中没有环境标签的资源会被判为“环境未知”。可以直接列出这些订阅名，指定为生产：
+    #  - {label: prod, match: '^(contoso-core|contoso-web)$', appliesTo: subscription}
+    # 也可以按订阅名前缀判断生产，不让同样的前缀误匹配资源名：
     #  - {label: prod, match: '^(prd|live)[_-]', appliesTo: subscription}
 
   # 可选：除通用关键字（mysql、redis、kafka、clickhouse、bigdata 等）外，名称表示“保存数据”的虚拟机。用于判断哪些虚拟机必须备份。

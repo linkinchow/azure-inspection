@@ -9,7 +9,7 @@ import re
 from collections import Counter, defaultdict
 
 from ...core.io import read_json
-from ..common import Findings, Raw, env, is_prod, load_scope, mixed_env
+from ..common import ADVISOR_NO_TEXT, Findings, Raw, advisor_problem, env, is_prod, load_scope, mixed_env
 from .lib import Data, first, fmt, rg_of
 
 SEV_ORDER = {'高': 0, '中': 1, '低': 2}
@@ -1084,7 +1084,7 @@ class Analyzer:
         groups = defaultdict(list)
         for a in perf:
             p = a['properties']
-            groups[p['shortDescription']['problem']].append({
+            groups[advisor_problem(a, ADVISOR_NO_TEXT)].append({
                 'subscriptionName': a.get('_subscriptionName'), 'impact': p.get('impact'), 'resourceType': p.get('impactedField'),
                 'resourceName': p.get('impactedValue'),
                 'extended': {k: v for k, v in (p.get('extendedProperties') or {}).items()

@@ -25,7 +25,8 @@ def analyze(ws, client=None, price_date=None, fetch_prices=True, log=print):
         needed.update((v['region'], s['name']) for s, _rc, _rm in rules.sizes_for(v, skus))
     if fetch_prices and client is None:
         raise ValueError('需要联网查询官网价格时必须提供客户端')
-    catalog = ensure_prices(client, ws.raw('vm/prices'), needed, price_date, fetch_prices, log)
+    canonical = {i['name'].lower(): i['name'] for record in sku_envelopes for i in record.get('items') or [] if i.get('name')}
+    catalog = ensure_prices(client, ws.raw('vm/prices'), needed, price_date, fetch_prices, log, canonical)
     updated, records, trials, pools, summary = rules.analyze(vms, sku_envelopes, clusters, catalog, subscriptions, manifest, price_date)
     out = ws.month_dir('findings') / 'vm'
     for name, data in [('vms-analyzed.json', updated), ('recommendations.json', records), ('candidate-checks.json', trials),

@@ -186,19 +186,26 @@ def _patch_findings(ctx, no_patch, pending):
 
 # ---------------------------------------------------------------------------------------------- S-I9
 def keyvaults(ctx):
-    inventory = []
+    inventory, unjudged = [], []
     for r in ctx.rows('keyvaults'):
         policies = r.get('accessPolicies') or []
-        full = 0
+        full = unknown = 0
         for a in policies:
             perms = a.get('permissions') or {}
-            if any(x.lower() == 'all' for x in perms.get('secrets', []) + perms.get('keys', [])) or len(perms.get('secrets', [])) >= 7:
+            secrets, keys = perms.get('secrets') or [], perms.get('keys') or []
+            # Raw files saved before 0.6.5 may hold a redaction marker instead of the permission list: not judged, never "no full access".
+            if not isinstance(secrets, list) or not isinstance(keys, list):
+                unknown += 1
+            elif any(x.lower() == 'all' for x in secrets + keys) or len(secrets) >= 7:
                 full += 1
+        if unknown:
+            unjudged.append(r['name'])
         sid = r['subscriptionId']
         e = ctx.env(ctx.name_of(sid), r['name'], r.get('tags'))
         item = {'name': r['name'], 'subscription': ctx.name_of(sid), 'environment': e, 'softDelete': r.get('enableSoftDelete'),
                 'softDeleteRetentionDays': r.get('softDeleteRetentionInDays'), 'purgeProtection': r.get('enablePurgeProtection'),
-                'rbacAuthorization': r.get('enableRbacAuthorization'), 'accessPolicyCount': len(policies), 'fullSecretKeyPolicies': full,
+                'rbacAuthorization': r.get('enableRbacAuthorization'), 'accessPolicyCount': len(policies),
+                'fullSecretKeyPolicies': None if unknown else full, 'unjudgedAccessPolicies': unknown,
                 'publicNetworkAccess': r.get('publicNetworkAccess'), 'networkAclsDefaultAction': r.get('networkAclsDefault') or None}
         inventory.append(item)
         common = dict(sub=sid, rg=r['resourceGroup'], name=r['name'], rtype=KV_TYPE, environment=e, rid=r['id'])
@@ -214,6 +221,8 @@ def keyvaults(ctx):
                     recommendation='迁移到 Azure RBAC 授权模型，按最小权限授予 Key Vault Secrets User 等角色。' + NO_CHANGE, key='access-policy', **common)
     ctx.inventory['keyVaults'] = inventory
     ctx.notes['S-I9'].append('仅管理面属性，未访问 Key Vault 数据面；访问策略只统计数量和权限范围。')
+    if unjudged:
+        ctx.notes['S-I9'].append(f"{len(unjudged)} 个 Key Vault 的访问策略权限在保存的数据中已被脱敏，是否授予完全权限无法判断：{'、'.join(unjudged)}。")
 
 
 # ---------------------------------------------------------------------------------------------- S-I10

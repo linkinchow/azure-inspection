@@ -3,7 +3,7 @@
 Every number a customer reads in a workbook is either a value or a formula whose result we know in
 advance. `verify` recalculates the workbook in Excel (Windows + pywin32 + Excel installed) and compares
 each formula result with the expected value. Without Excel it only checks that every expected formula
-is present, and says so in the result; the workbook still recalculates when the customer opens it.
+is present, and says why in the result (recalculationError); the workbook still recalculates when the customer opens it.
 AZINSPECT_NO_EXCEL=1 skips Excel (unit tests only: report audits that read cached values need the recalculation).
 """
 from __future__ import annotations
@@ -43,14 +43,23 @@ def style_sheet(ws, header_row: int = 3, band: bool = False, width: int = 18) ->
         ws.column_dimensions[get_column_letter(col)].width = width
 
 
-def _recalculate_with_excel(path: Path) -> bool:
-    if platform.system() != 'Windows' or os.environ.get('AZINSPECT_NO_EXCEL'):
-        return False
+def recalculation_timeout(size_bytes: int) -> int:
+    """Seconds to wait for Excel: 150 for ordinary workbooks, about 30 per MB for large ones, at most an hour."""
+    return int(min(3600, max(150, 30 * size_bytes / 1_000_000)))
+
+
+def _recalculate_with_excel(path: Path) -> tuple[bool, str | None]:
+    """(recalculated, reason when not)."""
+    if os.environ.get('AZINSPECT_NO_EXCEL'):
+        return False, 'AZINSPECT_NO_EXCEL=1，跳过 Excel 复算'
+    if platform.system() != 'Windows':
+        return False, '不是 Windows，无法调用 Excel'
     try:
         import pythoncom
         import win32com.client
     except ImportError:
-        return False
+        return False, '未安装 pywin32，无法调用 Excel'
+    timeout = recalculation_timeout(path.stat().st_size)
     pythoncom.CoInitialize()
     excel = book = None
     try:
@@ -60,17 +69,17 @@ def _recalculate_with_excel(path: Path) -> bool:
         excel.AutomationSecurity = 3  # disable macros
         book = excel.Workbooks.Open(str(path), UpdateLinks=0, ReadOnly=False)
         excel.CalculateFullRebuild()
-        deadline = time.monotonic() + 150
+        deadline = time.monotonic() + timeout
         while excel.CalculationState != 0:
             if time.monotonic() > deadline:
-                raise TimeoutError('Excel recalculation did not complete')
+                raise TimeoutError(f'Excel 在 {timeout} 秒内没有完成复算')
             time.sleep(.2)
         book.Save()
         book.Close(SaveChanges=False)
         book = None
-        return True
-    except Exception:  # Excel missing or COM failure: fall back to the structural check
-        return False
+        return True, None
+    except Exception as e:  # Excel missing, file not opened or COM failure: fall back to the structural check and keep the reason
+        return False, f'Excel 复算失败：{type(e).__name__}: {e}'[:500]
     finally:
         if book is not None:
             book.Close(SaveChanges=False)
@@ -79,10 +88,16 @@ def _recalculate_with_excel(path: Path) -> bool:
         pythoncom.CoUninitialize()
 
 
+def unrecalculated_formula(cell, recalculated: bool) -> bool:
+    """True when an audit cannot read a formula's result: without Excel recalculation the file holds only the formula text.
+    verify() has already checked that each expected formula is present; audits skip the value comparison for such cells."""
+    return not recalculated and cell.data_type == 'f'
+
+
 def verify(path: Path, expected: dict, result_path: Path | None = None) -> dict:
     """expected: {'Sheet!A1': number | {'text': str}}. Raises AssertionError on any mismatch."""
     path = Path(path)
-    recalculated = _recalculate_with_excel(path)
+    recalculated, reason = _recalculate_with_excel(path)
     formulas = load_workbook(path, data_only=False)
     values = load_workbook(path, data_only=True) if recalculated else None
     errors, count = [], 0
@@ -112,6 +127,7 @@ def verify(path: Path, expected: dict, result_path: Path | None = None) -> dict:
     result = {'status': 'success' if not errors else 'errors_found', 'recalculatedInExcel': recalculated,
               'formulaCount': count, 'totalErrors': len(errors), 'errors': errors[:200], 'workbook': path.name}
     if not recalculated:
+        result['recalculationError'] = reason
         result['note'] = '本机无法用 Excel 复算，只检查了公式是否齐全；客户打开文件时 Excel 会自动重算。'
     if result_path:
         Path(result_path).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')

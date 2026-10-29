@@ -122,6 +122,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.environment('', 'x', {'Environment': 'prod'}), ('prod', '标签 Environment=prod'))
         self.assertEqual(cfg.region('JapanEast'), '日本东部')
 
+    def test_template_subscription_example(self):
+        text = TEMPLATE.read_text(encoding='utf-8')
+        line = next(x for x in text.splitlines() if 'contoso-core' in x)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'customer.yaml'
+            p.write_text(text.replace(line, line.replace('#  - ', '- ')), encoding='utf-8')
+            cfg = config.load(p)
+        self.assertEqual(cfg.environment('contoso-core', 'vm-01')[0], 'prod')
+        self.assertEqual(cfg.environment('shared', 'contoso-core')[0], 'unknown')
+
     def test_standard_tag_key_variants(self):
         cfg = config.load(TEMPLATE)
         cfg.standard_tag = {'key': 'managed_by', 'value': 'terraform'}
@@ -178,6 +188,30 @@ class SanitizeTests(unittest.TestCase):
         self.assertEqual(out['owner'], '[email] 负责')
         self.assertEqual(out['phoneNumber'], '[REDACTED]')
         self.assertEqual(out['count'], 3)
+
+    def test_key_vault_permission_names_kept(self):
+        policy = {'accessPolicies': [{'objectId': 'o', 'permissions': {'keys': ['Get', 'List', 'unwrapKey'], 'secrets': ['all'], 'certificates': []}}]}
+        self.assertEqual(io.sanitize(policy), policy)
+        out = io.sanitize({'permissions': {'keys': ['c2VjcmV0LWtleS0x='], 'secrets': ['get']}, 'keys': ['Get'], 'properties': {'secrets': ['get']}})
+        self.assertEqual(out['permissions'], {'keys': '[REDACTED]', 'secrets': '[REDACTED]'})
+        self.assertEqual(out['keys'], '[REDACTED]')
+        self.assertEqual(out['properties']['secrets'], '[REDACTED]')
+        self.assertEqual(io.sanitize({'permissions': {'password': ['hunter'], 'keys': ['get']}})['permissions']['password'], '[REDACTED]')
+
+    def test_resource_id_keys_are_data_not_field_names(self):
+        rid = f'/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/phonestore'
+        kv = f'/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/app-secrets'
+        out = io.sanitize({'results': {rid: {'Transactions': [{'data': [1]}]}, kv: {'conn': 'AccountKey=xyz', 'password': 'p'}}})
+        self.assertEqual(out['results'][rid], {'Transactions': [{'data': [1]}]})
+        self.assertEqual(out['results'][kv], {'conn': '[REDACTED]', 'password': '[REDACTED]'})
+
+    def test_contact_phone_fields_removed(self):
+        out = io.sanitize({'smsReceivers': [{'phoneNumber': '1'}], 'businessPhones': ['1'], 'mobilePhone': '1', 'telephoneNumber': '1',
+                           'contact': {'phone': '1'}, 'phonestore': {'sku': 'x'}})
+        for key in ('smsReceivers', 'businessPhones', 'mobilePhone', 'telephoneNumber'):
+            self.assertEqual(out[key], '[REDACTED]')
+        self.assertEqual(out['contact']['phone'], '[REDACTED]')
+        self.assertEqual(out['phonestore'], {'sku': 'x'})
 
 
 class MarkdownTests(unittest.TestCase):

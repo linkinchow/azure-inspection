@@ -4,7 +4,7 @@ from __future__ import annotations
 import collections
 import re
 
-from ..common import is_prod, mixed_env
+from ..common import ADVISOR_NO_TEXT, advisor_problem, is_prod, mixed_env
 from .data import TYPE_LABEL, rg_of, sub_of
 from .monitoring import NO_CHANGE
 
@@ -212,7 +212,7 @@ def check_advisor(d, out, inventory):
     for x in d.advisor.get('recommendations', []):
         p = x['properties']
         if p['category'] == 'OperationalExcellence':
-            grouped[(p['shortDescription']['problem'], p['impact'])].append({'subscriptionName': x.get('_subscriptionName'), 'resource': p.get('impactedValue'),
+            grouped[(advisor_problem(x, ADVISOR_NO_TEXT), p['impact'])].append({'subscriptionName': x.get('_subscriptionName'), 'resource': p.get('impactedValue'),
                                                                              'type': p.get('impactedField')})
     summary = [{'recommendation': k[0], 'impact': k[1], 'count': len(v), 'bySubscription': dict(collections.Counter(i['subscriptionName'] for i in v)),
                 'coveredBy': ADVISOR_COVERED.get(k[0])} for k, v in sorted(grouped.items(), key=lambda kv: -len(kv[1]))]

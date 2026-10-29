@@ -26,7 +26,21 @@ _CREDENTIAL_METADATA = re.compile(r'^(password|key)credentials$', re.I)
 _FEATURE_KEY = re.compile(r'(secretsprovider|secretrotation)', re.I)
 _SECRET_VALUE = re.compile(r'(AccountKey=|SharedAccessSignature|[?&]sig=|SharedAccessKey=|-----BEGIN|Password=|eyJ[A-Za-z0-9_-]{20,}\.)', re.I)
 _EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
-_PHONE_KEY = re.compile(r'(phone|mobile|sms)', re.I)
+# Contact fields only (phoneNumber, mobilePhone, businessPhones, smsReceivers), not names that merely contain 'phone'.
+_PHONE_KEY = re.compile(r'(phone(number)?s?|^mobile(phone|number)?s?|^sms\w*)$', re.I)
+# Key Vault access policies list permission names per object type ({'keys': ['get', 'list'], 'secrets': ['all']}):
+# names, not secrets. Only lists of plain words are kept; anything else still goes through the key rules.
+_PERMISSION_NAME = re.compile(r'[A-Za-z]{1,40}')
+_PERMISSION_TYPES = {'keys', 'secrets', 'certificates', 'storage'}
+# Dictionaries keyed by resource ID (e.g. metrics results): such a key is data, not a field name, so the key
+# rules do not apply to it; its value is still sanitized.
+_RESOURCE_ID_KEY = re.compile(r'^/subscriptions/', re.I)
+
+
+def _permission_names(key, value) -> bool:
+    return key.lower() == 'permissions' and isinstance(value, dict) and all(
+        str(k).lower() in _PERMISSION_TYPES and isinstance(v, list) and all(isinstance(x, str) and _PERMISSION_NAME.fullmatch(x) for x in v)
+        for k, v in value.items())
 
 
 def sanitize(obj, keep_emails: bool = False):
@@ -34,9 +48,13 @@ def sanitize(obj, keep_emails: bool = False):
     if isinstance(obj, dict):
         out = {}
         for key, value in obj.items():
-            credential_list = isinstance(key, str) and ((_CREDENTIAL_METADATA.match(key) and isinstance(value, list))
-                                                        or (_FEATURE_KEY.search(key) and isinstance(value, dict)))
-            if isinstance(key, str) and value is not None and not isinstance(value, (bool, int, float)) and not credential_list \
+            field = isinstance(key, str) and not _RESOURCE_ID_KEY.match(key)
+            if field and _permission_names(key, value):
+                out[key] = {k: list(v) for k, v in value.items()}
+                continue
+            credential_list = field and ((_CREDENTIAL_METADATA.match(key) and isinstance(value, list))
+                                         or (_FEATURE_KEY.search(key) and isinstance(value, dict)))
+            if field and value is not None and not isinstance(value, (bool, int, float)) and not credential_list \
                     and (_SECRET_KEY.search(key) or _PHONE_KEY.search(key)):
                 out[key] = '[REDACTED]'
             else:

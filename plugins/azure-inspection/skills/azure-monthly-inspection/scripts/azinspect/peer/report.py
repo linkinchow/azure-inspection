@@ -533,7 +533,7 @@ def build(ws, cfg, narrative=None, log=print):
             'recalculatedInExcel': result['recalculatedInExcel']}
     write_json(fdir / 'report.json', meta)
     log(f'05 报告：{len(data["types"])} 类资源，{n} 处偏差（高风险 {high}）；Excel 公式 {result["formulaCount"]} 个'
-        + ('，已用 Excel 复算核对' if result['recalculatedInExcel'] else '，本机未能用 Excel 复算'))
+        + ('，已用 Excel 复算核对' if result['recalculatedInExcel'] else f'，本机未能用 Excel 复算（{result["recalculationError"]}）'))
     return meta
 
 

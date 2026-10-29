@@ -5,6 +5,7 @@ Numbers, tables and coverage come from the data. Business explanations come from
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 
@@ -23,6 +24,16 @@ from . import commitments as cm
 from . import views as sr
 
 PERCENT = '0.0%;(0.0%);"-"'
+# Excel holds 1,048,576 rows per sheet; leave room for the title rows and the merged remainder.
+MAX_SHEET_ROWS = 1_000_000
+
+
+def fit_rows(rows, limit=MAX_SHEET_ROWS):
+    """(rows to list, rows to merge into one total row): above the limit, the costliest rows are listed."""
+    if len(rows) <= limit:
+        return rows, []
+    ranked = sorted(rows, key=lambda r: -(r['cost'] or 0))
+    return ranked[:limit], ranked[limit:]
 
 
 def amount(x):
@@ -330,9 +341,15 @@ def build(ws, cfg, period, narrative=None, log=print):
     for i, r in enumerate(model['resourceGroups'], 4):
         rg.append([r['subscriptionName'], r['resourceGroup'], r['prev'], r['cur'], None, r['changeRate']])
         formula(rg, i, 5, f'=D{i}-C{i}', r['delta'])
-    res = sheet(f'{Lc}资源费用', f'{Lc}资源级费用', '部分购买、服务级或未分配费用没有资源ID；完整费用以订阅/服务总额为准。', ['订阅', '资源组', '资源', '服务', f'{Lc}USD', '资源ID'])
-    for r in model['resources']:
+    shown, rest = fit_rows(model['resources'])
+    note = '部分购买、服务级或未分配费用没有资源ID；完整费用以订阅/服务总额为准。'
+    if rest:
+        note += f'资源费用超过 Excel 单页行数上限，按费用从高到低列出前 {len(shown):,} 行，其余 {len(rest):,} 行合并为最后一行，总额不变。'
+    res = sheet(f'{Lc}资源费用', f'{Lc}资源级费用', note, ['订阅', '资源组', '资源', '服务', f'{Lc}USD', '资源ID'])
+    for r in shown:
         res.append([r['subscriptionName'], r['resourceGroup'], r['resourceName'], r['serviceName'], r['cost'], r['resourceId']])
+    if rest:
+        res.append(['（多个订阅）', '', f'其余 {len(rest):,} 行合计', '', math.fsum(r['cost'] or 0 for r in rest), ''])
     day = sheet('每日费用', f'每日费用：{Lp}与{Lc}', '按月内日期排列；只有一个月有的日期不补成0。', ['日期号', f'{Lp}USD', f'{Lc}USD'])
     for r in model['daily']:
         day.append([r['day'], r['prev'], r['cur']])
@@ -493,7 +510,7 @@ def build(ws, cfg, period, narrative=None, log=print):
     (out / f'{stem(period)}.md').write_text(md, encoding='utf-8')
     result = verify(path, expected, fdir / 'verification.json')
     log(f'01 报告：{Lc}费用 USD {tot["cur"]:,.2f}（{n_comp}个订阅），较{Lp} {percent(tot["changeRate"])}；Excel 公式 {result["formulaCount"]} 个'
-        + ('，已用 Excel 复算核对' if result['recalculatedInExcel'] else '，本机未能用 Excel 复算'))
+        + ('，已用 Excel 复算核对' if result['recalculatedInExcel'] else f'，本机未能用 Excel 复算（{result["recalculationError"]}）'))
     return {'markdown': out / f'{stem(period)}.md', 'excel': path, 'model': model}
 
 

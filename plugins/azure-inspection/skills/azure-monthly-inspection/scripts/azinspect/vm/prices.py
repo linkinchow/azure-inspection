@@ -2,7 +2,8 @@
 
 Price files are kept under <workspace>/<month>/raw/vm/prices/ and reused for the whole review; a file
 queried after `price_date` is never used silently. A completed query that returns no quote is evidence
-of absence, not a reason to retry. Missing quotes stay missing (never replaced by another price type).
+of absence, not a reason to retry, but only for the exact spelling queried: the API matches armSkuName
+case-sensitively. Missing quotes stay missing (never replaced by another price type).
 """
 from __future__ import annotations
 
@@ -55,18 +56,38 @@ def _valid_cache(data, date):
     return query.get('$filter', [data.get('filter')])[0] == data.get('filter')
 
 
-def _filter_pairs(data):
+def _queried(data):
+    """(lower region, SKU name as queried) pairs of a saved query."""
     filt = data.get('filter', '')
     regions = re.findall(r"armRegionName eq '([^']+)'", filt)
     names = re.findall(r"armSkuName eq '([^']+)'", filt)
-    return {(r.lower(), n.lower()) for r in regions for n in names}
+    return {(r.lower(), n) for r in regions for n in names}
 
 
-def ensure_prices(client, directory: Path, needed, date: str, fetch: bool = True, log=print):
-    """`needed`: iterable of (region, ARM SKU name). Reuses valid files, queries only what is missing."""
+def _filter_pairs(data):
+    return {(r, n.lower()) for r, n in _queried(data)}
+
+
+def _spelling(names, canonical):
+    """Resources may spell one size in different cases (standard_d8s_v5 / Standard_D8s_v5) and the Retail
+    Prices API only answers the proper one: take the Compute SKU list's spelling, else a mixed-case 'Standard_' one."""
+    if canonical:
+        return canonical
+    names = sorted(set(names))
+    return next((n for n in names if n.startswith('Standard_') and n[9:] != n[9:].lower()), names[0])
+
+
+def ensure_prices(client, directory: Path, needed, date: str, fetch: bool = True, log=print, canonical=None):
+    """`needed`: iterable of (region, ARM SKU name); `canonical`: lower SKU name -> spelling from the Compute SKU list.
+    Reuses valid files, queries only what is missing."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    wanted = {(r.lower(), n.lower()): n for r, n in needed if r and n}
+    canonical = canonical or {}
+    variants = {}
+    for r, n in needed:
+        if r and n:
+            variants.setdefault((r.lower(), n.lower()), []).append(n)
+    wanted = {k: _spelling(v, canonical.get(k[1])) for k, v in variants.items()}
     covered = set()
     for path in sorted(directory.glob('*.json')):
         try:
@@ -74,7 +95,8 @@ def ensure_prices(client, directory: Path, needed, date: str, fetch: bool = True
         except (OSError, ValueError):
             continue
         if _valid_cache(data, date):
-            covered.update(_filter_pairs(data) & wanted.keys())
+            queried = _queried(data)
+            covered.update(k for k, n in wanted.items() if (k[0], n) in queried)
     missing = sorted(wanted.keys() - covered)
     jobs = []
     if fetch:
@@ -129,7 +151,10 @@ def price_catalog(directory: Path, date: str):
         for item in data['items']:
             product = item.get('productName', '')
             text = ' '.join(str(item.get(k, '')) for k in ('productName', 'skuName', 'meterName')).lower()
-            if (not product.startswith('Virtual Machines ') or 'cloud services' in text
+            # Most products read 'Virtual Machines Dsv5 Series ...'; some GPU series read '<series> Series Linux' without the prefix.
+            vm_product = product.startswith('Virtual Machines ') or (
+                item.get('serviceName') == 'Virtual Machines' and re.search(r' Series( Linux| Windows)?$', product))
+            if (not vm_product or 'cloud services' in text
                     or any(t in text for t in ('spot', 'low priority', 'devtest'))
                     or item.get('currencyCode') != 'USD' or item.get('unitOfMeasure') != '1 Hour'
                     or not item.get('effectiveStartDate') or item['effectiveStartDate'][:10] > date

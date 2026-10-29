@@ -30,6 +30,19 @@ def esc(value):
     return str(value).replace('|', '/').replace('\n', ' ')
 
 
+def _sum_rows(rows):
+    """SUM of column D on '价格计算依据' over contiguous row ranges, at most 200 ranges per SUM (Excel allows 255 arguments).
+    Adding one cell per row exceeds Excel's 8,192-character formula limit for subscriptions with thousands of machines."""
+    ranges = []
+    for r in rows:
+        if ranges and r == ranges[-1][1] + 1:
+            ranges[-1][1] = r
+        else:
+            ranges.append([r, r])
+    refs = [f"'价格计算依据'!D{a}" if a == b else f"'价格计算依据'!D{a}:D{b}" for a, b in ranges]
+    return '=' + '+'.join('SUM(' + ','.join(refs[k:k + 200]) + ')' for k in range(0, len(refs), 200))
+
+
 def _unverified_reason(sub):
     errors = sub.get('inventoryErrors') or []
     if sub.get('state') not in (None, 'Enabled') or any(e.get('phase') == 'subscriptionState' for e in errors):
@@ -71,7 +84,9 @@ def build(ws, cfg, narrative=None, log=print):
         'coveredSavingsUSD': sum(u['monthlyRightsizingSavings'] or 0 for u in covered),
         'machines': [{'name': u['name'], 'subscription': u['subscriptionName'], 'share': u['committedShare']} for u in covered]}
     write_json(fdir / 'commitment-coverage.json', cc_info)
-    unified.sort(key=lambda r: (str(r['subscriptionName']).lower(), str(r['resourceGroup']).lower(), r['name'].lower(), r['vmId'].lower()))
+    # subscription ID after the name keeps each subscription's rows contiguous even when two subscriptions share a name
+    unified.sort(key=lambda r: (str(r['subscriptionName']).lower(), r['subscriptionId'].lower(), str(r['resourceGroup']).lower(), r['name'].lower(),
+                                r['vmId'].lower()))
     portfolio = portfolio_totals(unified)
     write_json(fdir / 'rows.json', unified)
     write_json(fdir / 'price-summary.json', portfolio)
@@ -207,7 +222,7 @@ def build(ws, cfg, narrative=None, log=print):
                 else f'{insufficient}台数据/权限待确认' if insufficient else '范围内机器已列入总表')
         scope.append([s['name'], len(us), sc['PowerState/running'], sc['PowerState/deallocated'], len(us) - sc['PowerState/running'] - sc['PowerState/deallocated'],
                       sum(u['changing'] for u in us), None, note, s['id']])
-        expression = '=' + '+'.join(f"'价格计算依据'!D{j}" for j, u in enumerate(unified, 4) if u['subscriptionId'] == s['id']) if us else '=0'
+        expression = _sum_rows([j for j, u in enumerate(unified, 4) if u['subscriptionId'] == s['id']]) if us else '=0'
         formula(scope, i, 7, expression, sum(r['monthlySavingsUSD'] for r in ss))
     daily = sheet('每日指标原始值', '每日Average和有效样本数', '可用内存指标是可用率；总表内存使用率=100%−可用率。缺失保留空值。',
                   ['订阅', '资源组', 'VM/机器', '指标', '日桶开始UTC', 'Average', 'Count', 'VM资源ID'])
@@ -302,7 +317,7 @@ def build(ws, cfg, narrative=None, log=print):
     md_path.write_text(markdown(cfg, unified, recs, subscriptions, manifest, pools, total, portfolio, data, pngs, narrative), encoding='utf-8')
     result = verify(path, expected, fdir / 'verification.json')
     log(f'02 报告：{len(unified)} 台机器，建议调整 {len(accepted)} 台，预计每月节省 USD {total:,.2f}（官网列表价）；'
-        f'Excel 公式 {result["formulaCount"]} 个' + ('，已用 Excel 复算核对' if result['recalculatedInExcel'] else '，本机未能用 Excel 复算'))
+        f'Excel 公式 {result["formulaCount"]} 个' + ('，已用 Excel 复算核对' if result['recalculatedInExcel'] else f'，本机未能用 Excel 复算（{result["recalculationError"]}）'))
     return {'markdown': md_path, 'excel': path, 'monthlySavingsUSD': total, 'recommended': len(accepted), 'instances': len(unified)}
 
 

@@ -90,5 +90,18 @@ class ReportTests(unittest.TestCase):
                 report.build(ws, cfg, '03', {'severityOverrides': [{'findingId': 'REL-001', 'severity': '低'}]}, log=lambda *_: None)
 
 
+    def test_coverage_limits_listed_in_scope_section(self):
+        cfg = config.load(TEMPLATE)
+        with tempfile.TemporaryDirectory() as d:
+            ws = workspace(d)
+            f = common.Findings('reliability')
+            f.add('R1', '高', '子网只剩 10 个 IP', '换用更大的子网', subscription='app_1_prod', resource_name='vnet/aks-subnet')
+            text = '资源健康数据里还有 3 条已删除资源的残留状态记录（Unknown 3 条），这些资源不在本次读取的资源清单中，没有列为问题。'
+            f.write(ws, window=common.window(), coverage={'R11': {**common.coverage_entry(), 'limits': [text]}}, scope={})
+            report.build(ws, cfg, '03', {}, log=lambda *_: None)
+            md = (ws.month_dir('reports') / '03_可靠性与安全巡检报告.md').read_text(encoding='utf-8')
+        self.assertIn(f'- {text}', md.split('检查范围与限制')[1])
+
+
 if __name__ == '__main__':
     unittest.main()

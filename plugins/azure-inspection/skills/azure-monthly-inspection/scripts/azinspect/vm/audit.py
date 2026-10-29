@@ -9,6 +9,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from markdown_it import MarkdownIt
 from openpyxl import load_workbook
 
+from ..core.excel import unrecalculated_formula
 from ..core.io import read_json, write_json
 from .report import STEM
 
@@ -105,11 +106,12 @@ def audit(ws, log=print):
     reports = ws.month_dir('reports')
     verification = read_json(f / 'verification.json')
     assert verification['status'] == 'success' and verification['totalErrors'] == 0
-    w = load_workbook(reports / f'{STEM}.xlsx', data_only=verification['recalculatedInExcel'])
+    recalculated = verification['recalculatedInExcel']
+    w = load_workbook(reports / f'{STEM}.xlsx', data_only=recalculated)
     sheet, calc = w['VM建议指标价格总表'], w['价格计算依据']
     assert sheet.max_row == len(rows) + 4 and sheet.cell(4, 1).value == '订阅' and '公开列表价' in sheet['A2'].value
     total = sum(r['monthlySavingsUSD'] for r in rs)
-    if verification['recalculatedInExcel']:
+    if recalculated:
         same(w['总览']['B12'].value, total)
         same(w['总览']['B13'].value, total * 12)
     for i, u in enumerate(rows, 5):
@@ -125,8 +127,10 @@ def audit(ws, log=print):
         for col, key in zip(range(21, 26), ['payg', 'ri1', 'ri3', 'sp1', 'sp3']):
             cost, q = u['costs'][key], u['quotes'].get(key)
             display = sheet.cell(i, col).value
+            # the shown text of a formula cell is only known after Excel recalculation
+            pending = unrecalculated_formula(sheet.cell(i, col), recalculated)
             if u.get('deallocated', False):
-                assert display == ('0.00（省 0.00）' if key == 'payg' else '不建议购买')
+                assert pending or display == ('0.00（省 0.00）' if key == 'payg' else '不建议购买')
                 continue
             if cost is None:
                 assert display in ('无报价', '暂不判断')
@@ -134,7 +138,7 @@ def audit(ws, log=print):
             validate_quote(q, key)
             if q is not None:
                 same(cost, q['retailPrice'] / (12 if key == 'ri1' else 36) if key.startswith('ri') else q['retailPrice'] * 730)
-            if verification['recalculatedInExcel'] and u['currentMonthlyPAYG'] is not None:
+            if not pending and u['currentMonthlyPAYG'] is not None:
                 saving = u['currentMonthlyPAYG'] - cost
                 assert display == f'{shown(cost)}（{"省" if saving >= 0 else "增加"} {shown(abs(saving))}）', (u['name'], key, display)
     assert calc.sheet_state == 'hidden' and sheet.max_column == 27

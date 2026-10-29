@@ -7,7 +7,8 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-from ..common import Findings, Raw, coverage_entry, enabled, env, load_scope, mixed_env
+from ..checks import count_text, type_label
+from ..common import ADVISOR_NO_TEXT, Findings, Raw, advisor_problem, coverage_entry, enabled, env, load_scope, mixed_env
 
 CHECKS = [f'R{i}' for i in range(1, 13)]
 SEV_ORDER = {'高': 0, '中': 1, '低': 2}
@@ -733,13 +734,13 @@ def _advisor(run, inv):
     run.coverage['R9']['notes'].append(f"Advisor: {len(recs)} recommendations across {len(adv['subscriptions'])} subscriptions (all categories saved to advisor-all.json).")
     ha = [r for r in recs if r['properties']['category'] == 'HighAvailability']
     inv['advisor'] = {'total': len(recs), 'byCategory': dict(Counter(r['properties']['category'] for r in recs)),
-                      'highAvailabilityByProblem': dict(Counter(r['properties']['shortDescription']['problem'] for r in ha).most_common()),
+                      'highAvailabilityByProblem': dict(Counter(advisor_problem(r, ADVISOR_NO_TEXT) for r in ha).most_common()),
                       'highAvailabilityBySubscription': dict(Counter(r['_subscriptionName'] for r in ha).most_common())}
     retire = []
     for r in recs:
         p = r['properties']
         ep = p.get('extendedProperties') or {}
-        problem = p['shortDescription']['problem']
+        problem = advisor_problem(r)
         if ep.get('recommendationSubCategory') == 'ServiceUpgradeAndRetirement' or ep.get('retirementDate') or 'expired' in problem.lower() or 'is ending' in problem:
             retire.append({'sub': r['_subscriptionName'], 'resource': p.get('impactedValue'), 'type': p.get('impactedField'), 'problem': problem,
                            'retirementDate': ep.get('retirementDate'), 'retirementFeature': ep.get('retirementFeatureName'),
@@ -802,6 +803,31 @@ def r10(run):
 
 
 # ====================================================================== R11 resource health
+# Resource types queried from healthresources and the inventory (arg/<name>.json) that lists the resources still existing
+HEALTH_INVENTORY = {'microsoft.compute/virtualmachines': 'vms', 'microsoft.compute/virtualmachinescalesets': 'vmss',
+                    'microsoft.containerservice/managedclusters': 'aks', 'microsoft.dbformysql/flexibleservers': 'mysql',
+                    'microsoft.dbforpostgresql/flexibleservers': 'postgres', 'microsoft.cache/redis': 'redis',
+                    'microsoft.cache/redisenterprise': 'redisenterprise', 'microsoft.documentdb/mongoclusters': 'mongoclusters',
+                    'microsoft.network/applicationgateways': 'appgw', 'microsoft.network/loadbalancers': 'lbs',
+                    'microsoft.storage/storageaccounts': 'storage', 'microsoft.network/natgateways': 'natgw'}
+# Production clusters, databases and caches that are down or degraded are listed one by one; other resources per subscription.
+HEALTH_CRITICAL = {'microsoft.containerservice/managedclusters', 'microsoft.dbformysql/flexibleservers', 'microsoft.dbforpostgresql/flexibleservers',
+                   'microsoft.cache/redis', 'microsoft.cache/redisenterprise', 'microsoft.documentdb/mongoclusters'}
+HEALTH_REC = ('在 Azure 门户的“资源健康”中查看事件和原因：Unavailable、Degraded 的先确认是否已恢复，未恢复的按给出的原因处理；'
+              'Unknown 表示资源健康超过 10 分钟没有收到该资源的状态，确认这些资源是否仍在正常使用。')
+
+
+def _inventory(run):
+    """({resource type: lower IDs in this run's inventory}, {lower ID: tags}); types whose inventory was not fully read are left out."""
+    existing, tags = {}, {}
+    for rtype, name in HEALTH_INVENTORY.items():
+        saved = run.raw.load(f'arg/{name}.json') or {}
+        if saved.get('status') == 200 and saved.get('rows') is not None:
+            existing[rtype] = {(x.get('id') or '').lower() for x in saved['rows']}
+        tags.update({(x.get('id') or '').lower(): x.get('tags') for x in saved.get('rows') or []})
+    return existing, tags
+
+
 def r11(run):
     run.cover(['R11'], 'R11')
     h = run.rows('health')
@@ -817,13 +843,50 @@ def r11(run):
     run.coverage['R11']['succeeded'] += 1
     run.coverage['R11']['notes'].append(f'Resource Graph healthresources returned {len(h)} VM/VMSS statuses; other types queried per resource. '
                                         'Mongo vCore returns HTTP 422 (resource type not supported by Resource Health).')
+    # healthresources keeps statuses of deleted resources (e.g. recycled autoscale nodes): those are counted, not reported
+    existing, tags = _inventory(run)
+    current, stale = [], Counter()
     for r in h:
-        if r['status'] != 'Available':
-            run.add('R11', '中', r['rid'], r['rtype'], r['rid'].split('/')[-1], None, f"资源当前健康状态为 {r['status']}：{r['summary'][:120]}", r, '检查资源运行状态。')
-    for x in per:
-        if x['availabilityState'] not in (None, 'Available'):
-            run.add('R11', '中', x['id'], 'resource', x['id'].split('/')[-1], None, f"资源当前健康状态为 {x['availabilityState']}：{(x['summary'] or '')[:120]}",
-                    x, '检查资源运行状态。')
+        if r['status'] == 'Available':
+            continue
+        if r['rtype'] in existing and r['rid'].lower() not in existing[r['rtype']]:
+            stale[r['status']] += 1
+        else:
+            current.append(r)
+    run.inventory['R11']['notInInventory'] = dict(stale)
+    if stale:
+        counts = '、'.join(f'{k} {v:,} 条' for k, v in stale.most_common())
+        text = (f'资源健康数据里还有 {sum(stale.values()):,} 条已删除资源的残留状态记录（{counts}），'
+                '这些资源不在本次读取的资源清单中，没有列为问题。')
+        run.coverage['R11']['notes'].append(text)
+        run.coverage['R11'].setdefault('limits', []).append(text)
+    # one record per resource: healthresources and the per-resource queries overlap for clusters, databases and caches
+    unhealthy = {r['rid'].lower(): (r['rid'], r['rtype'], r['status'], r.get('summary') or '', r) for r in current}
+    unhealthy.update({x['id'].lower(): (x['id'], kind(x['id']).lower(), x['availabilityState'], x.get('summary') or '', x)
+                      for x in per if x['availabilityState'] not in (None, 'Available')})
+    groups = defaultdict(list)
+    for rid, rtype, status, summary, raw in sorted(unhealthy.values(), key=lambda u: u[0].lower()):
+        name, sub = rid.split('/')[-1], run.subname(rid)
+        item = {'name': name, 'type': rtype, 'status': status, 'summary': summary[:120], 'id': rid, 'sub': sub, 'raw': raw,
+                'env': run.env(sub, name, tags.get(rid.lower()), rg_of(rid))}
+        if rtype in HEALTH_CRITICAL and status in ('Unavailable', 'Degraded') and prodlike(item['env']):
+            groups[(sub, rid)].append(item)
+        else:
+            groups[(sub, None)].append(item)
+    for (sub, rid), items in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1] or '')):
+        if len(items) == 1:
+            x = items[0]
+            reason = f"：{x['summary']}" if x['summary'] else '，资源健康没有给出原因'
+            run.add('R11', '中', x['id'], x['type'], x['name'], x['env'], f"{type_label(x['type'])} {x['name']} 当前健康状态为 {x['status']}{reason}。",
+                    x['raw'], HEALTH_REC)
+            continue
+        statuses = '、'.join(f'{k} {v} 个' for k, v in Counter(x['status'] for x in items).most_common())
+        kinds = '、'.join(count_text(v, k) for k, v in Counter(type_label(x['type']) for x in items).most_common())
+        types = {x['type'] for x in items}
+        run.add('R11', '中', None, types.pop() if len(types) == 1 else '多种', f'{len(items)} 个资源', mixed_env([x['env'] for x in items]),
+                f'订阅 {sub} 有 {len(items)} 个资源的健康状态不是“可用”（{statuses}），包括 {kinds}。',
+                {'resources': [{k: x[k] for k in ('name', 'type', 'status', 'summary')} | {'environment': x['env']['label']} for x in items]},
+                HEALTH_REC, sub=sub, rg=None, members=[member(x['name'], x['type'], sub) for x in items], key=f'health|{sub}')
 
 
 # ====================================================================== R12 failed operations

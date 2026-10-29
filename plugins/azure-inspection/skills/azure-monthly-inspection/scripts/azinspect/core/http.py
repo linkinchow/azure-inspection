@@ -10,6 +10,7 @@ Every request goes through `ReadOnlyClient.request`, which refuses anything that
 """
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import threading
@@ -137,7 +138,7 @@ class ReadOnlyClient:
                 except ValueError:
                     error = f'HTTP {status}'
                 break
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
                 status, error = None, type(e).__name__
                 time.sleep(min(30, 2 ** attempt))
         record = {'check': check, 'target': target, 'method': method.upper(), 'url': _REDACT_URL.sub(r'\1REDACTED', url)[:600],

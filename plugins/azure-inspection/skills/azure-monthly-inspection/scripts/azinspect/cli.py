@@ -171,23 +171,47 @@ def _narrative(ws, report):
     return read_json(path) if path.exists() else {}
 
 
+COLLECT_ORDER = ('vm', 'cost', 'waf', 'peer')
+
+
 def cmd_collect(args) -> int:
+    """Exit code 1 when a WAF pillar failed. An interrupted `--part all` lists the parts still to collect, peer included:
+    users tend to rerun only cost and waf, and 05 then lacks resource creation times."""
     ws, period = _month_workspace(args)
     cfg, _tokens, client = _client(ws)
-    if args.part in ('vm', 'all'):
-        from .vm.collect import collect
-        collect(ws, cfg, client, period)
-    if args.part in ('cost', 'all'):
-        from .cost.pipeline import collect
-        collect(ws, cfg, client, period)
-    if args.part in ('waf', 'all'):
-        from .waf.pipeline import collect, parse
-        collect(ws, cfg, client, pillars=parse(args.pillars))
-    if args.part in ('peer', 'all'):
-        from .peer import collect
-        from .waf.common import window
-        collect(ws, cfg, client, window())
-    ws.save_calls(f'collect-{args.part}', client.calls)
+    command = f'collect --workspace "{ws.root}" --month {period.current.key}'
+    parts = COLLECT_ORDER if args.part == 'all' else tuple(p for p in COLLECT_ORDER if p == args.part)
+    done, failed = [], []
+    try:
+        for part in parts:
+            if part == 'vm':
+                from .vm.collect import collect
+                collect(ws, cfg, client, period)
+            elif part == 'cost':
+                from .cost.pipeline import collect
+                collect(ws, cfg, client, period)
+            elif part == 'waf':
+                from .waf.pipeline import collect, parse
+                failed = collect(ws, cfg, client, pillars=parse(args.pillars)) or []
+            else:
+                from .peer import collect
+                from .waf.common import window
+                collect(ws, cfg, client, window())
+            done.append(part)
+    except BaseException:
+        left = [p for p in parts if p not in done]
+        if args.part == 'all' and left:
+            print(f'采集中断：已完成 {"、".join(done) or "无"}，未完成 {"、".join(left)}。逐个补采：')
+            for p in left:
+                print(f'  {command} --part {p}')
+            print('  同类对比（peer）也要补采，否则 05 没有资源创建时间。')
+        raise
+    finally:
+        ws.save_calls(f'collect-{args.part}', client.calls)
+    if failed:
+        print(f'采集完成，但以下支柱失败：{"、".join(failed)}。查明原因后补采：')
+        print(f'  {command} --part waf --pillars {",".join(failed)}')
+        return 1
     return 0
 
 

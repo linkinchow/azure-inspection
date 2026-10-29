@@ -25,6 +25,8 @@ PILLAR_LABEL = {'reliability': '可靠性', 'aprl': '可靠性', 'defender': '�
 SEVERITIES = ('高', '中', '低')
 ENV_LABELS = {'prod': '生产', 'test': '测试', 'dev': '开发', 'dr': '灾备', 'mixed': '多个环境', 'unknown': '未知'}
 LOOKBACK_DAYS = 30
+# Group name for Advisor recommendations returned without a description
+ADVISOR_NO_TEXT = 'Advisor 未返回说明'
 # Pillars whose keyed rows are tenant-wide categories (one row per problem type): ids ignore the subscription list
 TENANT_WIDE = {'operations'}
 
@@ -39,6 +41,11 @@ def window(days: int = LOOKBACK_DAYS, end: datetime | None = None) -> dict:
     start = end - timedelta(days=days)
     return {'start': start.strftime('%Y-%m-%dT%H:%M:%SZ'), 'end': end.strftime('%Y-%m-%dT%H:%M:%SZ'), 'days': days,
             'snapshot': end.date().isoformat()}
+
+
+def advisor_problem(rec: dict, default: str = '') -> str:
+    """Problem text of an Advisor recommendation; some come without properties.shortDescription."""
+    return ((rec.get('properties') or {}).get('shortDescription') or {}).get('problem') or default
 
 
 def env(cfg, subscription_name: str = '', resource_name: str = '', tags: dict | None = None) -> dict:

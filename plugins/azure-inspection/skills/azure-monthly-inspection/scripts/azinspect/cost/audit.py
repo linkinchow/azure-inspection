@@ -9,6 +9,7 @@ import math
 from markdown_it import MarkdownIt
 from openpyxl import load_workbook
 
+from ..core.excel import unrecalculated_formula
 from ..core.io import read_json, write_json
 from . import charts as cost_charts
 from .report import labels_for, stem
@@ -59,10 +60,19 @@ def audit(ws, period, log=print):
         close(math.fsum(r[p] for r in model['subscriptionServiceDrivers']), comparison[p], 'drivers')
         close(math.fsum(r[p] for r in model['resourceGroups']), comparison[p], 'resourceGroups')
     path = out / f'{stem(period)}.xlsx'
-    wb = load_workbook(path, data_only=True, read_only=True)
-    close(wb['月度总览']['B5'].value, comparison['cur'])
-    close(wb['月度总览']['B6'].value, comparison['prev'])
-    close(wb['月度总览']['B7'].value, comparison['delta'])
+    verification = read_json(fdir / 'verification.json')
+    assert verification['totalErrors'] == 0, verification['errors'][:5]
+    recalculated = verification.get('recalculatedInExcel')
+    wb = load_workbook(path, data_only=recalculated, read_only=True)
+
+    def cell_close(cell, expected, what=''):
+        # a formula's result is only in the file after Excel recalculation; verify() has checked the formula itself
+        if not unrecalculated_formula(cell, recalculated):
+            close(cell.value, expected, what)
+
+    cell_close(wb['月度总览']['B5'], comparison['cur'])
+    cell_close(wb['月度总览']['B6'], comparison['prev'])
+    cell_close(wb['月度总览']['B7'], comparison['delta'])
     sw = wb['订阅对比']
     assert sw.max_row == len(model['subscriptions']) + 3
     for i, r in enumerate(model['subscriptions'], 4):
@@ -71,7 +81,7 @@ def audit(ws, period, log=print):
             if r[field] is None:
                 assert sw.cell(i, col).value is None, (r['name'], field)
             else:
-                close(sw.cell(i, col).value, r[field], (r['name'], field))
+                cell_close(sw.cell(i, col), r[field], (r['name'], field))
     for row in wb['建议与跟踪'].iter_rows(min_row=4):
         assert row[10].value is None, '没有执行证据却填写了已实现节省'
     base = ws.raw('cost')
@@ -97,20 +107,18 @@ def audit(ws, period, log=print):
     no_cost_without_forecast = all((by_id.get(s['subscriptionId'], {}).get('cur') or 0) == 0 for s in forecast['subscriptions'] if s['next'].get('fullMonthEstimate') is None)
     rs = wb['区域对比']
     total_row = len(region['overall']['byLocation']) + 4
-    close(rs.cell(total_row, 2).value, comparison['prev'])
-    close(rs.cell(total_row, 3).value, comparison['cur'])
+    cell_close(rs.cell(total_row, 2), comparison['prev'])
+    cell_close(rs.cell(total_row, 3), comparison['cur'])
     fs = wb[f'{Ln}费用预测']
-    close(fs.cell(len(forecast['subscriptions']) + 4, 5).value, forecast['overall']['next']['fullMonthEstimate'])
+    cell_close(fs.cell(len(forecast['subscriptions']) + 4, 5), forecast['overall']['next']['fullMonthEstimate'])
     ds = wb['变化原因拆解']
     for i, p in enumerate(ok_pairs, 4):
-        close(ds.cell(i, 11).value, ds.cell(i, 5).value)
-        close(ds.cell(i, 5).value, p['totals']['delta'])
+        cell_close(ds.cell(i, 11), p['totals']['delta'])
+        cell_close(ds.cell(i, 5), p['totals']['delta'])
     chart_rows = list(wb['图表'].iter_rows(min_row=4, max_row=3 + dp + dc, values_only=True))
     close(math.fsum(r[1] or 0 for r in chart_rows), comparison['prev'], '图表上月')
     close(math.fsum(r[2] or 0 for r in chart_rows), comparison['cur'], '图表本月')
     wb.close()
-    verification = read_json(fdir / 'verification.json')
-    assert verification['totalErrors'] == 0, verification['errors'][:5]
     md = (out / f'{stem(period)}.md').read_text(encoding='utf-8')
     assert f'{comparison["cur"]:,.2f}' in md and f'{comparison["prev"]:,.2f}' in md, 'Markdown 总额与模型不一致'
     for rel in (f'charts/{v}' for v in cost_charts.files(labels, cost_charts.group_label(model)).values()):
@@ -134,10 +142,10 @@ def audit(ws, period, log=print):
     assert len(tables) >= 6, tables
     result = {'status': 'success', 'subscriptions': len(model['subscriptions']), 'comparableSubscriptions': len(comparable),
               'curActualUSD': comparison['cur'], 'prevActualUSD': comparison['prev'], 'deltaUSD': comparison['delta'],
-              'formulaCount': verification['formulaCount'], 'recalculatedInExcel': verification.get('recalculatedInExcel'), 'markdownTables': tables,
+              'formulaCount': verification['formulaCount'], 'recalculatedInExcel': recalculated, 'markdownTables': tables,
               'noForecastSubscriptionsHadNoCost': no_cost_without_forecast,
               'checks': ['历史月份不使用预测值', '查询明细与月度、分组合计一致', f'{dp}天/{dc}天日均对比已核对', '读取失败未按0处理',
-                         '当前优化建议未写成本月已实现节省', 'Excel 公式结果已核对', '区域合计与订阅合计一致', '变化原因拆解各项合计等于费用变化', '预测合计一致']}
+                         '当前优化建议未写成本月已实现节省', 'Excel 公式结果已核对' if recalculated else 'Excel 公式齐全（本机未复算）', '区域合计与订阅合计一致', '变化原因拆解各项合计等于费用变化', '预测合计一致']}
     write_json(fdir / 'audit.json', result)
     log(f'01 核对通过：{len(comparable)} 个订阅，本月 USD {comparison["cur"]:,.2f}，公式 {verification["formulaCount"]} 个，Markdown 表格 {len(tables)} 个')
     return result

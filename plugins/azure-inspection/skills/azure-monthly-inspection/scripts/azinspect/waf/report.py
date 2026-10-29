@@ -402,7 +402,7 @@ def month_sentence(tracked, report):
 
 
 def markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows=None,
-             tracked=None, arch=None):
+             tracked=None, arch=None, limits=None):
     meta = REPORTS[report]
     c = Counter((f['group'], f['severity']) for f in findings)
     pending = sum(1 for f in findings if f.get('needsConfirmation'))
@@ -466,7 +466,7 @@ def markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_
             lines.append(f'- **{label}：**' + ''.join(plan[key]))
     lines += ['', '每项问题的资源明细、建议、验收标准和需要客户确认的内容见 Excel“问题清单”，可直接用于分配负责人和跟踪处理状态。', '',
               f'## {n + 1}. 检查范围与限制', '']
-    limits = ([f'{scope_note}。'] if scope_note else []) + meta['notes'] + [
+    limits = ([f'{scope_note}。'] if scope_note else []) + meta['notes'] + list(limits or []) + [
         '生产或测试环境按订阅、资源名称和标签推断，请客户确认。',
         f'配置为 {cn_date(snapshot)}读取的状态；读取后客户如有调整，以实际为准。'] + list(narrative.get('limitations') or [])
     lines += [f'- {x}' for x in limits]
@@ -503,8 +503,10 @@ def build(ws, cfg, report, narrative=None, log=print):
     expected = write_excel(xlsx, cfg, report, findings, by_check, datasets, checks, snapshot, scope_note, ssh_rows, tracked)
     lz_rows = ((datasets.get('landing_zone') or {}).get('inventory') or {}).get('landingZone')
     arch = architecture.summary(ws, cfg) if report == '03' else None
+    # customer-facing limits written by the analysis (e.g. R11 stale health records)
+    limits = [x for d in datasets.values() for c in d['coverage'].values() for x in c.get('limits') or []]
     md = markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows, tracked,
-                  arch)
+                  arch, limits)
     (out / f'{md_stem}.md').write_text(md, encoding='utf-8')
     fdir = ws.month_dir('findings') / 'waf'
     result = verify(xlsx, expected, fdir / f'verification-{report}.json')
@@ -516,7 +518,7 @@ def build(ws, cfg, report, narrative=None, log=print):
             'formulaCount': result['formulaCount'], 'recalculatedInExcel': result['recalculatedInExcel']}
     write_json(fdir / f'report-{report}.json', meta)
     log(f'{report} 报告：{len(findings)} 项问题（高 {counts["高"]}、中 {counts["中"]}、低 {counts["低"]}）；Excel 公式 {result["formulaCount"]} 个'
-        + ('，已用 Excel 复算核对' if result['recalculatedInExcel'] else '，本机未能用 Excel 复算'))
+        + ('，已用 Excel 复算核对' if result['recalculatedInExcel'] else f'，本机未能用 Excel 复算（{result["recalculationError"]}）'))
     return meta
 
 

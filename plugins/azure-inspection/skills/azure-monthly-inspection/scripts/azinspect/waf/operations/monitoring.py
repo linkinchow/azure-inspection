@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import collections
 
-from ..common import is_prod, mixed_env
+from ..common import advisor_problem, is_prod, mixed_env
 from .data import DATA_TYPES, DB_MONITORING_POOLS, short, sub_of
 
 NO_CHANGE = '本次未做任何更改。'
@@ -37,7 +37,7 @@ def kitem(k):
 
 
 def advisor_count(d, text):
-    return sum(1 for x in d.advisor.get('recommendations', []) if text in x['properties']['shortDescription']['problem'].lower())
+    return sum(1 for x in d.advisor.get('recommendations', []) if text in advisor_problem(x).lower())
 
 
 def check_aks(d, out, aks_rows, rules):
@@ -47,7 +47,7 @@ def check_aks(d, out, aks_rows, rules):
     self_hosted = [r for r in nomon if r['selfHostedMonitoringSignals']]
     vendor = [r for r in nomon if not r['selfHostedMonitoringSignals'] and r['vendor']]
     adv = sum(1 for x in d.advisor.get('recommendations', []) if x['properties']['category'] == 'OperationalExcellence'
-              and 'container monitoring' in x['properties']['shortDescription']['problem'].lower())
+              and 'container monitoring' in advisor_problem(x).lower())
     for r in none:
         diag = '诊断设置未取得' if r['diagnosticSettingsCount'] is None else f"诊断设置 {r['diagnosticSettingsCount']} 个"
         out.add('O1', '高', f"生产集群 {r['resourceName']} 在 Azure 侧没有任何监控和告警：未启用 Container Insights 和托管 Prometheus、{diag}、"

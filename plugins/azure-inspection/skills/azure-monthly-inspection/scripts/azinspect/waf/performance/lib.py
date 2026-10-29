@@ -51,6 +51,8 @@ class Data:
         r = ((self.load(f'metrics/{label}.json') or {}).get('results') or {}).get((rid or '').lower())
         if r is None:
             return [], 'not queried'
+        if not isinstance(r, dict):
+            return [], 'saved data was redacted'
         if r.get('_error'):
             return [], r['_error']
         if metric in (r.get('_errors') or {}):

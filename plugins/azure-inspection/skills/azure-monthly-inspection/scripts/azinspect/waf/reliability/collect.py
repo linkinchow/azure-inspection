@@ -13,7 +13,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
-from ..common import Raw, enabled, load_scope, now
+from ..common import Raw, advisor_problem, enabled, load_scope, now
 
 WORKERS = 4
 AKS_API = '2025-05-01'
@@ -280,7 +280,7 @@ class _Collector:
 
         recs = (self.raw.load('advisor-all.json') or {}).get('recommendations') or []
         profiles = sorted({r['properties']['resourceMetadata']['resourceId'] for r in recs
-                           if 'Front Door customer certificate' in r['properties']['shortDescription']['problem']})
+                           if 'Front Door customer certificate' in advisor_problem(r)})
         res = []
         for pid in profiles:
             items, st, e = c.get_all(f'{pid}/customDomains?api-version=2024-02-01', 'R9', pid.split('/')[-1] + ' customDomains')

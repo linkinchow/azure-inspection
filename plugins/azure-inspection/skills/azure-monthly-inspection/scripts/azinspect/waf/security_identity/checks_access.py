@@ -308,17 +308,34 @@ def credentials(ctx, app_priv):
             continue
         prod_hit = any(is_prod(ctx.sub_env(x['subscription'])) for x in items)
         subs = sorted({x['subscription'] for x in items})
-        valid = [c for c in creds if c['status'] == 'valid']
         name = meta.get('displayName')
-        expiry = '、'.join(f'{c["source"]} 于 {(c["endDateTime"] or "")[:10]} 到期' for c in bad)
-        ctx.add('S-I6', '中' if prod_hit and any(c['status'] == 'expiring<=60d' for c in bad) else '低',
+        expired = [c for c in bad if c['status'] == 'expired']
+        expiring = [c for c in bad if c['status'] == 'expiring<=60d']
+        long_lived = [c for c in bad if c['status'] not in ('expired', 'expiring<=60d')]
+        ends = lambda cs: '、'.join(f'{c["source"]} 于 {(c["endDateTime"] or "")[:10]} 到期' for c in cs)  # noqa: E731
+        parts, steps, confirm = [], [], []
+        if expired:
+            parts.append(f'{len(expired)} 个凭据已过期（{ends(expired)}）')
+            steps.append('删除已过期的凭据（服务主体对象上的密码凭据通常不是应用注册里创建的，需确认来源）')
+            confirm.append('过期凭据的来源，以及是否仍在使用')
+        if expiring:
+            parts.append(f'{len(expiring)} 个凭据将在 60 天内到期（{ends(expiring)}）')
+            steps.append('到期前创建新凭据并更新使用方，确认切换后再删除旧凭据')
+            confirm.append('即将到期的凭据由哪些系统使用')
+        if long_lived:
+            years = sorted({round(c['lifetimeDays'] / 365) for c in long_lived})
+            span = f'{years[0]}' if len(years) == 1 else f'{years[0]}–{years[-1]}'
+            parts.append(f'{len(long_lived)} 个凭据有效期长达约 {span} 年（{ends(long_lived)}），长期不轮换，泄露后可被长期使用')
+            steps.append('为长期有效的密码凭据创建有效期较短的新凭据，使用方切换后删除旧凭据')
+            confirm.append('长期凭据由哪些系统使用，轮换时需要同步更新哪里')
+        valid = [c for c in creds if c['status'] == 'valid']
+        replacement = f'目前有 {len(valid)} 个未过期的凭据；' if expired or expiring else ''
+        ctx.add('S-I6', '中' if prod_hit and expiring else '低',
                 _many(len(subs)) if len(subs) > 1 else (items[0]['subscriptionId'] if items else None), None, name, SP_TYPE,
                 {'value': 'prod' if prod_hit else 'unknown', 'label': '生产' if prod_hit else '未知', 'basis': '所授权订阅的环境'},
-                finding=f'服务主体 {name} 有 {len(bad)} 个凭据已过期或即将过期（{expiry}），'
-                        f'目前仍有 {len(valid)} 个有效凭据；该主体持有 {len(items)} 条特权角色分配。',
+                finding=f'服务主体 {name}：' + '；'.join(parts) + f'。{replacement}该主体持有 {len(items)} 条特权角色分配。',
                 evidence={'credentials': creds, 'privilegedAssignments': len(items)},
-                recommendation='删除已过期的凭据（服务主体对象上的密码凭据通常不是应用注册里创建的，需确认来源）；保留的密码凭据按 6-12 个月轮换并存入 Key Vault，'
-                               '优先改用证书或工作负载身份联合。' + NO_CHANGE,
-                confirm='确认过期凭据的来源，以及是否仍在使用。', key=f'credentials-{pid}', members=[member(name, SP_TYPE)])
+                recommendation='；'.join(steps) + '；保留的密码凭据按 6-12 个月轮换并存入 Key Vault，优先改用证书或工作负载身份联合。' + NO_CHANGE,
+                confirm='确认' + '；'.join(confirm) + '。', key=f'credentials-{pid}', members=[member(name, SP_TYPE)])
     ctx.inventory['privilegedServicePrincipalCredentials'] = inventory
     ctx.notes['S-I6'].append('只读取持有特权角色的应用型服务主体及其应用注册的凭据元数据（名称、开始和到期时间）；托管身份由平台自动轮换，不纳入。')

@@ -3,7 +3,7 @@ name: azure-monthly-inspection
 description: Read-only monthly Azure inspection for a customer tenant, producing Chinese customer reports (cost review, VM rightsizing, reliability, security, operational excellence, performance, peer comparison, summary). Use when the user asks to run or prepare an Azure 月度巡检/成本巡检/WAF 巡检/健康检查 for a customer, set up a new customer for inspection, check read-only access, or quality-check inspection reports before delivery.
 license: MIT
 metadata:
-  version: 0.6.4
+  version: 0.6.5
 ---
 
 # Azure 月度巡检（只读）
@@ -21,7 +21,7 @@ metadata:
 
 ## 当前版本能做什么
 
-版本 0.6.4 可以：
+版本 0.6.5 可以：
 
 - 准备：环境检查、建客户工作目录、核对只读访问
 - 生成全部 6 份报告：**00 汇总**、**01 月度成本**、**02 虚拟机规格**、**03 可靠性与安全**、**04 卓越运营与性能效率**、**05 同类资源配置对比**（采集、分析、生成、核对）
@@ -123,7 +123,9 @@ python "<skill>/scripts/azinspect_cli.py" <命令> [参数]
    python "<skill>/scripts/azinspect_cli.py" collect --workspace "<工作目录>" --month <YYYY-MM> --part all
    ```
 
-   `all` 依次采集虚拟机、费用、四个支柱（可靠性、网络安全、身份安全、性能效率、卓越运营）。01 的“本月虚拟机使用情况”需要虚拟机清单；卓越运营会复用费用巡检的存储和日志数据，所以建议用 `all`。指标和活动日志看采集当天之前 30 天。输出里的读取失败、无权限要转告用户，不要重试绕过。
+   `all` 依次采集虚拟机、费用、各支柱（可靠性、网络安全、身份安全、性能效率、卓越运营等）和同类对比（peer）。01 的“本月虚拟机使用情况”需要虚拟机清单；卓越运营会复用费用巡检的存储和日志数据，所以建议用 `all`。指标和活动日志看采集当天之前 30 天。输出里的读取失败、无权限要转告用户，不要重试绕过。
+
+   有支柱采集失败时，命令最后会列出失败的支柱和补采命令，并返回非零退出码。`all` 中途出错或被中断时，会列出还没完成的部分，按提示逐个补采，**不要漏掉 `--part peer`**，否则 05 没有资源创建时间。
 
 2. **分析**（离线，查询官网公开价格）：
 
