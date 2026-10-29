@@ -3,7 +3,7 @@ name: azure-monthly-inspection
 description: Read-only monthly Azure inspection for a customer tenant, producing Chinese customer reports (cost review, VM rightsizing, reliability, security, operational excellence, performance, peer comparison, summary). Use when the user asks to run or prepare an Azure 月度巡检/成本巡检/WAF 巡检/健康检查 for a customer, set up a new customer for inspection, check read-only access, or quality-check inspection reports before delivery.
 license: MIT
 metadata:
-  version: 0.6.6
+  version: 0.7.0
 ---
 
 # Azure 月度巡检（只读）
@@ -21,13 +21,14 @@ metadata:
 
 ## 当前版本能做什么
 
-版本 0.6.6 可以：
+版本 0.7.0 可以：
 
 - 准备：环境检查、建客户工作目录、核对只读访问
 - 生成全部 6 份报告：**00 汇总**、**01 月度成本**、**02 虚拟机规格**、**03 可靠性与安全**、**04 卓越运营与性能效率**、**05 同类资源配置对比**（采集、分析、生成、核对）
 - 跨报告交叉核对（X1–X9）和打包
 - RI/SP：分摊费用中的覆盖比例、现有预留和节省计划的使用率与到期、Azure 购买建议；02 标出已被 RI/SP 覆盖、降配节省不能直接实现的机器
 - 跨月跟踪：03/04 自动与上月比，分出新增问题、新增检查项发现、仍未处理、已解决、本月未检查
+- 大租户：费用采集中断后用 `--resume` 续采；资源组很多的订阅按批读取逐资源费用；逐资源明细单独存放，成本模型文件更小，00 生成更快
 - 检查 Markdown 报告
 
 - 并入微软公开规则库：APRL（可靠性）、Defender/Policy（安全）、孤立资源（01）、AMBA 告警基线（04）、Landing Zone 清单（03 架构对照）（见文末“开发进度”）。**还没有提供的命令，不要自己写脚本去访问客户环境代替**；告诉用户这部分尚未提供。
@@ -126,6 +127,14 @@ python "<skill>/scripts/azinspect_cli.py" <命令> [参数]
    `all` 依次采集虚拟机、费用、各支柱（可靠性、网络安全、身份安全、性能效率、卓越运营等）和同类对比（peer）。01 的“本月虚拟机使用情况”需要虚拟机清单；卓越运营会复用费用巡检的存储和日志数据，所以建议用 `all`。指标和活动日志看采集当天之前 30 天。输出里的读取失败、无权限要转告用户，不要重试绕过。
 
    有支柱采集失败时，命令最后会列出失败的支柱和补采命令，并返回非零退出码。`all` 中途出错或被中断时，会列出还没完成的部分，按提示逐个补采，**不要漏掉 `--part peer`**，否则 05 没有资源创建时间。
+
+   大租户的费用采集可能要十几个小时。中途中断（电脑重启、休眠、网络断开）后，费用部分加 `--resume` 重跑：
+
+   ```bash
+   python "<skill>/scripts/azinspect_cli.py" collect --workspace "<工作目录>" --month <YYYY-MM> --part cost --resume
+   ```
+
+   `--resume` 只复用同一个月、同样查询、7 天内成功读取的结果，失败或无权限的部分会重新读取；输出最后会写复用了多少、重新读取了多少。资源组超过 100 个的订阅，逐资源费用自动按每批 50 个资源组分段读取，中断后只补读没完成的批次。不加 `--resume` 时照常全部重新读取。虚拟机、WAF 和同类对比的采集不支持续采（WAF 可用 `--pillars` 单独补采）。
 
 2. **分析**（离线，查询官网公开价格）：
 

@@ -69,10 +69,15 @@ def sanitize(obj, keep_emails: bool = False):
     return obj
 
 
-def write_json(path: Path, obj) -> Path:
+def write_json(path: Path, obj, compact: bool = False) -> Path:
+    """compact: no indentation or spaces, for large data files nobody reads by hand."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + '.tmp')
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1, default=str), encoding='utf-8')
+    if compact:
+        text = json.dumps(obj, ensure_ascii=False, separators=(',', ':'), default=str)
+    else:
+        text = json.dumps(obj, ensure_ascii=False, indent=1, default=str)
+    tmp.write_text(text, encoding='utf-8')
     os.replace(tmp, path)
     return path
 

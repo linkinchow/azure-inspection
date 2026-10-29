@@ -14,6 +14,8 @@ import json
 import math
 
 from ..core.io import write_json
+from ..core.reuse import Reuse, signature
+from .collect import COLLECTOR_VERSION
 
 API = '2025-03-01'
 ARM = 'https://management.azure.com'
@@ -61,12 +63,18 @@ def qty_of(row):
 class Runner:
     """Runs one Cost Management query (all pages), saves it, keeps a small index for coverage."""
 
-    def __init__(self, ws, client, subs, currency):
+    def __init__(self, ws, client, subs, currency, reuse=None):
         self.ws, self.client, self.subs, self.currency = ws, client, {s['id']: s for s in subs}, currency
+        self.reuse = reuse or Reuse(False)
         self.index = {}
 
     def run(self, qid, sid, kind, endpoint, body, extra=None):
         url = f'{ARM}/subscriptions/{sid}/providers/Microsoft.CostManagement/{endpoint}?api-version={API}'
+        rel = f'cost/supplement/queries/{qid}.json'
+        sig = signature('cost-supplement', COLLECTOR_VERSION, qid, kind, url, body)
+        saved = self.reuse.load(self.ws.raw(rel), sig, lambda r: r['result']['ok'])
+        if saved is not None:
+            return self._index(qid, sid, kind, saved['result']['pages'], None)
         pages, error, seen = [], None, set()
         while url:
             if url in seen or len(seen) >= 500:
@@ -85,11 +93,14 @@ class Runner:
             url = props.get('nextLink') or None
         rec = {'queryId': qid, 'kind': kind, 'endpoint': endpoint, 'subscription': {k: self.subs[sid][k] for k in ('id', 'name', 'group')},
                'query': body, 'extra': extra or {}, 'result': {'ok': error is None, 'pages': pages, 'error': error}, 'completedAt': now()}
-        self.ws.save_raw(f'cost/supplement/queries/{qid}.json', rec)
+        self.ws.save_raw(rel, self.reuse.stamp(rec, sig))
+        return self._index(qid, sid, kind, pages, error)
+
+    def _index(self, qid, sid, kind, pages, error):
         rows, verr = [], None
         if error is None:
             try:
-                rows = parse_rows(rec['result'])
+                rows = parse_rows({'pages': pages})
                 currencies = {r.get('currency') for r in rows}
                 if rows and currencies != {self.currency}:
                     raise ValueError(f'Expected {self.currency} only, got {sorted(map(str, currencies))}')
@@ -360,13 +371,13 @@ def task_drivers(run, model, period):
                          'reconciled': sum(bool(e.get('reconciliation', {}).get('ok')) for e in out)}, 'complete': True}
 
 
-def collect(ws, cfg, client, period, model, log=print):
+def collect(ws, cfg, client, period, model, log=print, reuse=None):
     from ..core.io import read_json
     cd = read_json(ws.raw('cost/cost-data.json'))
     comparable = model['comparableSubscriptionIds']
     ref = {(r['subscriptionId'], r['queryKind'][:4] if r['queryKind'].startswith('prev') else 'cur'): r['totalCost']
            for r in cd['index'] if r['queryKind'] in ('prevActual', 'curActual') and r['ok']}
-    run = Runner(ws, client, cd['subscriptions'], cfg.currency)
+    run = Runner(ws, client, cd['subscriptions'], cfg.currency, reuse)
     region = task_region(run, comparable, ref, period)
     write_json(ws.raw('cost/supplement/region.json'), region)
     forecast = task_forecast(run, comparable, period)

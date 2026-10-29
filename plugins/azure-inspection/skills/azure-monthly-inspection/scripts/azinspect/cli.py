@@ -189,7 +189,7 @@ def cmd_collect(args) -> int:
                 collect(ws, cfg, client, period)
             elif part == 'cost':
                 from .cost.pipeline import collect
-                collect(ws, cfg, client, period)
+                collect(ws, cfg, client, period, resume=args.resume)
             elif part == 'waf':
                 from .waf.pipeline import collect, parse
                 failed = collect(ws, cfg, client, pillars=parse(args.pillars)) or []
@@ -203,8 +203,12 @@ def cmd_collect(args) -> int:
         if args.part == 'all' and left:
             print(f'采集中断：已完成 {"、".join(done) or "无"}，未完成 {"、".join(left)}。逐个补采：')
             for p in left:
-                print(f'  {command} --part {p}')
+                print(f'  {command} --part {p}' + (' --resume' if p == 'cost' else ''))
+            if 'cost' in left:
+                print('  费用部分加 --resume：已成功读取的查询（7 天内）会直接复用，只读取缺少或失败的部分。')
             print('  同类对比（peer）也要补采，否则 05 没有资源创建时间。')
+        elif left == ['cost']:
+            print(f'费用采集中断。重跑时加 --resume，已成功读取的查询会直接复用：\n  {command} --part cost --resume')
         raise
     finally:
         ws.save_calls(f'collect-{args.part}', client.calls)
@@ -314,6 +318,9 @@ def main(argv=None) -> int:
         p.add_argument('--part', choices=PARTS + ('all',), default='all')
         if name != 'build':
             p.add_argument('--pillars', help='只处理部分支柱（逗号分隔），例如 aprl,defender；默认全部')
+        if name == 'collect':
+            p.add_argument('--resume', action='store_true',
+                           help='续采：费用部分复用 7 天内已成功读取的结果，只读取缺少或失败的部分（中断后重跑时使用）')
         if name == 'analyze':
             p.add_argument('--offline', action='store_true', help='只用已保存的官网价格，不联网查询')
             p.add_argument('--price-date', help='价格日期 YYYY-MM-DD，默认今天；只使用该日期及之前查询的价格')

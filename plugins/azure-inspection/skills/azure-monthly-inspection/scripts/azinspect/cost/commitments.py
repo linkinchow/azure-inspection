@@ -1,13 +1,15 @@
 """Existing reservations (RI) and savings plans (SP): coverage, utilization, expiry, and Azure's purchase recommendations.
 
 Read-only. Three parts, each recorded with its own status (a failed or denied read is never "no commitments"):
-1. pricing by resource: Cost Management AmortizedCost for the review month, by ResourceId + PricingModel, per subscription
-   with cost. Needs only cost read access. Tells which machines are already covered by RI/SP, so 02 does not count
-   their downsizing as a direct saving.
+1. pricing: Cost Management AmortizedCost for the review month per subscription with cost: totals by PricingModel (01),
+   and by ResourceId + PricingModel for virtual machines and scale sets only, which tells 02 which machines are already
+   covered by RI/SP so their downsizing is not counted as a direct saving. Reading every resource here was as large as
+   the per-resource cost query and was only ever used for machines.
 2. orders: reservations (Microsoft.Capacity) and savings plans (Microsoft.BillingBenefits) with 7/30-day utilization and
    expiry. Needs Reservations Reader / billing read access; usually denied for a plain subscription reader.
 3. Azure's purchase recommendations per subscription (Consumption reservationRecommendations, Cost Management
    benefitRecommendations), last 30 days, single scope. Savings are for the 30-day look-back, i.e. about a month.
+Each subscription's reads are saved under raw/cost/commitments/ so `collect --resume` can skip them.
 Output: raw/cost/commitments.json.
 """
 from __future__ import annotations
@@ -18,7 +20,8 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 from ..core.io import read_json, write_json
-from .collect import API, ARM, fetch_pages, parse_rows
+from ..core.reuse import Reuse, signature
+from .collect import API, ARM, COLLECTOR_VERSION, fetch_pages, parse_rows
 
 RESERVATION_API = '2022-11-01'
 CONSUMPTION_API = '2023-05-01'
@@ -37,29 +40,72 @@ def _status(status, error):
     return {'httpStatus': status, 'error': error, 'ok': status == 200}
 
 
-def pricing_by_resource(client, sub_ids, period):
+MACHINE_TYPES = ['microsoft.compute/virtualmachines', 'microsoft.compute/virtualmachinescalesets']
+
+
+def pricing_body(period, by_resource):
+    grouping = ([{'type': 'Dimension', 'name': 'ResourceId'}] if by_resource else []) + [{'type': 'Dimension', 'name': 'PricingModel'}]
     body = {'type': 'AmortizedCost', 'timeframe': 'Custom', 'timePeriod': period.current.cost_range(),
-            'dataset': {'granularity': 'None', 'aggregation': {'totalCost': {'name': 'Cost', 'function': 'Sum'}},
-                        'grouping': [{'type': 'Dimension', 'name': 'ResourceId'}, {'type': 'Dimension', 'name': 'PricingModel'}]}}
-    rows, statuses = [], {}
+            'dataset': {'granularity': 'None', 'aggregation': {'totalCost': {'name': 'Cost', 'function': 'Sum'}}, 'grouping': grouping}}
+    if by_resource:
+        body['dataset']['filter'] = {'dimensions': {'name': 'ResourceType', 'operator': 'In', 'values': MACHINE_TYPES}}
+    return body
+
+
+def _saved_read(ws, reuse, rel, sig, read):
+    """A per-subscription read saved under raw/cost/commitments/; reused with --resume when it succeeded."""
+    record = reuse.load(ws.raw(rel), sig, lambda r: r.get('ok'))
+    if record is None:
+        record = reuse.stamp({**read(), 'queriedAt': now()}, sig)
+        write_json(ws.raw(rel), record)
+    return record
+
+
+def _pricing_rows(result):
+    for r in parse_rows(result):
+        lower = {k.lower(): v for k, v in r.items()}
+        cost = next((lower[k] for k in ('costusd', 'pretaxcost', 'cost', 'totalcost') if k in lower), None)
+        if cost is not None and math.isfinite(float(cost)):
+            yield str(lower.get('resourceid') or '').lower(), str(lower.get('pricingmodel') or 'OnDemand'), float(cost)
+
+
+def pricing(ws, client, sub_ids, period, reuse=None):
+    """(machine rows by resource and pricing model, {subscription: {pricing model: cost}}, statuses)."""
+    reuse = reuse or Reuse(False)
+    url = lambda sid: f'{ARM}/subscriptions/{sid}/providers/Microsoft.CostManagement/query?api-version={API}'  # noqa: E731
 
     def one(sid):
-        return sid, fetch_pages(client, f'{ARM}/subscriptions/{sid}/providers/Microsoft.CostManagement/query?api-version={API}', body, 'curResourcePricing')
+        def read(by_resource):
+            body = pricing_body(period, by_resource)
+            result = fetch_pages(client, url(sid), body, 'curResourcePricing')
+            if by_resource and not result['ok'] and (result.get('error') or {}).get('httpStatus') == 400:
+                # the resource type filter was refused: read every resource and keep the machines here
+                del body['dataset']['filter']
+                result = fetch_pages(client, url(sid), body, 'curResourcePricing')
+                result['machineFilterLocal'] = True
+            if result['ok']:
+                rows = [(rid, model, cost) for rid, model, cost in _pricing_rows(result)
+                        if not by_resource or (rid and '/providers/' in rid and '/'.join(rid.split('/providers/')[1].split('/')[:2]) in MACHINE_TYPES)]
+                return {'ok': True, 'error': None, 'rows': rows, 'machineFilterLocal': result.get('machineFilterLocal', False)}
+            return {'ok': False, 'error': result['error'], 'rows': []}
+        models = _saved_read(ws, reuse, f'cost/commitments/{sid}.pricingModels.json',
+                             signature('pricing-models', COLLECTOR_VERSION, url(sid), pricing_body(period, False)), lambda: read(False))
+        machines = _saved_read(ws, reuse, f'cost/commitments/{sid}.machinePricing.json',
+                               signature('machine-pricing', COLLECTOR_VERSION, url(sid), pricing_body(period, True)), lambda: read(True))
+        return sid, models, machines
 
     with ThreadPoolExecutor(WORKERS) as pool:
         results = list(pool.map(one, sub_ids))
-    for sid, result in results:
-        statuses[sid] = {'ok': result['ok'], 'error': result['error']}
-        if not result['ok']:
-            continue
-        for r in parse_rows(result):
-            lower = {k.lower(): v for k, v in r.items()}
-            cost = next((lower[k] for k in ('costusd', 'pretaxcost', 'cost', 'totalcost') if k in lower), None)
-            rid = str(lower.get('resourceid') or '').lower()
-            if rid and cost is not None and math.isfinite(float(cost)):
-                rows.append({'subscriptionId': sid, 'resourceId': rid, 'pricingModel': str(lower.get('pricingmodel') or 'OnDemand'),
-                             'cost': float(cost)})
-    return rows, statuses
+    rows, by_model, statuses = [], {}, {}
+    for sid, models, machines in results:
+        statuses[sid] = {'ok': models['ok'] and machines['ok'], 'error': models['error'] or machines['error'],
+                         'models': models['ok'], 'machines': machines['ok']}
+        if models['ok']:
+            by_model[sid] = {}
+            for _rid, model, cost in models['rows']:
+                by_model[sid][model] = by_model[sid].get(model, 0.0) + cost
+        rows += [{'subscriptionId': sid, 'resourceId': rid, 'pricingModel': model, 'cost': cost} for rid, model, cost in machines['rows'] if rid]
+    return rows, by_model, statuses
 
 
 def _utilization(props):
@@ -126,11 +172,23 @@ def _amount(x):
     return x
 
 
-def recommendations(client, sub_ids, sub_names, log=print):
+def recommendations(client, sub_ids, sub_names, log=print, ws=None, reuse=None):
     rows, statuses, done = [], {}, []
+    reuse = reuse or Reuse(False)
 
     def one(sid):
-        rows_, statuses_ = _recommendations_for(client, sid, sub_names)
+        if ws is None:
+            rows_, statuses_ = _recommendations_for(client, sid, sub_names)
+        else:
+            sig = signature('purchase-recommendations', COLLECTOR_VERSION, sid, RI_TYPES, CONSUMPTION_API, API)
+            record = reuse.load(ws.raw(f'cost/commitments/{sid}.recommendations.json'), sig,
+                                lambda r: all(s.get('ok') for s in r['statuses'].values()))
+            if record is None:
+                rows_, statuses_ = _recommendations_for(client, sid, sub_names)
+                write_json(ws.raw(f'cost/commitments/{sid}.recommendations.json'),
+                           reuse.stamp({'subscriptionId': sid, 'queriedAt': now(), 'rows': rows_, 'statuses': statuses_}, sig))
+            else:
+                rows_, statuses_ = record['rows'], record['statuses']
         done.append(sid)
         log(f'  Azure 购买建议：{len(done)}/{len(sub_ids)} 个订阅已读取')
         return rows_, statuses_
@@ -174,18 +232,19 @@ def _recommendations_for(client, sid, sub_names):
     return rows, statuses
 
 
-def collect(ws, client, period, log=print):
+def collect(ws, client, period, log=print, reuse=None):
     data = read_json(ws.raw('cost/cost-data.json'))
     names = {s['id']: s['name'] for s in data['subscriptions']}
     active = list(data.get('optionalScope') or [])
-    log(f'RI/SP：读取 {len(active)} 个有费用订阅的按资源计价方式')
-    pricing, pricing_status = pricing_by_resource(client, active, period)
+    log(f'RI/SP：读取 {len(active)} 个有费用订阅的计价方式（按计价方式汇总，及虚拟机和规模集的逐资源计价方式）')
+    machine_pricing, by_model, pricing_status = pricing(ws, client, active, period, reuse)
     end = dt.datetime.now(dt.timezone.utc)
     log('RI/SP：读取现有预留和节省计划订单')
     held = orders(client, end)
-    recs, rec_status = recommendations(client, active, names, log)
+    recs, rec_status = recommendations(client, active, names, log, ws, reuse)
     out = {'collectedAt': now(), 'month': period.current.key, 'subscriptionsQueried': len(active),
-           'pricingByResource': pricing, 'pricingStatus': pricing_status, **held, 'recommendations': recs, 'recommendationStatus': rec_status}
+           'pricingByResource': machine_pricing, 'pricingByModel': by_model, 'pricingScope': 'machines',
+           'pricingStatus': pricing_status, **held, 'recommendations': recs, 'recommendationStatus': rec_status}
     write_json(ws.raw('cost/commitments.json'), out)
     s = summary(out, end)
     log(f'RI/SP：按资源计价方式 {s["pricingRead"]}/{len(active)} 个订阅读取成功；'
@@ -221,9 +280,14 @@ def summary(data, today=None):
         committed = math.fsum(v for k, v in models.items() if k in COMMITTED)
         coverage[rid] = {'total': total, 'committed': committed, 'share': committed / total if total > 0 else None, 'models': dict(models)}
     by_model = defaultdict(float)
-    for models in per.values():
-        for k, v in models.items():
-            by_model[k] += v
+    if 'pricingByModel' in data:     # 0.7.0+: totals read per subscription; per-resource rows cover machines only
+        for models in data['pricingByModel'].values():
+            for k, v in models.items():
+                by_model[k.lower().replace(' ', '')] += v
+    else:
+        for models in per.values():
+            for k, v in models.items():
+                by_model[k] += v
     flagged = []
     for kind, items in (('预留实例', data.get('reservations') or []), ('节省计划', data.get('savingsPlans') or [])):
         for c in items:
@@ -239,7 +303,7 @@ def summary(data, today=None):
             flagged.append({**c, 'kind': kind, 'notes': notes, 'expiryDate': exp.isoformat() if exp else None})
     statuses = data.get('pricingStatus') or {}
     return {'coverage': coverage, 'byModel': dict(by_model), 'commitments': flagged,
-            'pricingRead': sum(1 for s in statuses.values() if s.get('ok')),
+            'pricingRead': sum(1 for s in statuses.values() if s.get('models', s.get('ok'))),
             'reservationsRead': (data.get('reservationStatus') or {}).get('ok', False),
             'savingsPlansRead': (data.get('savingsPlanStatus') or {}).get('ok', False),
             'recommendations': sorted(data.get('recommendations') or [], key=lambda r: (str(r.get('subscription') or ''), r['kind'], str(r.get('term')), -(r.get('saving') or 0))),
@@ -259,6 +323,6 @@ def _totals(recs):
 def vm_coverage(ws):
     """resource id (lower) -> share of amortized cost covered by RI/SP in the review month; None when not read."""
     data = load(ws)
-    if not data or not any(s.get('ok') for s in (data.get('pricingStatus') or {}).values()):
+    if not data or not any(s.get('machines', s.get('ok')) for s in (data.get('pricingStatus') or {}).values()):
         return None
     return {rid: c for rid, c in summary(data)['coverage'].items() if c['total'] > 0}

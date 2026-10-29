@@ -329,7 +329,9 @@ class ExcelRecalculationTests(unittest.TestCase):
 
         fake_com = SimpleNamespace(CoInitialize=lambda: None, CoUninitialize=lambda: None)
         fake_client = SimpleNamespace(DispatchEx=lambda name: Excel())
-        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {'AZINSPECT_NO_EXCEL': ''}),                 mock.patch.object(excel.platform, 'system', return_value='Windows'),                 mock.patch.dict(sys.modules, {'pythoncom': fake_com, 'win32com': SimpleNamespace(client=fake_client), 'win32com.client': fake_client}):
+        with (tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {'AZINSPECT_NO_EXCEL': ''}),
+              mock.patch.object(excel.platform, 'system', return_value='Windows'),
+              mock.patch.dict(sys.modules, {'pythoncom': fake_com, 'win32com': SimpleNamespace(client=fake_client), 'win32com.client': fake_client})):
             path = self.workbook(d)
             result = excel.verify(path, {'Sheet!A1': 2}, Path(d) / 'verification.json')
             saved = json.loads((Path(d) / 'verification.json').read_text(encoding='utf-8'))
@@ -364,7 +366,12 @@ class CollectCommandTests(unittest.TestCase):
                 return result
             return fn
         out = io.StringIO()
-        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(out),                 mock.patch.object(cli, '_client', return_value=(None, None, SimpleNamespace(calls=[]))),                 mock.patch.object(azinspect.vm.collect, 'collect', part('vm')),                 mock.patch.object(azinspect.cost.pipeline, 'collect', part('cost')),                 mock.patch.object(azinspect.waf.pipeline, 'collect', part('waf', list(failed_pillars))),                 mock.patch.object(azinspect.peer, 'collect', part('peer')):
+        with (tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(out),
+              mock.patch.object(cli, '_client', return_value=(None, None, SimpleNamespace(calls=[]))),
+              mock.patch.object(azinspect.vm.collect, 'collect', part('vm')),
+              mock.patch.object(azinspect.cost.pipeline, 'collect', part('cost')),
+              mock.patch.object(azinspect.waf.pipeline, 'collect', part('waf', list(failed_pillars))),
+              mock.patch.object(azinspect.peer, 'collect', part('peer'))):
             try:
                 code = cli.main(['collect', '--workspace', d, '--month', '2026-09'])
             except KeyboardInterrupt:
@@ -379,9 +386,19 @@ class CollectCommandTests(unittest.TestCase):
     def test_interrupted_run_names_remaining_parts(self):
         code, ran, out = self.run_collect(failing='cost')
         self.assertEqual((code, ran), ('interrupted', ['vm']))
-        for part in ('--part cost', '--part waf', '--part peer'):
+        for part in ('--part cost --resume', '--part waf', '--part peer'):
             self.assertIn(part, out)
         self.assertNotIn('--part vm', out)
+
+    def test_resume_passed_to_cost_collection(self):
+        from azinspect import cli
+        import azinspect.cost.pipeline
+        seen = {}
+        with (tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()),
+              mock.patch.object(cli, '_client', return_value=(None, None, SimpleNamespace(calls=[]))),
+              mock.patch.object(azinspect.cost.pipeline, 'collect', lambda *a, **k: seen.update(k))):
+            self.assertEqual(cli.main(['collect', '--workspace', d, '--month', '2026-09', '--part', 'cost', '--resume']), 0)
+        self.assertEqual(seen, {'resume': True})
 
     def test_clean_run(self):
         self.assertEqual(self.run_collect()[:2], (0, ['vm', 'cost', 'waf', 'peer']))

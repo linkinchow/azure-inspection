@@ -165,6 +165,7 @@ def ledger():
 
     def add(d, sub, rg, region, service, rtype, name, meter, qty, cost):
         lines.append({'sub': sub, 'date': d, 'ServiceName': service, 'ResourceGroupName': rg, 'ResourceId': rid(sub, rg, rtype, name).lower(),
+                      'ResourceType': rtype.lower(),
                       'ResourceLocation': LOCATION[region], 'PricingModel': 'OnDemand', 'MeterCategory': meter[0], 'MeterSubcategory': meter[1],
                       'Meter': meter[2], 'UnitOfMeasure': meter[3], 'MeterId': f'{service}|{meter[2]}', 'qty': qty, 'cost': round(cost, 4)})
     for d in span:
@@ -770,7 +771,10 @@ def commitments_part(ws):
          'term': 'P1Y', 'quantity': 0.95, 'costWithout': 1062.0, 'costWith': 873.4, 'saving': 188.6, 'coverage': 71.0, 'utilization': 99.1, 'lookBack': 'Last30Days'}]
     write_json(ws.raw('cost/commitments.json'), {
         'collectedAt': '2026-10-26T12:00:00+00:00', 'month': MONTH, 'subscriptionsQueried': len({p['subscriptionId'] for p in pricing}),
-        'pricingByResource': pricing, 'pricingStatus': {p['subscriptionId']: {'ok': True, 'error': None} for p in pricing},
+        'pricingByResource': pricing, 'pricingScope': 'machines',
+        'pricingByModel': {sid: {m: round(sum(p['cost'] for p in pricing if p['subscriptionId'] == sid and p['pricingModel'] == m), 2)
+                                 for m in {p['pricingModel'] for p in pricing if p['subscriptionId'] == sid}} for sid in {p['subscriptionId'] for p in pricing}},
+        'pricingStatus': {p['subscriptionId']: {'ok': True, 'error': None, 'models': True, 'machines': True} for p in pricing},
         'reservations': reservations, 'savingsPlans': plans, 'reservationStatus': {'ok': True, 'httpStatus': 200, 'error': None},
         'savingsPlanStatus': {'ok': True, 'httpStatus': 200, 'error': None}, 'recommendations': recs,
         'recommendationStatus': {f'{sid}|x': {'ok': True} for sid in SUB_ID.values()}})

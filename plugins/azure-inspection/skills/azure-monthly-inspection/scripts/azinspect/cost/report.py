@@ -22,6 +22,7 @@ from . import charts as cost_charts
 from .orphan import label as orphan_label
 from . import commitments as cm
 from . import views as sr
+from .model import save as save_model
 
 PERCENT = '0.0%;(0.0%);"-"'
 # Excel holds 1,048,576 rows per sheet; leave room for the title rows and the merged remainder.
@@ -259,7 +260,7 @@ def build(ws, cfg, period, narrative=None, log=print):
     raw_commitments = cm.load(ws)
     cs = cm.summary(raw_commitments) if raw_commitments else None
     actions = action_items(ws, model, sup, labels, narrative, period, cs)
-    write_json(fdir / 'model.json', model)
+    save_model(fdir, model)
     write_json(fdir / 'actions.json', actions)
     wb, expected = Workbook(), {}
     wb.remove(wb.active)

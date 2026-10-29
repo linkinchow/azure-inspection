@@ -16,7 +16,7 @@
 先读素材，再写说明。不要凭记忆或其他客户的情况写。
 
 01、02 目前还没有单独的 digest 文件，直接读以下数据：
-- 01：`findings/cost/model.json`（订阅、业务组、服务、资源组、资源费用和变化），`raw/cost/supplement/drivers.json`（每个主要变化按资源和计量拆解，含 `topResources`、`topMeters`），`raw/cost/resources/*.json`（数据库、存储、日志），`findings/cost/actions.json`（自动生成的建议）。
+- 01：`findings/cost/model.json`（订阅、业务组、服务、资源组的费用和变化，费用最高的 20 个资源在 `topResources`；全部资源的明细在 `findings/cost/resources.json`，文件很大，一般不需要读），`raw/cost/supplement/drivers.json`（每个主要变化按资源和计量拆解，含 `topResources`、`topMeters`），`raw/cost/resources/*.json`（数据库、存储、日志），`findings/cost/actions.json`（自动生成的建议）。
 - 02：`findings/vm/summary.json`、`recommendations.json`、`candidate-checks.json`。
 
 ## 通用字段

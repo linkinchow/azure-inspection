@@ -19,11 +19,18 @@ import json
 import math
 
 from ..core.io import read_json, write_json
+from ..core.reuse import Reuse, signature
 
 API = '2025-03-01'
 CORE = ('curActual', 'prevActual', 'curAmortized', 'curResources')
 KINDS = CORE + ('curPricingModel', 'curResourceGroups', 'budgets')
 ARM = 'https://management.azure.com'
+COLLECTOR_VERSION = 3
+# Per-resource costs of a subscription with many resource groups are read in batches of resource groups: one huge query
+# could run for hours and was lost when interrupted. Date ranges are not used: every resource would appear once per range.
+SPLIT_RESOURCE_GROUPS = 100
+RESOURCE_GROUP_BATCH = 50
+UNASSIGNED_SERVICE = '未归属资源组的费用'
 
 
 def now():
@@ -110,28 +117,34 @@ def fetch_pages(client, url, body, kind):
 
 
 class Collector:
-    def __init__(self, ws, client, period, subscriptions, currency, log=print):
+    def __init__(self, ws, client, period, subscriptions, currency, log=print, reuse=None):
         self.ws, self.client, self.period, self.subscriptions, self.currency, self.log = ws, client, period, subscriptions, currency, log
+        self.reuse = reuse or Reuse(False)
         self.records = {}
         self.started = now()
         self.optional_scope = []
 
-    def job(self, sub, kind):
-        body = None if kind == 'budgets' else query_body(kind, self.period)
+    def fetch(self, sub, kind, body, name):
+        """(record, rows) of one query saved as raw/cost/queries/<subscription>.<name>.json; with --resume a valid saved record is reused."""
         suffix = 'Microsoft.Consumption/budgets?api-version=2024-08-01' if kind == 'budgets' else f'Microsoft.CostManagement/query?api-version={API}'
         url = f"{ARM}/subscriptions/{sub['id']}/providers/{suffix}"
-        record = {'collectorVersion': 2, 'subscription': sub, 'queryKind': kind, 'query': body, 'url': url, 'startedAt': now()}
-        record['result'] = fetch_pages(self.client, url, body, kind)
-        record['completedAt'] = now()
-        if kind == 'curActual' and not record['result']['ok'] and (record['result']['error'] or {}).get('httpStatus') == 400:
-            detail = json.dumps(record['result']['error']).lower()
-            if 'group' in detail or 'dimension' in detail:
-                fallback = query_body(kind, self.period)
-                fallback['dataset']['grouping'] = [{'type': 'Dimension', 'name': 'ServiceName'}]
-                record['unsupportedCombinedGrouping'] = record['result']
-                record['query'] = fallback
-                record['result'] = fetch_pages(self.client, url, fallback, kind)
-                record['resourceGroupFallbackRequired'] = True
+        rel = f'cost/queries/{sub["id"]}.{name}.json'
+        sig = signature('cost-query', COLLECTOR_VERSION, kind, url, body)
+        record = self.reuse.load(self.ws.raw(rel), sig, lambda r: r['result']['ok'] and (r.get('validation') or {}).get('ok', True))
+        reused = record is not None
+        if not reused:
+            record = {'collectorVersion': COLLECTOR_VERSION, 'subscription': sub, 'queryKind': kind, 'query': body, 'url': url, 'startedAt': now()}
+            record['result'] = fetch_pages(self.client, url, body, kind)
+            record['completedAt'] = now()
+            if kind == 'curActual' and not record['result']['ok'] and (record['result']['error'] or {}).get('httpStatus') == 400:
+                detail = json.dumps(record['result']['error']).lower()
+                if 'group' in detail or 'dimension' in detail:
+                    fallback = query_body(kind, self.period)
+                    fallback['dataset']['grouping'] = [{'type': 'Dimension', 'name': 'ServiceName'}]
+                    record['unsupportedCombinedGrouping'] = record['result']
+                    record['query'] = fallback
+                    record['result'] = fetch_pages(self.client, url, fallback, kind)
+                    record['resourceGroupFallbackRequired'] = True
         try:
             rows = normalized(record, self.currency) if kind != 'budgets' else []
             if record['result']['ok']:
@@ -139,7 +152,12 @@ class Collector:
         except (ValueError, TypeError, KeyError) as exc:
             record['validation'] = {'ok': False, 'error': str(exc)}
             rows = []
-        self.ws.save_raw(f'cost/queries/{sub["id"]}.{kind}.json', record)
+        if not reused:
+            self.ws.save_raw(rel, self.reuse.stamp(record, sig))
+        return record, rows
+
+    def job(self, sub, kind):
+        record, rows = self.fetch(sub, kind, None if kind == 'budgets' else query_body(kind, self.period), kind)
         self.records[(sub['id'], kind)] = (record, rows)
         return record
 
@@ -147,6 +165,52 @@ class Collector:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             for future in concurrent.futures.as_completed([pool.submit(self.job, s, k) for s, k in jobs]):
                 future.result()
+
+    def resource_groups(self, sub):
+        """Resource groups with cost this month, from the subscription's own curActual read."""
+        _record, rows = self.records.get((sub['id'], 'curActual'), (None, []))
+        return sorted({r['resourceGroup'] for r in rows if r.get('resourceGroup')}, key=str.lower)
+
+    def resources_in_parts(self, sub, groups):
+        """Per-resource costs read in batches of resource groups; cost outside any resource group is the difference to the month total."""
+        batches = [groups[i:i + RESOURCE_GROUP_BATCH] for i in range(0, len(groups), RESOURCE_GROUP_BATCH)]
+
+        def one(numbered):
+            n, batch = numbered
+            body = query_body('curResources', self.period)
+            body['dataset']['filter'] = {'dimensions': {'name': 'ResourceGroupName', 'operator': 'In', 'values': batch}}
+            return self.fetch(sub, 'curResources', body, f'curResources.part{n:03d}')
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            parts = list(pool.map(one, enumerate(batches, 1)))
+        good = lambda r: r['result']['ok'] and (r.get('validation') or {}).get('ok')  # noqa: E731
+        ok = all(good(r) for r, _ in parts)
+        rows = [row for _, rs in parts for row in rs]
+        failed = next((r for r, _ in parts if not good(r)), None)
+        record = {'collectorVersion': COLLECTOR_VERSION, 'subscription': sub, 'queryKind': 'curResources', 'query': query_body('curResources', self.period),
+                  'split': {'resourceGroups': len(groups), 'batches': len(batches), 'batchSize': RESOURCE_GROUP_BATCH},
+                  'result': {'ok': ok, 'pages': [], 'error': None if ok else (failed['result'].get('error') or failed.get('validation'))},
+                  'validation': {'ok': True, 'rowCount': len(rows)} if ok else {'ok': False, 'error': 'some resource group batches failed'}}
+        cur, cur_rows = self.records.get((sub['id'], 'curActual'), (None, []))
+        if ok and cur and cur['result']['ok'] and (cur.get('validation') or {}).get('ok'):
+            rest = math.fsum(r['cost'] for r in cur_rows) - math.fsum(r['cost'] for r in rows)
+            if abs(rest) >= 0.005:
+                rows.append({'subscriptionId': sub['id'], 'name': sub['name'], 'group': sub['group'], 'date': None, 'serviceName': UNASSIGNED_SERVICE,
+                             'resourceGroup': None, 'resourceId': None, 'pricingModel': None, 'cost': rest, 'currency': self.currency})
+            record['split']['unassignedCost'] = rest
+        self.records[(sub['id'], 'curResources')] = (record, rows if ok else [])
+        return record
+
+    def run_resource_jobs(self, subs):
+        whole = []
+        for s in subs:
+            groups = self.resource_groups(s)
+            if len(groups) > SPLIT_RESOURCE_GROUPS:
+                self.log(f'  订阅 {s["name"]} 有 {len(groups)} 个有费用的资源组，逐资源费用按每批 {RESOURCE_GROUP_BATCH} 个资源组分段读取')
+                self.resources_in_parts(s, groups)
+            else:
+                whole.append((s, 'curResources'))
+        self.run_jobs(whole)
 
     def snapshot(self, complete):
         index, all_rows, coverage = [], {kind: [] for kind in KINDS if kind != 'budgets'}, {}
@@ -167,7 +231,7 @@ class Collector:
             coverage[kind] = {'attempted': len(selected), 'successful': sum(r['ok'] for r in selected),
                               'empty': sum(r['status'] == 'empty' for r in selected), 'denied': sum(r['status'] == 'denied' for r in selected),
                               'errors': sum(r['status'] == 'error' for r in selected)}
-        meta = {'collectorVersion': 2, 'startedAt': self.started, 'completedAt': now() if complete else None, 'complete': complete,
+        meta = {'collectorVersion': COLLECTOR_VERSION, 'startedAt': self.started, 'completedAt': now() if complete else None, 'complete': complete,
                 'apiVersion': API, 'currency': self.currency,
                 'periods': {'cur': self.period.current.cost_range(), 'prev': self.period.previous.cost_range()},
                 'months': {'cur': self.period.current.key, 'prev': self.period.previous.key},
@@ -181,14 +245,15 @@ class Collector:
         return meta
 
 
-def collect(ws, cfg, client, period, log=print):
+def collect(ws, cfg, client, period, log=print, reuse=None):
     from ..vm.collect import subscriptions_in_scope
     subs = []
     for s in subscriptions_in_scope(client, cfg):
         subs.append({**s, 'group': cfg.business_line(s['name']) or '其他', 'stateAtCollection': s['state']})
-    collector = Collector(ws, client, period, subs, cfg.currency, log)
+    collector = Collector(ws, client, period, subs, cfg.currency, log, reuse)
     log(f'费用采集：{len(subs)} 个订阅，{period.current.label}（对比 {period.previous.label}）')
-    collector.run_jobs([(s, k) for s in subs for k in CORE])
+    collector.run_jobs([(s, k) for s in subs for k in CORE if k != 'curResources'])
+    collector.run_resource_jobs(subs)   # after curActual: its resource groups decide which subscriptions are read in parts
     supplemental = [(r['subscription'], 'curResourceGroups') for r, _ in list(collector.records.values()) if r.get('resourceGroupFallbackRequired')]
     if supplemental:
         collector.run_jobs(supplemental)

@@ -7,7 +7,9 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 
-from ..core.io import read_json
+from pathlib import Path
+
+from ..core.io import read_json, write_json
 
 
 def total(rows):
@@ -85,7 +87,7 @@ def build(ws, period):
         resource_rows.append({'subscriptionId': sid, 'subscriptionName': submap[sid]['name'], 'group': submap[sid]['group'],
                               'resourceGroup': parts[lower.index('resourcegroups') + 1] if 'resourcegroups' in lower else '未归属',
                               'resourceId': rid, 'resourceName': parts[-1] if rid != '无资源ID' else rid, 'serviceName': service, 'cost': math.fsum(values)})
-    resource_rows.sort(key=lambda r: -r['cost'])
+    resource_rows.sort(key=lambda r: (-r['cost'], r['subscriptionName'], r['resourceId']))   # ties do not depend on query order
     daily = defaultdict(lambda: {'prev': [], 'cur': []})
     for p, rs in [('prev', actual_prev), ('cur', actual_cur)]:
         for r in rs:
@@ -134,3 +136,28 @@ def build(ws, period):
             'pricingModels': [{'pricingModel': n, 'cost': math.fsum(v)} for n, v in sorted(pricing.items(), key=lambda t: -math.fsum(t[1]))],
             'resourceReview': review,
             'budgets': read_json(budget_path) if budget_path.exists() else None}
+
+
+RESOURCE_COLUMNS = ['subscriptionId', 'subscriptionName', 'group', 'resourceGroup', 'resourceId', 'resourceName', 'serviceName', 'cost']
+TOP_RESOURCES = 20
+
+
+def save(fdir: Path, model: dict) -> None:
+    """findings/cost/model.json without the per-resource rows (the costliest 20 are kept for the report text), and
+    findings/cost/resources.json with every row as compact columns: on large tenants the rows were most of a model file
+    of more than 1 GB that the summary and cross-checks read in full."""
+    slim = {k: v for k, v in model.items() if k != 'resources'}
+    slim['topResources'] = model['resources'][:TOP_RESOURCES]
+    slim['resourceCount'] = len(model['resources'])
+    write_json(Path(fdir) / 'model.json', slim)
+    write_json(Path(fdir) / 'resources.json', {'columns': RESOURCE_COLUMNS,
+                                               'rows': [[r[c] for c in RESOURCE_COLUMNS] for r in model['resources']]}, compact=True)
+
+
+def load_resources(fdir: Path) -> list[dict]:
+    """Per-resource rows from resources.json, or from a model.json written before 0.7.0."""
+    path = Path(fdir) / 'resources.json'
+    if path.exists():
+        data = read_json(path)
+        return [dict(zip(data['columns'], row)) for row in data['rows']]
+    return read_json(Path(fdir) / 'model.json').get('resources') or []
