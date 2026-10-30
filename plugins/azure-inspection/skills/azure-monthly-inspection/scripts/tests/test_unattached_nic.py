@@ -100,6 +100,12 @@ class UnattachedNicTests(unittest.TestCase):
         latent = [i for i in items if i['check'] == 'S-N2' and i['key'] == 'nsg-latent']
         self.assertEqual([n['nsg'] for n in latent[0]['evidence']['nsgs']], ['nsg-left'])
 
+    def test_allowing_nsg_named_when_rule_opens_every_port(self):
+        # an any-port rule is reported as S-N2 high, not as management ports only: S-N3 still names the NSG that lets SSH/RDP in
+        sn3 = [i for i in run(with_vm=True) if i['check'] == 'S-N3'][0]
+        self.assertIn('放行的 NSG：nsg-app。', sn3['finding'])
+        self.assertEqual(sn3['evidence']['vmsWithDirectPublicIp'][0]['allowingNsgRules'], ['nsg-app/allow-any'])
+
 
 class IdleVsExposedTests(unittest.TestCase):
     def test_x5_covers_network_findings(self):

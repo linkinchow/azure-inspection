@@ -5,6 +5,7 @@ Each rule appends a draft row to Draft; analyze.py merges repetitive rows, sorts
 from __future__ import annotations
 
 import ipaddress
+import re
 
 from ..common import env as env_of
 from .network import (ADMIN_PORTS, DB_PORTS, INFRA_SUBNETS, MGMT_PORTS, NSG_UNSUPPORTED_DELEGATIONS, RISKY, endpoint_label,
@@ -13,6 +14,7 @@ from .network import (ADMIN_PORTS, DB_PORTS, INFRA_SUBNETS, MGMT_PORTS, NSG_UNSU
 MULTI_ENV = {'value': 'mixed', 'label': '多个环境', 'basis': '见涉及资源'}
 NSG = 'Microsoft.Network/networkSecurityGroups'
 SUBNET = 'Microsoft.Network/virtualNetworks/subnets'
+ALLOWED_BY = re.compile(r'(?:subnet|nic):([^/;]+)/([^=;]+)=Allow')     # NSG layers in network.effective() details
 
 
 def member(name, rtype, subscription):
@@ -360,6 +362,11 @@ def _direct_vms(c, paths, exposures):
         owner = ep.get('nic') or ep.get('vmss')
         ex = [e for e in exposures if e['path'] is pth]
         powered = None
+        allow = {}
+        for e in ex:
+            if e['port'] in MGMT_PORTS:
+                for nsg_name, rule in ALLOWED_BY.findall(e['detail']):
+                    allow.setdefault(nsg_name.strip(), set()).add(rule.strip())
         if ep.get('vm') and ep['vm'] in c.vm:
             powered = (c.vm[ep['vm']].get('properties') or {}).get('powerState')
         vm_direct.setdefault(owner['subscriptionId'], []).append({
@@ -369,6 +376,7 @@ def _direct_vms(c, paths, exposures):
             'internetReachableDbPorts': sorted({e['port'] for e in ex if e['port'] in DB_PORTS}),
             'internetReachableAdminPorts': sorted({e['port'] for e in ex if e['port'] in ADMIN_PORTS}),
             'anyPortOpen': any(e['port'] == '*' for e in ex),
+            'allowingNsgRules': sorted(f"{k}/{','.join(sorted(v))}" for k, v in allow.items()),
             'internetReachablePorts': sorted({f"{e['port']}/{e['proto']}" for e in ex if isinstance(e['port'], int)})[:80],
             'nsgLayers': {'subnet': (c.nsg.get(c.subnet_nsg.get(ep.get('subnet') or '', '')) or {}).get('name'),
                           'nic': (c.nsg.get(ep.get('nicNsg') or '') or {}).get('name')}})
@@ -408,7 +416,8 @@ def check_public_ips(c, F, paths, exposures, mgmt_direct):
     for sub, items in vm_direct.items():
         md = mgmt_direct.get(sub, {})
         for i in items:
-            i['allowingNsgRules'] = sorted(md.get(i['endpoint'], []))
+            # S-N2 records the rules when only management ports are open; otherwise (e.g. an any-port rule) the NIC's own evaluation names them
+            i['allowingNsgRules'] = sorted(md.get(i['endpoint'], [])) or i['allowingNsgRules']
         mg = [i for i in items if i['internetReachableMgmtPorts']]
         dbonly = [i for i in items if not i['internetReachableMgmtPorts'] and (i['internetReachableDbPorts'] or i['anyPortOpen'])]
         e_ = _subscription_env(F, sub, items)
@@ -418,7 +427,8 @@ def check_public_ips(c, F, paths, exposures, mgmt_direct):
             nsgs = sorted({x.split('/')[0] for i in mg for x in i['allowingNsgRules']})
             F.add('S-N3', '中' if is_test(e_) else '高', None, 'VM 直连公网 IP + 管理端口',
                   f'该订阅有 {len(items)} 个 VM 网卡直接绑定公网 IP，其中 {len(mg)} 个的 SSH/RDP 管理端口对整个 Internet 开放（来源为 Any/Internet），'
-                  f'如 {names}{"…" if len(mg) > 8 else ""}；放行的 NSG：{", ".join(nsgs[:12])}{"…" if len(nsgs) > 12 else ""}。',
+                  f'如 {names}{"…" if len(mg) > 8 else ""}'
+                  + (f'；放行的 NSG：{", ".join(nsgs[:12])}{"…" if len(nsgs) > 12 else ""}' if nsgs else '') + '。',
                   {'vmsWithDirectPublicIp': items, 'mgmtExposedCount': len(mg)},
                   '优先把这些 NSG 中 22/3389 的来源改为办公网/VPN 固定出口 IP，或启用 Defender for Cloud 的 JIT 按需开放；中期去掉不必要的直连公网 IP，'
                   '运维改走 Azure Bastion/VPN，对外服务改由应用网关/负载均衡/Front Door 暴露。',
