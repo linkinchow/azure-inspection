@@ -81,10 +81,17 @@ def _recalculate_with_excel(path: Path) -> tuple[bool, str | None]:
     except Exception as e:  # Excel missing, file not opened or COM failure: fall back to the structural check and keep the reason
         return False, f'Excel 复算失败：{type(e).__name__}: {e}'[:500]
     finally:
-        if book is not None:
-            book.Close(SaveChanges=False)
-        if excel is not None:
-            excel.Quit()
+        # after a disconnect even looking up Close or Quit fails; that must not turn the fallback into a failed build
+        try:
+            if book is not None:
+                book.Close(SaveChanges=False)
+        except Exception:  # noqa: BLE001 - the result and its reason are already decided
+            pass
+        try:
+            if excel is not None:
+                excel.Quit()
+        except Exception:  # noqa: BLE001
+            pass
         pythoncom.CoUninitialize()
 
 

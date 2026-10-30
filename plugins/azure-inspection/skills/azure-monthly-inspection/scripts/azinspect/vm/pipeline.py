@@ -5,13 +5,15 @@ import copy
 from datetime import datetime, timezone
 
 from ..core.io import read_json, write_json
-from . import rules
+from . import rules, scalesets
 from .prices import ensure_prices
 
 
 def analyze(ws, client=None, price_date=None, fetch_prices=True, log=print):
     raw_inv, raw_avg = ws.raw('vm/inventory'), ws.raw('vm/metrics')
-    vms = read_json(raw_avg / 'vms-average.json')
+    # Flexible scale set instances are also VM resources: count each machine once (see scalesets.py)
+    inventory = read_json(raw_inv / 'resources.json') if (raw_inv / 'resources.json').exists() else []
+    vms, duplicates, missing = scalesets.drop_flexible_duplicates(read_json(raw_avg / 'vms-average.json'), inventory)
     sku_envelopes = read_json(raw_avg / 'sku-capabilities.json')
     clusters = read_json(raw_inv / 'aks-pools.json')
     subscriptions = read_json(raw_inv / 'subscriptions.json')
@@ -28,6 +30,10 @@ def analyze(ws, client=None, price_date=None, fetch_prices=True, log=print):
     canonical = {i['name'].lower(): i['name'] for record in sku_envelopes for i in record.get('items') or [] if i.get('name')}
     catalog = ensure_prices(client, ws.raw('vm/prices'), needed, price_date, fetch_prices, log, canonical)
     updated, records, trials, pools, summary = rules.analyze(vms, sku_envelopes, clusters, catalog, subscriptions, manifest, price_date)
+    summary.update({'flexibleDuplicatesRemoved': len(duplicates), 'flexibleInstancesMissing': len(missing),
+                    'flexibleInstancesMissingIds': [v['id'] for v in missing]})
+    if duplicates or missing:
+        log(scalesets.note(len(duplicates), len(missing)))
     out = ws.month_dir('findings') / 'vm'
     for name, data in [('vms-analyzed.json', updated), ('recommendations.json', records), ('candidate-checks.json', trials),
                        ('pools.json', pools), ('summary.json', summary), ('subscriptions.json', subscriptions), ('collection-manifest.json', manifest)]:

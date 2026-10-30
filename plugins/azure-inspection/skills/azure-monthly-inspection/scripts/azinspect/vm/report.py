@@ -14,6 +14,7 @@ from ..core.excel import MONEY, verify
 from ..core.fmt_md import format_and_check
 from ..core.io import write_json
 from . import charts as vm_charts
+from . import scalesets
 from .prices import KEYS
 from .rules import IO
 from .table import combined_rows, portfolio_totals, price_and_saving
@@ -250,6 +251,8 @@ def build(ws, cfg, narrative=None, log=print):
         method.append(row)
     data = vm_charts.chart_data(vms, recs, portfolio)
     data['commitmentCoverage'] = cc_info
+    analysis = read('summary.json')
+    data['scaleSetNote'] = scalesets.note(analysis.get('flexibleDuplicatesRemoved', 0), analysis.get('flexibleInstancesMissing', 0))
     clear_charts(out / 'charts', '02')
     pngs = vm_charts.make_pngs(data, out / 'charts')
     chart_sheet = vm_charts.add_excel_sheet(sheet, data)
@@ -427,6 +430,7 @@ def markdown(cfg, rows, recs, subs, manifest, pools, total, portfolio, data, png
     lines = [f'# {cfg.name}：各订阅VM规格建议与预计节省', '', '**' + PRICE_NOTE + '**', '', '## 1. 范围和结果', '',
              f'- 已核对{cfg.name}纳入巡检的 **{len(subs) - len(unverified)}个订阅**：{len(with_vm)}个有VM/VMSS，{len(without)}个没有VM。{unverified_text}'
              f'发现的 **{len(rows)}台机器**中，{running}台运行、{deallocated}台已释放计算资源。',
+             *([f'- {data["scaleSetNote"]}'] if data.get('scaleSetNote') else []),
              f'- 数据窗口为 **{manifest["start"]}至{manifest["end"]}（UTC）**，所有订阅使用同一完整7天。',
              f'- 建议调整 **{len(accepted)}台机器**，其中{len(accepted) - pool_nodes}台独立VM，{pool_nodes}台在{pool_count}个节点池中。节点池里的机器已包含在总数中。',
              f'- 仅调整规格、不购买RI/SP，**预计每月节省 USD {fmt(total)}，每年节省 USD {fmt(total * 12)}**。当前费用及五种方案汇总如下。',

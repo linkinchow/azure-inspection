@@ -338,6 +338,40 @@ class ExcelRecalculationTests(unittest.TestCase):
         self.assertFalse(result['recalculatedInExcel'])
         self.assertIn('Open method of Workbooks class failed', saved['recalculationError'])
 
+    def test_disconnected_excel_falls_back(self):
+        """Excel disconnects during recalculation and Close/Quit then fail too: the build keeps the structural check."""
+        disconnected = RuntimeError('(-2147417848, The object invoked has disconnected from its clients.)')
+        released = []
+
+        class Book:
+            def Close(self, **k):
+                raise disconnected
+
+        class Excel:
+            Visible = DisplayAlerts = AutomationSecurity = None
+
+            class Workbooks:
+                @staticmethod
+                def Open(*a, **k):
+                    return Book()
+
+            def CalculateFullRebuild(self):
+                raise RuntimeError('recalculation interrupted')
+
+            @property
+            def Quit(self):     # a disconnected COM object fails on attribute access already
+                raise AttributeError('Open.Quit')
+
+        fake_com = SimpleNamespace(CoInitialize=lambda: None, CoUninitialize=lambda: released.append(True))
+        fake_client = SimpleNamespace(DispatchEx=lambda name: Excel())
+        with (tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {'AZINSPECT_NO_EXCEL': ''}),
+              mock.patch.object(excel.platform, 'system', return_value='Windows'),
+              mock.patch.dict(sys.modules, {'pythoncom': fake_com, 'win32com': SimpleNamespace(client=fake_client), 'win32com.client': fake_client})):
+            result = excel.verify(self.workbook(d), {'Sheet!A1': 2})
+        self.assertFalse(result['recalculatedInExcel'])
+        self.assertIn('recalculation interrupted', result['recalculationError'])
+        self.assertEqual(released, [True])
+
     def test_skipped_recalculation_says_why(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {'AZINSPECT_NO_EXCEL': '1'}):
             result = excel.verify(self.workbook(d), {'Sheet!A1': 2})
@@ -477,3 +511,44 @@ class VmMarkdownSizeTests(unittest.TestCase):
             p = Path(d) / '02_报告.md'
             p.write_text('# 报告\n\n' + '很长的段落。' * 30_000 + '\n', encoding='utf-8')
             self.assertTrue(any('KB' in x for x in check_markdown(p)))
+
+
+class FlexibleScaleSetTests(unittest.TestCase):
+    """Machines in a Flexible scale set are also standalone VM resources: counted once, as the VM."""
+    FLEX = '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/flex'
+    UNI = '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/uni'
+    resources = [{'id': FLEX, 'type': 'Microsoft.Compute/virtualMachineScaleSets', 'properties': {'orchestrationMode': 'Flexible'}},
+                 {'id': UNI, 'type': 'Microsoft.Compute/virtualMachineScaleSets', 'properties': {'orchestrationMode': 'Uniform'}},
+                 {'id': '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-a', 'name': 'vm-a', 'subscriptionId': 's',
+                  'type': 'Microsoft.Compute/virtualMachines', 'properties': {'virtualMachineScaleSet': {'id': FLEX}}},
+                 {'id': '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-b', 'name': 'vm-b', 'subscriptionId': 's',
+                  'type': 'Microsoft.Compute/virtualMachines', 'properties': {}}]
+
+    def vms(self):
+        vm = lambda name: {'id': f'/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/{name}', 'name': name,  # noqa: E731
+                           'kind': 'vm', 'metricResourceId': f'/subscriptions/s/x/{name}', 'subscriptionId': 's', 'state': 'PowerState/running'}
+        child = lambda parent, name: {'id': f'{parent}/virtualMachines/{name}', 'name': name, 'kind': 'vmss', 'metricResourceId': parent,  # noqa: E731
+                                      'subscriptionId': 's', 'state': 'Unknown'}
+        return [vm('vm-a'), vm('vm-b'), child(self.FLEX, 'vm-a'), child(self.FLEX, 'vm-gone'), child(self.UNI, '0')]
+
+    def test_duplicates_removed_and_missing_counted(self):
+        from azinspect.vm import scalesets
+        kept, duplicates, missing = scalesets.drop_flexible_duplicates(self.vms(), self.resources)
+        self.assertEqual(sorted(v['id'].rsplit('/', 2)[-2] + '/' + v['name'] for v in kept),
+                         ['virtualMachines/0', 'virtualMachines/vm-a', 'virtualMachines/vm-b'])
+        self.assertEqual([v['name'] for v in duplicates], ['vm-a'])
+        self.assertEqual([v['name'] for v in missing], ['vm-gone'])
+        self.assertEqual(sum(v['kind'] == 'vmss' for v in kept), 1)
+
+    def test_nothing_to_drop_without_flexible_sets(self):
+        from azinspect.vm import scalesets
+        vms = [v for v in self.vms() if self.FLEX not in v['metricResourceId']]
+        self.assertEqual(scalesets.drop_flexible_duplicates(vms, self.resources), (vms, [], []))
+
+    def test_summary_sentence(self):
+        from azinspect.vm import scalesets
+        text = scalesets.note(40, 7)
+        self.assertIn('Flexible', text)
+        self.assertIn('去掉 40 条重复记录', text)
+        self.assertIn('7 个实例在采集时已不存在或无法读取', text)
+        self.assertEqual(scalesets.note(0, 0), '')

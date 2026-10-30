@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 from ..core.io import read_json, write_json
+from ..vm.scalesets import drop_flexible_duplicates
 from ..vm.collect import METRICS, _arm_metrics_as_batch, _Caller
 
 DISK_FIELDS = dict(zip(METRICS[2:], ('uncachedIOPSAverage', 'uncachedBandwidthAverage', 'cachedIOPSAverage', 'cachedBandwidthAverage')))
@@ -126,6 +127,7 @@ def collect(ws, client, period, log=print):
     call = _Caller(client, 'cost-review')
     inv = ws.raw('vm/inventory')
     vms, resources, subscriptions = read_json(inv / 'vms.json'), read_json(inv / 'resources.json'), read_json(inv / 'subscriptions.json')
+    vms = drop_flexible_duplicates(vms, resources)[0]   # Flexible scale set instances are already counted as VMs
     snapshot = read_json(inv / 'manifest.json')['collectedAt']
     sku_lookup = {(str(e['subscriptionId']).lower(), str(e['region']).lower(), str(s['name']).lower()): s
                   for e in read_json(ws.raw('vm/metrics/sku-capabilities.json')) for s in e.get('items', [])}
