@@ -201,6 +201,11 @@ def _open_rules(p):
     return open_rules, broad_vnet
 
 
+def unattached(ep):
+    """A network interface with no VM (left behind when a VM was deleted): nothing behind its public IP answers today."""
+    return ep.get('kind') == 'nic' and not ep.get('vm') and not ep.get('privateEndpoint') and not ep.get('pls')
+
+
 def _reachable(c, nid, n, risky_rules, exposures):
     wide_specs = [k for r in risky_rules for k in r['riskyPorts'] if isinstance(k, str) and '-' in k]
     reach = []
@@ -233,6 +238,14 @@ def check_nsg(c, F, exposures):
         if not risky_rules:
             continue
         reach = _reachable(c, nid, n, risky_rules, exposures)
+        # NICs without a VM are leftovers, not exposure: the open rule stays a latent risk until a VM is placed there
+        left = {}
+        for e in reach:
+            if unattached(e['ep']):
+                left.setdefault(e['ep']['nic']['name'], {'nic': e['ep']['nic']['name'], 'publicIp': e['path'].get('publicIp'),
+                                                         'pipName': e['path'].get('pipName'), 'attachedToVm': False})
+        left = sorted(left.values(), key=lambda x: x['nic'])
+        reach = [e for e in reach if not unattached(e['ep'])]
         hi = [e for e in reach if e['port'] == '*' or e['port'] in RISKY]
         mid = [e for e in reach if e not in hi]
         orphan = not assoc_subnets and not assoc_nics
@@ -241,7 +254,8 @@ def check_nsg(c, F, exposures):
         rule_desc = '；'.join(f"{r['name']}(优先级{r['priority']}，端口{','.join(map(str, r['ports']))}：{'/'.join(str(v) for v in r['riskyPorts'].values())})"
                              for r in risky_rules)
         evidence = {'riskyInternetRules': risky_rules, 'associatedSubnets': assoc_subnets, 'associatedNicCount': len(assoc_nics),
-                    'reachableFromInternet': ev_reach[:60], 'reachableCount': len(ev_reach), 'orphanNsg': orphan}
+                    'reachableFromInternet': ev_reach[:60], 'reachableCount': len(ev_reach), 'orphanNsg': orphan,
+                    'unattachedNics': left}
         aks_tip = (' 该规则由 AKS 根据 Kubernetes Service 自动生成，应在 Service 上设置 loadBalancerSourceRanges 或改为内部负载均衡，而不是直接改 NSG。'
                    if aks else '')
 
@@ -267,7 +281,7 @@ def check_nsg(c, F, exposures):
                 continue
             latent.setdefault(n['subscriptionId'], []).append({'nsg': n['name'], 'resourceGroup': n['resourceGroup'], 'orphan': orphan,
                                                                'rules': rule_desc, 'associatedSubnets': [x.split('/')[-1] for x in assoc_subnets],
-                                                               'associatedNicCount': len(assoc_nics)})
+                                                               'associatedNicCount': len(assoc_nics), 'unattachedNics': left})
         elif mgmt_only_direct:
             # counted once in the S-N3 per-subscription finding (VM with direct public IP + management port open)
             for e in hi:
@@ -299,11 +313,16 @@ def check_nsg(c, F, exposures):
               name=f'{len(items)} 个 NSG', rg='(多个)', sub=sub, members=[member(i['nsg'], NSG, c.sub(sub)) for i in items], key='nsg-wide-range')
     for sub, items in latent.items():
         orphan_n = sum(1 for i in items if i['orphan'])
+        left = [x for i in items for x in i['unattachedNics']]
+        left_txt = (f'另有 {len(left)} 张网卡绑定了公网 IP 但没有挂虚拟机（{"、".join(x["nic"] for x in left[:8])}{"…" if len(left) > 8 else ""}），'
+                    '公网 IP 后面目前没有运行的系统，是删除虚拟机后留下的，可以清理；以后在这些子网新建或挂上虚拟机时，端口会直接暴露。'
+                    if left else '')
         F.add('S-N2', '低', None, NSG,
-              f'该订阅有 {len(items)} 个 NSG 含对 Internet 开放的高风险规则（22/数据库端口/任意端口等），但目前没有公网 IP 或负载均衡规则能把这些端口暴露出去'
+              f'该订阅有 {len(items)} 个 NSG 含对 Internet 开放的高风险规则（22/数据库端口/任意端口等），但目前没有公网 IP 或负载均衡规则能把这些端口暴露到在用的实例上'
               + (f'（其中 {orphan_n} 个 NSG 未关联任何资源）' if orphan_n else '') + '，属于潜在风险：' + '、'.join(i['nsg'] for i in items[:15])
-              + ('…' if len(items) > 15 else '') + '。',
-              {'nsgs': items}, '把这些规则的来源收窄为固定 IP 或内网网段；不再使用的 NSG 直接删除。否则一旦相关子网/网卡加上公网 IP 或负载均衡规则，端口会立即暴露。',
+              + ('…' if len(items) > 15 else '') + '。' + left_txt,
+              {'nsgs': items}, '把这些规则的来源收窄为固定 IP 或内网网段；不再使用的 NSG 直接删除。否则一旦相关子网/网卡加上公网 IP 或负载均衡规则，端口会立即暴露。'
+                               + ('没有挂虚拟机的网卡和它们的公网 IP 确认不再使用后删除。' if left else ''),
               name=f'{len(items)} 个 NSG', rg='(多个)', sub=sub, members=[member(i['nsg'], NSG, c.sub(sub)) for i in items], key='nsg-latent')
     return inventory, mgmt_direct
 
@@ -336,6 +355,8 @@ def _direct_vms(c, paths, exposures):
         if pth['type'] not in ('nic-pip', 'vmss-pip'):
             continue
         ep = pth['ep']
+        if unattached(ep):
+            continue     # leftover NIC: the open rule is reported as a latent risk under S-N2
         owner = ep.get('nic') or ep.get('vmss')
         ex = [e for e in exposures if e['path'] is pth]
         powered = None

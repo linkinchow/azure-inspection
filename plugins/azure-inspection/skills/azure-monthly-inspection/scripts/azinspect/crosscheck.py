@@ -134,6 +134,9 @@ def x4(ws):
     return _result('X4', '缓存或数据库降档 vs 增长趋势', items)
 
 
+EXPOSED_TYPES = {'microsoft.network/networkinterfaces', 'microsoft.network/publicipaddresses'}
+
+
 def x5(ws):
     review = _load(ws.raw('cost/review/results.json'))
     if review is None:
@@ -142,12 +145,18 @@ def x5(ws):
     rows, _, _ = orphan_findings(ws, {})
     idle = {str(r.get('name')).lower(): r for r in (review.get('wasteFindings') or []) + rows if r.get('name')}
     items = []
-    for pillar in ('performance', 'operations', 'reliability'):
+    for pillar in ('performance', 'operations', 'reliability', 'security_network'):
         for f in _findings(ws, pillar) or []:
-            for n in sorted(_names(f) & set(idle)):
+            names = _names(f)
+            if pillar == 'security_network':
+                # only network interfaces and public IPs listed as exposed; idle NSGs are already a latent risk there
+                names = {str(m['name']).lower() for m in f.get('members') or []
+                         if str(m.get('type') or '').lower() in EXPOSED_TYPES and m.get('name')}
+            for n in sorted(names & set(idle)):
                 items.append({'resource': idle[n]['name'], 'subscription': idle[n].get('subscriptionName'),
                               'evidence': f'01 列为闲置（{idle[n].get("category")}）；{f["id"]}：{f["finding"][:100]}',
-                              'suggestion': '确认是否仍在使用；在用的从闲置清单说明中改为“需要确认用途”'})
+                              'suggestion': '确认是否仍在使用；在用的从闲置清单说明中改为“需要确认用途”'
+                                            + ('；确是残留的，03 的建议改为直接清理' if pillar == 'security_network' else '')})
     return _result('X5', '闲置资源 vs 仍在使用', items, manual=True)
 
 
