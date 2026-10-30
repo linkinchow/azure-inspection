@@ -32,6 +32,10 @@ rules:
   # 可选：除通用关键字（mysql、redis、kafka、clickhouse、bigdata 等）外，名称表示“保存数据”的虚拟机。用于判断哪些虚拟机必须备份。
   # statefulVmNames: 'etl|warehouse'
 
+  # 可选：用自定义镜像部署的网络设备（防火墙、流量探针等）的虚拟机名称（正则）。Marketplace 镜像的设备会按镜像发布者自动识别，不用配置。
+  # 识别为网络设备后：不判断内存读数、不报 IP 转发、SSH 建议改为管理口访问控制，02 不给降配建议。
+  # networkAppliances: '^(fgt|pafw)-'
+
   # 可选：客户自定义的管理或中间件端口（端口: 说明）。对公网开放时与 SSH、数据库端口一样列为问题。
   # extraRiskyPorts: {9999: '内部管理后台'}
 

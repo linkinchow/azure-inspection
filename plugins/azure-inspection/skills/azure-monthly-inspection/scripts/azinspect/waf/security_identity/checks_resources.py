@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from ...core import appliance
 from ..common import mixed_env
+from ..pipeline import SSH_PENDING
 from .context import is_prod, is_test, member, subscription_members
 
 NO_CHANGE = '本次未做任何更改。'
@@ -99,14 +101,20 @@ def vms(ctx):
         vm_ext[x['id'].lower().split('/extensions/')[0]].append(f'{x["publisher"]}/{x["extType"]}')
     views = ctx.raw.load('vm/instanceView_patchStatus.json') or {}
     inventory = []
-    pw_pub, pw_priv, unknown, no_patch, pending = (defaultdict(list) for _ in range(5))
+    pw_pub, pw_priv, unknown, no_patch, pending, devices = (defaultdict(list) for _ in range(6))
+    names = ctx.cfg.appliance_names() if getattr(ctx, 'cfg', None) else None
+    rel = ctx.raw.other('reliability')
+    known = appliance.index(((rel.load('arg/vms.json') or {}).get('rows') or []), names)
     for v in ctx.rows('vms'):
         if v['resourceGroup'].lower().startswith('mc_'):
             continue
         vid, sid = v['id'].lower(), v['subscriptionId']
         item = _vm_item(ctx, v, any(vm_pip.get(vid, [])), vm_ext.get(vid, []), views.get(vid) or {})
+        item['appliance'] = known.get(vid) or appliance.of(v, names)
         inventory.append(item)
-        if v['osType'] == 'Linux':
+        if item['appliance'] and v.get('disablePasswordAuthentication') is not True:
+            devices[sid].append(item)     # appliance administrators log in with passwords: access to the management port matters
+        elif v['osType'] == 'Linux':
             if v.get('disablePasswordAuthentication') is False:
                 (pw_pub if item['publicIpAttached'] else pw_priv)[sid].append(item)
             elif v.get('disablePasswordAuthentication') is None:
@@ -116,6 +124,7 @@ def vms(ctx):
         elif (item['criticalAndSecurityPatchCount'] or 0) > 0:
             pending[sid].append(item)
     _password_findings(ctx, pw_pub, pw_priv, unknown)
+    _appliance_findings(ctx, devices)
     _patch_findings(ctx, no_patch, pending)
     if inventory:
         not_trusted = [x for x in inventory if x['securityType'] != 'TrustedLaunch']
@@ -134,6 +143,24 @@ def vms(ctx):
     assessed = len(ctx.rows('patch_assessment'))
     ctx.notes['S-I8'].append(f'Resource Graph patchassessmentresources 返回 {assessed} 行；补丁状态以逐台 instanceView 的 patchStatus 为准，'
                              f'{sum(len(v) for v in no_patch.values())} 台没有任何补丁评估记录。AKS 节点（MC_ 资源组）已排除。')
+
+
+def _appliance_findings(ctx, devices):
+    for sid, items in devices.items():
+        e = ctx.sub_env(ctx.name_of(sid))
+        public = [x for x in items if x['publicIpAttached']]
+        running = [x for x in public if (x['powerState'] or '').endswith('running')]
+        sev = '高' if (is_prod(e) and running) else ('中' if public else '低')
+        shown = '、'.join(x['name'] for x in items[:5]) + (f' 等 {len(items)} 台' if len(items) > 5 else '')
+        ctx.add('S-I8', sev, sid, None, f'{len(items)} 台网络设备', VM_TYPE, e,
+                finding=f'订阅 {ctx.name_of(sid)} 有 {len(items)} 台网络设备（{shown}）允许管理员用密码登录'
+                        + (f'，其中 {len(public)} 台绑定了公网 IP' if public else '')
+                        + '。网络设备的管理员通常使用密码，关闭密码登录不适用，重点是限制管理口的访问'
+                        + (SSH_PENDING if public else '。'),
+                evidence={'vms': [{k: x[k] for k in ('name', 'resourceGroup', 'powerState', 'publicIpAttached', 'appliance')} for x in items]},
+                recommendation='管理口（SSH、HTTPS）只允许受信地址访问、不对公网开放（用 NSG 或设备自身的可信主机设置），管理员账号启用多因素认证并定期更换密码；'
+                               '按厂商建议及时升级设备系统。' + NO_CHANGE,
+                key='appliance-admin-login', members=_vm_members(items))
 
 
 def _password_findings(ctx, pw_pub, pw_priv, unknown):

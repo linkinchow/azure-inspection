@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 
+from ...core import appliance
 from ...core.io import read_json
 from ..common import ADVISOR_NO_TEXT, Findings, Raw, advisor_problem, env, is_prod, load_scope, mixed_env
 from .lib import Data, first, fmt, rg_of
@@ -63,6 +64,8 @@ class Analyzer:
         self.days = self.window.get('days') or 30
         self.subs = load_scope(ws)
         self.data = Data(self.raw, self.window['start'], self.window['end'], self.subs)
+        rel_rows = lambda name: (self.rel.load(f'arg/{name}.json') or {}).get('rows') or []  # noqa: E731
+        self.appliances = appliance.index(rel_rows('vms') + rel_rows('vmss'), cfg.appliance_names() if cfg else None)
         self.F = Findings('performance')
         self.cov = {f'P{i}': {'attempted': 0, 'succeeded': 0, 'denied': 0, 'notes': []} for i in range(1, 11)}
         self.inv, self.limits = {}, []
@@ -122,7 +125,7 @@ class Analyzer:
         vms = d.rows('vms')
         running = [v for v in vms if v.get('power') == 'PowerState/running']
         month = self.month_vm_usage()
-        inv, nodata, short, p1_hits, p4_hits = [], [], [], [], []
+        inv, nodata, short, devices, p1_hits, p4_hits = [], [], [], [], [], []
         for v in running:
             rid = v['id']
             e = self.env_of(rid, v['name'], v.get('tags'))
@@ -151,6 +154,10 @@ class Analyzer:
                 continue
             sustained_cpu = (cpu.get('avg') or 0) >= 80
             sustained_mem = mem_used is not None and mem_used >= 85
+            rec['appliance'] = self.appliances.get(rid.lower())
+            if rec['appliance']:
+                devices.append(v['name'])
+                sustained_mem = False    # the guest memory reading of a network appliance is not trusted (see core/appliance.py)
             peaks = (cpu.get('daysMaxGE') or 0) >= 7
             if sustained_cpu or sustained_mem or peaks:
                 p1_hits.append((v, rec, sustained_cpu, sustained_mem))
@@ -164,6 +171,9 @@ class Analyzer:
         self.p4_vm_findings(p4_hits)
         self.cov['P1']['notes'].append(f'评估 {len(running)} 台运行中的虚拟机（{len(vms) - len(running)} 台已停止，未评估）；'
                                        f'{len(nodata)} 台没有指标数据。')
+        if devices:
+            self.cov['P1']['notes'].append(f"{len(devices)} 台网络设备只判断 CPU，内存读数未采用（设备自身上报的内存可能不准，请用设备自身的监控核对）："
+                                           f"{'、'.join(sorted(devices)[:10])}{' 等' if len(devices) > 10 else ''}。")
         if short:
             self.cov['P1']['notes'].append(f"{len(short)} 台虚拟机有效数据不足 {MIN_DAYS} 天（多为新建或自动伸缩的节点），没有判断是否满负荷或 IO 打满："
                                            f"{'、'.join(sorted(short)[:10])}{' 等' if len(short) > 10 else ''}。")
@@ -185,7 +195,8 @@ class Analyzer:
               'memUsedAvgPct': rec['memUsedAvgPct'], 'memUsedHighestDailyAvgPct': rec['memUsedHighestDailyAvgPct'],
               'reviewMonthCpuAvgPct': fmt(month.get('cpuAverage')), 'reviewMonthMemUsedAvgPct': fmt(month.get('memoryAverage')),
               'thresholds': f'持续：{D}天加权平均CPU≥80% 或 平均内存使用≥85%；频繁峰值：日最高CPU≥95%的天数≥7天。与成本降配检查方向相反。',
-              'disk': {DISK_CN[k]: x for k, x in rec['disk'].items() if (x['daysMaxGE95'] or 0) >= 3}}
+              'disk': {DISK_CN[k]: x for k, x in rec['disk'].items() if (x['daysMaxGE95'] or 0) >= 3},
+              'kind': 'CPU' if sustained_cpu else '内存' if sustained_mem else 'CPU峰值'}
         span = f'过去 {D} 天' if not rec['daysWithData'] or rec['daysWithData'] >= D else f"过去 {D} 天中有数据的 {rec['daysWithData']} 天"
         if sustained_cpu:
             f = (f"虚拟机 {v['name']}（{rec['vmSize']}）{span} CPU 加权平均 {rec['cpuAvgPct']}%，"
@@ -1131,6 +1142,31 @@ class Analyzer:
                 notes.append(f"“{problem}” ×{len(items)}：仅供参考。")
 
     # ------------------------------------------------------------------ run
+    def annotate_rightsizing(self):
+        """P1/P4 machines that 02 advises to downsize: say so in the finding, so 02 (smaller) and 04 (busy) are read together.
+        Uses findings/vm/recommendations.json when the VM analysis ran first (`analyze --part all` does)."""
+        path = self.ws.month_dir('findings') / 'vm' / 'recommendations.json'
+        if not path.exists():
+            return
+        from ...vm.wording import direction_text
+        down = {str(r['name']).lower(): r for r in read_json(path) if r.get('status') == '建议试点调整'}
+        for f in self.F.items:
+            if f['check'] not in ('P1', 'P4'):
+                continue
+            names = [m['name'] for m in f.get('members') or [] if m.get('name')] or [f.get('resourceName')]
+            hits = [down[str(n).lower()] for n in names if str(n).lower() in down]
+            if not hits:
+                continue
+            f['evidence']['rightsizing02'] = [{k: r.get(k) for k in ('name', 'currentSKU', 'targetSKU')} | {'direction': (r.get('candidate') or {}).get('direction')}
+                                              for r in hits]
+            if len(names) == 1:
+                r = hits[0]
+                f['finding'] += (f"02 建议该机{direction_text((r.get('candidate') or {}).get('direction')) or '降配'}"
+                                 f"（{r['currentSKU']} → {r.get('targetSKU')}），调整前一并考虑本项。")
+            else:
+                shown = '、'.join(r['name'] for r in hits[:3]) + (' 等' if len(hits) > 3 else '')
+                f['finding'] += f'其中 {len(hits)} 台在 02 被建议降配（{shown}），调整前一并考虑本项。'
+
     def run(self):
         self.coverage_from_index()
         self.p1_p4_vms()
@@ -1142,6 +1178,7 @@ class Analyzer:
         self.p8_placement()
         self.p9_edge()
         self.p10_advisor()
+        self.annotate_rightsizing()
         self.F.items.sort(key=lambda f: (SEV_ORDER[f['severity']], int(f['check'][1:]), f['resourceName'] or ''))
         for i, f in enumerate(self.F.items, 1):
             f['legacyId'] = f'PERF-{i:03d}'

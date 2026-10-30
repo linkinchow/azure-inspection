@@ -57,6 +57,7 @@ class CustomerConfig:
     standard_tag: dict[str, str] = field(default_factory=dict)
     vendor_managed: list[Rule] = field(default_factory=list)
     stateful_vm_names: str | None = None
+    network_appliance_names: str | None = None   # customer name rule for appliances on custom images
     extra_risky_ports: dict = field(default_factory=dict)
     public_storage_names: str | None = None
     currency: str = 'USD'
@@ -90,6 +91,10 @@ class CustomerConfig:
             if any(t and rule.pattern.search(t) for t in (subscription_name, resource_group, resource_name)):
                 return rule.label
         return None
+
+    def appliance_names(self):
+        """Compiled customer name rule for network appliances, or None."""
+        return re.compile(self.network_appliance_names, re.I) if self.network_appliance_names else None
 
     def vendor(self, resource_name: str = '', resource_group: str = '') -> str | None:
         for rule in self.vendor_managed:
@@ -156,6 +161,7 @@ def load(path: str | Path) -> CustomerConfig:
     if any(r.label not in ENVIRONMENTS for r in envs):
         errors.append('rules.environments 的 label 只能是 ' + '、'.join(ENVIRONMENTS))
     stateful = _pattern(rules.get('statefulVmNames'), 'rules.statefulVmNames', errors)
+    appliances = _pattern(rules.get('networkAppliances'), 'rules.networkAppliances', errors)
     ports = {}
     for port, label in (rules.get('extraRiskyPorts') or {}).items():
         if not str(port).isdigit() or not 0 < int(port) < 65536:
@@ -179,6 +185,6 @@ def load(path: str | Path) -> CustomerConfig:
         environment_tag_keys=[k.lower() for k in rules.get('environmentTagKeys') or ['environment', 'env']],
         region_labels={str(k).lower(): str(v) for k, v in (rules.get('regionLabels') or {}).items()},
         standard_tag=dict(rules.get('standardDeploymentTag') or {}),
-        vendor_managed=_rules(rules.get('vendorManaged'), 'rules.vendorManaged'), stateful_vm_names=stateful, extra_risky_ports=ports,
+        vendor_managed=_rules(rules.get('vendorManaged'), 'rules.vendorManaged'), stateful_vm_names=stateful, network_appliance_names=appliances, extra_risky_ports=ports,
         public_storage_names=public_storage,
         currency=str(report.get('currency') or 'USD'), vm_detail_max_rows=detail_rows, path=path)

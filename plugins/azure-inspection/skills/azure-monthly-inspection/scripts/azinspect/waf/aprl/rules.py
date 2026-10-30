@@ -76,9 +76,9 @@ RULES = {
         'finding': '路由表变更没有配置活动日志告警，路由被误改时无人知道',
         'recommendation': '为路由表的写入和删除操作配置活动日志告警，发送到值班组'},
     '41a22a5e-5e08-9647-92d0-2ffe9ef1bdad': {
-        'check': 'S-N9', 'severity': '低', 'type': 'Microsoft.Compute/virtualMachines',
+        'check': 'S-N9', 'severity': '低', 'type': 'Microsoft.Compute/virtualMachines', 'excludeAppliances': True,
         'finding': '虚拟机网卡开启了 IP 转发（只有防火墙、路由器等网络设备需要）',
-        'recommendation': '确认该机是否是网络设备；不是的关闭 IP 转发'},
+        'recommendation': '确认该机是否是网络设备，或自建 Kubernetes 节点（网络插件可能需要 IP 转发）；都不是的关闭 IP 转发'},
     '3201dba8-d1da-4826-98a4-104066545170': {
         'check': 'R21', 'severity': '低', 'type': 'Microsoft.Compute/virtualMachines',
         'finding': '使用 B 系列（突发型）虚拟机，CPU 积分用完后性能会被限制，不适合持续高负载的业务',

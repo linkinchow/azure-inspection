@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 
+from ...core import appliance
 from ..common import Findings, Raw, coverage_entry, enabled, env, load_scope, now
 from .rules import LOWER, RULES
 
@@ -64,6 +65,9 @@ def analyze(ws, cfg, log=print):
     meta = version()
     links = {r['aprlGuid']: r['learnMoreLink'] for r in meta['rules']}
     findings, coverage = Findings('aprl'), {}
+    rel = Raw(ws, 'reliability')
+    devices = appliance.index(((rel.load('arg/vms.json') or {}).get('rows') or []) + ((rel.load('arg/vmss.json') or {}).get('rows') or []),
+                              cfg.appliance_names() if cfg else None)
     for result in data['results']:
         guid, rule = result['aprlGuid'], RULES.get(result['aprlGuid'])
         if not rule:
@@ -76,8 +80,17 @@ def analyze(ws, cfg, log=print):
             c['denied' if result['status'] in (401, 403) else 'otherErrors'] += 1
             c['notes'].append(f'APRL {guid[:8]} 查询失败：{result.get("error")}')
             continue
+        rows = result['rows']
+        if rule.get('excludeAppliances'):
+            # firewalls and other network appliances need this setting: not a finding for them
+            skipped = [r for r in rows if str(r.get('id') or '').lower() in devices]
+            rows = [r for r in rows if str(r.get('id') or '').lower() not in devices]
+            if skipped:
+                names = sorted({str(r.get('name')) for r in skipped})     # one row per network interface
+                c['notes'].append(f"APRL {guid[:8]}：{len(names)} 台网络设备（{'、'.join(names[:10])}）"
+                                  '需要这项设置，未列为问题。')
         groups = defaultdict(list)
-        for row in result['rows']:
+        for row in rows:
             groups[_sub_of(row.get('id'))].append(row)
         for sid, rows in sorted(groups.items(), key=lambda kv: subs.get(kv[0], kv[0])):
             sub = subs.get(sid, sid)

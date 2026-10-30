@@ -3,7 +3,7 @@ name: azure-monthly-inspection
 description: Read-only monthly Azure inspection for a customer tenant, producing Chinese customer reports (cost review, VM rightsizing, reliability, security, operational excellence, performance, peer comparison, summary). Use when the user asks to run or prepare an Azure 月度巡检/成本巡检/WAF 巡检/健康检查 for a customer, set up a new customer for inspection, check read-only access, or quality-check inspection reports before delivery.
 license: MIT
 metadata:
-  version: 0.7.1
+  version: 0.8.0
 ---
 
 # Azure 月度巡检（只读）
@@ -21,7 +21,7 @@ metadata:
 
 ## 当前版本能做什么
 
-版本 0.7.1 可以：
+版本 0.8.0 可以：
 
 - 准备：环境检查、建客户工作目录、核对只读访问
 - 生成全部 6 份报告：**00 汇总**、**01 月度成本**、**02 虚拟机规格**、**03 可靠性与安全**、**04 卓越运营与性能效率**、**05 同类资源配置对比**（采集、分析、生成、核对）
@@ -29,6 +29,7 @@ metadata:
 - RI/SP：分摊费用中的覆盖比例、现有预留和节省计划的使用率与到期、Azure 购买建议；02 标出已被 RI/SP 覆盖、降配节省不能直接实现的机器
 - 跨月跟踪：03/04 自动与上月比，分出新增问题、新增检查项发现、仍未处理、已解决、本月未检查
 - 大租户：费用采集中断后用 `--resume` 续采；资源组很多的订阅按批读取逐资源费用；逐资源明细单独存放，成本模型文件更小，00 生成更快
+- 网络设备（防火墙、流量探针等）：按镜像和系统识别，不当作普通虚拟机检查（不判断内存读数、不报 IP 转发、不给降配建议，SSH 建议改为管理口访问控制）
 - 检查 Markdown 报告
 
 - 并入微软公开规则库：APRL（可靠性）、Defender/Policy（安全）、孤立资源（01）、AMBA 告警基线（04）、Landing Zone 清单（03 架构对照）（见文末“开发进度”）。**还没有提供的命令，不要自己写脚本去访问客户环境代替**；告诉用户这部分尚未提供。

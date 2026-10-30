@@ -585,6 +585,7 @@ class ShortMetricHistoryTests(unittest.TestCase):
         vms = [{'id': f'/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/{n}', 'name': n, 'power': 'PowerState/running',
                 'vmSize': 'Standard_E64s_v5', 'location': 'eastus'} for n in sorted({k[0] for k in metrics})]
         a.days, a.window, a.inv = 30, {'start': '2026-09-01T00:00:00Z', 'end': '2026-10-01T00:00:00Z'}, {}
+        a.appliances = {}
         a.cov = {f'P{i}': {'notes': []} for i in range(1, 11)}
         a.add = lambda check, sev, rid, rtype, name, env, finding, *rest, **k: found.append((check, name, finding))
         a.month_vm_usage = lambda: {}

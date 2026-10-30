@@ -19,8 +19,8 @@ WORKERS = 4
 AKS_API = '2025-05-01'
 
 ARG_QUERIES = {
-    'vms': "resources | where type =~ 'microsoft.compute/virtualmachines' | project id,name,type,location,resourceGroup,subscriptionId,zones,tags,properties,identity",
-    'vmss': "resources | where type =~ 'microsoft.compute/virtualmachinescalesets' | project id,name,type,location,resourceGroup,subscriptionId,zones,tags,sku,properties",
+    'vms': "resources | where type =~ 'microsoft.compute/virtualmachines' | project id,name,type,location,resourceGroup,subscriptionId,zones,tags,properties,identity,plan",
+    'vmss': "resources | where type =~ 'microsoft.compute/virtualmachinescalesets' | project id,name,type,location,resourceGroup,subscriptionId,zones,tags,sku,properties,plan",
     'aks': "resources | where type =~ 'microsoft.containerservice/managedclusters' | project id,name,location,resourceGroup,subscriptionId,sku,tags,properties",
     'mysql': "resources | where type =~ 'microsoft.dbformysql/flexibleservers' | project id,name,type,location,resourceGroup,subscriptionId,sku,tags,zones,properties",
     'postgres': "resources | where type =~ 'microsoft.dbforpostgresql/flexibleservers' | project id,name,type,location,resourceGroup,subscriptionId,sku,tags,zones,properties",

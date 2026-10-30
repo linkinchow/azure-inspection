@@ -122,7 +122,9 @@ VMS = [
     ('pay-api-02', 'pay-prod', 'pay-rg', 'japaneast', 'Standard_D4s_v5', .248, None, None),
     ('data-etl-01', 'data-prod', 'data-rg', 'eastus', 'Standard_E8s_v5', .504, None, None),
     ('data-worker-01', 'data-prod', 'data-rg', 'eastus', 'Standard_D8s_v5', .384, '2026-09-12', None),
+    ('edge-fw-01', 'shop-prod', 'shop-net-rg', 'japaneast', 'Standard_D4s_v5', .248, None, None),   # firewall appliance (Marketplace image)
 ]
+APPLIANCES = {'edge-fw-01': 'paloaltonetworks'}
 # name, subscription, rg, region, service, type, meter (category, subcategory, meter, unit), daily cost, daily quantity, first day
 FIXED = [
     ('shop-aks', 'shop-prod', 'shop-rg', 'japaneast', 'Azure Kubernetes Service', 'Microsoft.ContainerService/managedClusters',
@@ -356,7 +358,7 @@ VM_METRICS = {
     'shop-web-01': (6.5, 72, (4, 6, 3, 2)), 'shop-web-02': (7.1, 70, (4, 6, 3, 2)), 'shop-web-03': (6.2, 71, (4, 5, 3, 2)),
     'shop-web-04': (5.8, 73, (4, 5, 3, 2)), 'shop-batch-01': (86.0, 41, (22, 30, 11, 9)), 'shop-search-01': (14.2, 85, (9, 12, 6, 4)),
     'shop-web-test-01': (3.1, 88, (2, 2, 1, 1)), 'pay-api-01': (24.5, 58, (6, 8, 4, 3)), 'pay-api-02': (23.8, 57, (6, 8, 4, 3)),
-    'data-etl-01': (12.4, 84, (14, 21, 7, 5)), 'data-worker-01': (31.0, 62, (11, 16, 7, 5)),
+    'data-etl-01': (12.4, 84, (14, 21, 7, 5)), 'data-worker-01': (31.0, 62, (11, 16, 7, 5)), 'edge-fw-01': (4.2, 1, (2, 3, 1, 1)),
 }
 
 
@@ -396,6 +398,11 @@ def vm_part(ws):
                      'networkInterfaces': [{'id': rid(sub, rg, 'Microsoft.Network/networkInterfaces', name + '-nic')}], 'securityProfile': {},
                      'licenseType': None, 'priority': 'Regular', 'tags': {'managed_by': 'terraform'} if sub != 'shop-test' else {}, 'metrics': metrics})
     write_json(ws.raw('vm/metrics/vms-average.json'), rows)
+    write_json(ws.raw('vm/inventory/resources.json'), [
+        {'id': r['id'], 'name': r['name'], 'type': VM_TYPE, 'subscriptionId': r['subscriptionId'], 'resourceGroup': r['resourceGroup'],
+         'plan': {'publisher': APPLIANCES[r['name']], 'product': 'vmseries-flex', 'name': 'byol'} if r['name'] in APPLIANCES else None,
+         'properties': {'storageProfile': {'imageReference': {'publisher': APPLIANCES.get(r['name'], 'Canonical'), 'offer': 'x', 'sku': 'y'}}}}
+        for r in rows])
     envelopes = defaultdict(list)
     for name, sub, _rg, region, *_ in VMS:
         envelopes[(SUB_ID[sub], region)] = [{'name': s, 'capabilities': caps(s), 'restrictions': [], 'locationInfo': [{'location': region, 'zones': ['1', '2', '3']}]}
@@ -525,6 +532,12 @@ def waf_part(ws, cfg, month):
     f.add('S-I7', '低', '5 个订阅的活动日志都没有导出，只能保留 90 天。', '把活动日志导出到日志工作区或存储账户', subscription='多个订阅（5 个）',
           resource_name='5 个订阅', key='activity-export', members=m([n for _s, n, st_ in SUBS if st_ == 'Enabled'], 'Microsoft.Resources/subscriptions', None),
           environment={'value': 'mixed', 'label': '多个环境（含生产）', 'basis': '见涉及资源'})
+    if sep:  # network appliances are recognised from this month: their admin login is reviewed apart
+        f.add('S-I8', '中', '订阅 shop-prod 有 1 台网络设备（edge-fw-01）允许管理员用密码登录，其中 1 台绑定了公网 IP。网络设备的管理员通常使用密码，'
+              '关闭密码登录不适用，重点是限制管理口的访问。按当前 NSG，edge-fw-01 的 22 端口没有对公网开放，风险在于以后放开端口或从内网横向登录。',
+              '管理口（SSH、HTTPS）只允许受信地址访问、不对公网开放（用 NSG 或设备自身的可信主机设置），管理员账号启用多因素认证并定期更换密码；'
+              '按厂商建议及时升级设备系统。', subscription='shop-prod', resource_group='shop-net-rg', resource_name='1 台网络设备', key='appliance-admin-login',
+              members=m(['edge-fw-01'], vm_t, 'shop-prod'), environment=e('shop-prod', 'edge-fw-01'))
     write('security_identity', f, [f'S-I{i}' for i in range(1, 11)])
 
     if sep:  # Defender per-recommendation results start this month: shown as a new check, not as new problems

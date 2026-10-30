@@ -47,3 +47,16 @@ def note(duplicates: int, missing: int) -> str:
     if missing:
         parts.append(f'另有 {missing} 个实例在采集时已不存在或无法读取（多为自动伸缩已删除的机器），未计入')
     return '；'.join(parts) + '。'
+
+
+def mark_appliances(vms: list[dict], resources: list[dict], names=None) -> int:
+    """Set v['appliance'] (why it is a network appliance) from the VM or its scale set in the inventory; returns how many."""
+    from ..core import appliance
+    known = appliance.index([r for r in resources if str(r.get('type', '')).lower() in (VM_TYPE, VMSS_TYPE)], names)
+    count = 0
+    for v in vms:
+        reason = known.get(str(v['id'] if v.get('kind') == 'vm' else v.get('metricResourceId') or v['id']).lower())
+        if reason:
+            v['appliance'] = reason
+            count += 1
+    return count

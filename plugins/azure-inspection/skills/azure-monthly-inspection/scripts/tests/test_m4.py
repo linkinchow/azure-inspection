@@ -98,3 +98,51 @@ class TrackingTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ConflictKindTests(unittest.TestCase):
+    """X1/X2 say what kind of conflict each is; a note limited with rules/kinds covers only those."""
+
+    def workspace(self, d, direction):
+        ws = io.Workspace(d, '2026-09')
+        ws.create()
+        f = ws.month_dir('findings')
+        io.write_json(f / 'vm' / 'recommendations.json', [
+            {'name': 'db-1', 'subscriptionName': 'app_prod', 'status': '建议试点调整', 'currentSKU': 'E8', 'targetSKU': 'E4', 'pool': None,
+             'candidate': {'direction': direction}}])
+        perf = [{'id': 'P1-cccccc', 'check': 'P1', 'severity': '高', 'finding': '虚拟机 db-1 过去 30 天平均内存使用 92.0%，长期接近上限。',
+                 'members': [{'name': 'db-1'}], 'evidence': {}},
+                {'id': 'P4-dddddd', 'check': 'P4', 'severity': '高', 'finding': '1 台虚拟机的磁盘/虚拟机 IO 上限频繁被打满',
+                 'members': [{'name': 'db-1'}], 'evidence': {}}]
+        io.write_json(f / 'waf' / 'performance.json', {'pillar': 'performance', 'findings': perf, 'complete': True})
+        return ws
+
+    def rules(self, ws):
+        return {r['rule']: r for r in crosscheck.run(ws, log=lambda *_: None)['rules']}
+
+    def test_kind_and_level(self):
+        with tempfile.TemporaryDirectory() as d:
+            x1 = self.rules(self.workspace(d, '只减CPU，内存保留'))['X1']['items'][0]
+        self.assertEqual((x1['kind'], x1['conflict']), ('内存', '方向不同'))
+        with tempfile.TemporaryDirectory() as d:
+            rules = self.rules(self.workspace(d, '只减内存，CPU保留'))
+        self.assertEqual((rules['X1']['items'][0]['conflict'], rules['X2']['items'][0]['kind']), ('直接冲突', 'IO'))
+        self.assertIn('改为不更换', rules['X1']['items'][0]['suggestion'])
+
+    def test_kind_ignores_the_02_note_added_to_04(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = self.workspace(d, '只减CPU，内存保留')
+            path = ws.month_dir('findings') / 'waf' / 'performance.json'
+            data = io.read_json(path)
+            data['findings'][0]['finding'] += '02 建议该机CPU核数减半，内存容量不变（E8 → E4），调整前一并考虑本项。'
+            io.write_json(path, data)
+            self.assertEqual(self.rules(ws)['X1']['items'][0]['kind'], '内存')
+
+    def test_note_limited_to_rule_and_kind(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = self.workspace(d, '只减CPU，内存保留')
+            io.write_json(ws.month_dir('narrative') / '02.json', {'crossCheckNotes': [
+                {'subscription': 'app_prod', 'namePrefix': 'db-', 'note': '内存只用于缓存', 'rules': ['X1'], 'kinds': ['内存']}]})
+            rules = self.rules(ws)
+        self.assertEqual((rules['X1']['status'], rules['X2']['status']), ('已处理', '需要处理'))
+        self.assertIn('db-', rules['X1']['items'][0]['handledBy'])

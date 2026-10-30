@@ -34,7 +34,8 @@ ROLE_IDS = {
 
 QUERIES = {
     'aks': "resources | where type =~ 'microsoft.containerservice/managedclusters' | project id, name, resourceGroup, subscriptionId, location, tags",
-    'vms': "resources | where type =~ 'microsoft.compute/virtualmachines' | project id, name, resourceGroup, subscriptionId, location, tags, identity, zones, "
+    'vms': "resources | where type =~ 'microsoft.compute/virtualmachines' | project id, name, resourceGroup, subscriptionId, location, tags, identity, zones, plan, "
+           "imageReference=properties.storageProfile.imageReference, osName=tostring(properties.extended.instanceView.osName), "
            "osType=tostring(properties.storageProfile.osDisk.osType), vmSize=tostring(properties.hardwareProfile.vmSize), "
            "disablePasswordAuthentication=properties.osProfile.linuxConfiguration.disablePasswordAuthentication, "
            "linuxPatchSettings=properties.osProfile.linuxConfiguration.patchSettings, "

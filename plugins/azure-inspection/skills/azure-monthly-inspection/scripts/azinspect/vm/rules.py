@@ -35,6 +35,9 @@ DEALLOCATED = 'powerstate/deallocated'
 RECOMMEND = '建议试点调整'
 
 
+APPLIANCE = '保持现状：网络设备'
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -263,6 +266,9 @@ def analyze(vms, sku_envelopes, clusters, catalog, subscriptions=(), manifest=No
             r.update(status='已释放：不计持续计算降配节省', reasons=['计算已释放，不重复计算关机或持续计算降配收益'])
         elif state != RUNNING:
             r.update(status='状态未确认释放：暂不能判断', reasons=['仅PowerState/deallocated确认已释放计算；当前状态不按运行或计算费0处理'])
+        elif v.get('appliance'):
+            r.update(status=APPLIANCE, appliance=v['appliance'],
+                     reasons=[f"网络设备（{v['appliance']}）：只能使用厂商支持的规格，授权常按 vCPU 计，规格按厂商建议调整"])
         elif not s or not p or any(not v['metrics'][m]['sufficient'] for m in METRICS[:2]):
             missing = []
             errors = list(r['metricErrors'].values())

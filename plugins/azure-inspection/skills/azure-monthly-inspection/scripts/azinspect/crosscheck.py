@@ -41,11 +41,36 @@ def _result(rule, title, items, missing=None, manual=False):
     return {'rule': rule, 'title': title, 'status': status, 'items': items}
 
 
-def _noted(ws, subscription, names):
-    """A narrative/02.json crossCheckNotes entry covers this VM or pool (same matching as the 02 report)."""
+def _note(ws, subscription, names, rule=None, kind=None):
+    """The narrative/02.json crossCheckNotes entry covering this VM or pool (same matching as the 02 report), or None.
+    A note with `rules` and/or `kinds` covers only those rules and conflict kinds; without them it covers every rule."""
     notes = (_load(ws.month_dir('narrative') / '02.json') or {}).get('crossCheckNotes') or []
-    return any(n.get('subscription') == subscription and n.get('namePrefix')
-               and any(str(x).startswith(n['namePrefix']) for x in names) for n in notes)
+    for n in notes:
+        if n.get('subscription') == subscription and n.get('namePrefix') and any(str(x).startswith(n['namePrefix']) for x in names) \
+                and (not n.get('rules') or rule in n['rules']) and (not n.get('kinds') or kind in n['kinds']):
+            return n
+    return None
+
+
+def _noted(ws, subscription, names, rule=None, kind=None):
+    return _note(ws, subscription, names, rule, kind) is not None
+
+
+# 02 directions and what they reduce; a conflict is direct when 02 reduces what 04 found saturated
+REDUCES = {'CPU与内存减半': {'CPU', '内存', 'IO'}, '只减CPU，内存保留': {'CPU', 'IO'}, '只减内存，CPU保留': {'内存', 'IO'}}
+
+
+def _conflict(ws, r, f, rule, kind):
+    """One X1/X2 item: kind (CPU/内存/IO), level, the note that covers it."""
+    direction = (r.get('candidate') or {}).get('direction')
+    direct = direction is None or kind in REDUCES.get(direction, {'CPU', '内存', 'IO'})
+    note = _note(ws, r['subscriptionName'], [r['name']], rule, kind)
+    suggestion = ('直接冲突：02 要减少的正是 04 报满的资源，建议改为不更换，或在 crossCheckNotes 写明可以减少的理由（由用户决定）'
+                  if direct else f'方向不同：02 不减少{kind}，但 04 建议增加；在 crossCheckNotes 写一句说明，让客户知道两份报告都已考虑')
+    return {'resource': r['name'], 'subscription': r['subscriptionName'], 'from': r['currentSKU'], 'to': r.get('targetSKU'),
+            'kind': kind, 'conflict': '直接冲突' if direct else '方向不同', 'direction': direction,
+            'handled': note is not None, 'handledBy': f"{note['namePrefix']}：{str(note.get('note'))[:60]}" if note else None,
+            'evidence': f'{f["id"]}（{f["severity"]}）：{f["finding"][:120]}', 'suggestion': suggestion}
 
 
 def x1_x2_x3(ws):
@@ -60,19 +85,15 @@ def x1_x2_x3(ws):
     for f in perf:
         hit = sorted(n for n in _names(f) if n in by_name)
         if f['check'] == 'P1' and hit:
-            for n in hit:
-                r = by_name[n]
-                x1.append({'resource': r['name'], 'subscription': r['subscriptionName'], 'from': r['currentSKU'], 'to': r.get('targetSKU'),
-                           'handled': _noted(ws, r['subscriptionName'], [r['name']]),
-                           'evidence': f'{f["id"]}（{f["severity"]}）：{f["finding"][:120]}',
-                           'suggestion': '在 02 加提醒或改为不更换（由用户决定）；narrative/02.json 的 crossCheckNotes'})
+            # the kind comes from 04 itself, not the text: 04 may append the 02 recommendation, which mentions CPU and memory
+            kind = (f.get('evidence') or {}).get('kind') or ('内存' if '平均内存使用' in f['finding'] else 'CPU')
+            kind = 'CPU' if kind == 'CPU峰值' else kind
+            x1 += [_conflict(ws, by_name[n], f, 'X1', kind) for n in hit]
         if f['check'] == 'P4' and hit:
             for n in hit:
-                r = by_name[n]
-                x2.append({'resource': r['name'], 'subscription': r['subscriptionName'], 'from': r['currentSKU'], 'to': r.get('targetSKU'),
-                           'handled': _noted(ws, r['subscriptionName'], [r['name']]),
-                           'evidence': f'{f["id"]}（{f["severity"]}）：{f["finding"][:120]}',
-                           'suggestion': '查官方规格表比较新规格的磁盘吞吐上限与已挂数据盘上限；新规格更低的在 02 加提醒'})
+                item = _conflict(ws, by_name[n], f, 'X2', 'IO')
+                item['suggestion'] += '；查官方规格表比较新规格的磁盘吞吐上限与已挂数据盘上限'
+                x2.append(item)
     pools = defaultdict(list)
     for r in downsized:
         pool = _pool_of(r.get('pool'))

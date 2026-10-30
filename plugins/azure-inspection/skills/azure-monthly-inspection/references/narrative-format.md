@@ -74,7 +74,7 @@
   - `downsizeExclusions`：交叉核对 X4 后，不宜降档的数据库或缓存，格式 `[{"name": "...", "reason": "内存持续增长，按当前速度约 N 天达到 80%"}]`；01 会把它们移出低使用率候选表并写明原因。
   - `actions`：补充到建议清单的项目，字段为 `topic`、`scope`、`finding`、`recommendation`、`saving`（不估算时为 null）、`owner`、`status`、`evidencePeriod`。数据库、缓存、存储、日志的具体建议写在这里。
 - **02 虚拟机**：
-  - `crossCheckNotes`：交叉核对后加在逐台建议“说明”列的提醒，格式为 `[{"subscription": "...", "namePrefix": "...", "note": "..."}]`。
+  - `crossCheckNotes`：交叉核对后加在逐台建议“说明”列的提醒，格式为 `[{"subscription": "...", "namePrefix": "...", "note": "..."}]`。可选 `rules`（如 `["X1"]`）和 `kinds`（如 `["内存"]`）：写了就只覆盖这些规则和冲突类型，不写时覆盖这些机器的所有交叉核对规则；交叉核对结果会写出每条冲突被哪条说明覆盖。
   - `crossCheckParagraph`：报告中“与卓越运营与性能效率巡检对照”一段。
 - **05 同类对比**（全部可选，缺省时用数据生成默认文字）：
   - 写作素材：`findings/peer/baseline.json`。每类资源的标准做法、采用率、逐资源偏差（差异、原因证据、可行性），以及按创建方式、业务线、月份的规律。

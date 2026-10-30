@@ -14,6 +14,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ...core import appliance
 from ..checks import count_text, type_label
 
 CALENDAR = Path(__file__).resolve().parents[4] / 'vendor' / 'lifecycle' / 'lifecycle.json'
@@ -223,7 +224,11 @@ def _versions(run, cal, out, member):
             tier = redis_tier(r.get('type') or f'microsoft.cache/{name}', ((r.get('sku') or p.get('sku') or {}).get('name')))
             if tier:
                 items.append(('redis-tier', 'redis-tier', tier, r, r.get('type') or name, tier))
+    names = run.cfg.appliance_names() if getattr(run, 'cfg', None) else None
     for r in run.rows('vms'):
+        if appliance.of(r, names):
+            out['notJudged'].append({'name': r.get('name'), 'type': VM_TYPE, 'reason': '网络设备'})
+            continue
         p = r.get('properties') or {}
         iv = (p.get('extended') or {}).get('instanceView') or {}
         k = os_key(iv.get('osName'), iv.get('osVersion'), (p.get('storageProfile') or {}).get('imageReference'))
@@ -231,6 +236,9 @@ def _versions(run, cal, out, member):
     for r in run.rows('vmss'):
         if str(r.get('resourceGroup') or '').lower().startswith('mc_') or 'aks-managed-poolname' in {k.lower() for k in r.get('tags') or {}}:
             continue    # AKS node pools: node images are checked with the cluster
+        if appliance.of(r, names):
+            out['notJudged'].append({'name': r.get('name'), 'type': VMSS_TYPE, 'reason': '网络设备'})
+            continue
         ref = ((((r.get('properties') or {}).get('virtualMachineProfile') or {}).get('storageProfile') or {}).get('imageReference')) or {}
         k = os_key(image=ref)
         items.append(('os', k[0] if k else None, k[1] if k else None, r, VMSS_TYPE, ' '.join(str(ref.get(x) or '') for x in ('offer', 'sku')).strip()))
@@ -290,7 +298,8 @@ def _versions(run, cal, out, member):
                 key=f'lifecycle|{product}|{version}|{sub}' + ('|vmss' if rows[0]['type'] == VMSS_TYPE else ''))
     unjudged = Counter((x['reason'], x['type']) for x in out['notJudged'])
     if unjudged:
-        phrase = {'未识别操作系统版本': '未识别操作系统版本', '未取得运行时版本': '未取得运行时版本'}
+        phrase = {'未识别操作系统版本': '未识别操作系统版本', '未取得运行时版本': '未取得运行时版本',
+                  '网络设备': '是网络设备（系统由厂商维护，按厂商的版本支持周期升级）'}
         parts = [count_text(n, type_label(t)) + phrase.get(reason, '的系统版本不在支持日历中' if t in (VM_TYPE, VMSS_TYPE) else '的版本不在支持日历中')
                  for (reason, t), n in sorted(unjudged.items(), key=lambda kv: -kv[1])]
         run.coverage['R9'].setdefault('limits', []).append('、'.join(parts) + '，这些资源没有判断是否到期。')

@@ -14,6 +14,11 @@ def analyze(ws, client=None, price_date=None, fetch_prices=True, log=print):
     # Flexible scale set instances are also VM resources: count each machine once (see scalesets.py)
     inventory = read_json(raw_inv / 'resources.json') if (raw_inv / 'resources.json').exists() else []
     vms, duplicates, missing = scalesets.drop_flexible_duplicates(read_json(raw_avg / 'vms-average.json'), inventory)
+    names = None
+    if ws.config_path.exists():
+        from ..core import config as config_mod
+        names = config_mod.load(ws.config_path).appliance_names()
+    devices = scalesets.mark_appliances(vms, inventory, names)   # network appliances get no downsizing advice
     sku_envelopes = read_json(raw_avg / 'sku-capabilities.json')
     clusters = read_json(raw_inv / 'aks-pools.json')
     subscriptions = read_json(raw_inv / 'subscriptions.json')
@@ -30,7 +35,7 @@ def analyze(ws, client=None, price_date=None, fetch_prices=True, log=print):
     canonical = {i['name'].lower(): i['name'] for record in sku_envelopes for i in record.get('items') or [] if i.get('name')}
     catalog = ensure_prices(client, ws.raw('vm/prices'), needed, price_date, fetch_prices, log, canonical)
     updated, records, trials, pools, summary = rules.analyze(vms, sku_envelopes, clusters, catalog, subscriptions, manifest, price_date)
-    summary.update({'flexibleDuplicatesRemoved': len(duplicates), 'flexibleInstancesMissing': len(missing),
+    summary.update({'networkAppliances': devices, 'flexibleDuplicatesRemoved': len(duplicates), 'flexibleInstancesMissing': len(missing),
                     'flexibleInstancesMissingIds': [v['id'] for v in missing]})
     if duplicates or missing:
         log(scalesets.note(len(duplicates), len(missing)))
