@@ -14,6 +14,7 @@ from .lib import Data, first, fmt, rg_of
 
 SEV_ORDER = {'高': 0, '中': 1, '低': 2}
 UNCHANGED = '本次未做任何变更。'
+MIN_DAYS = 7        # days with data needed before calling a machine saturated; the same as the VM rightsizing check (02)
 VM_DISK = ['VM Cached IOPS Consumed Percentage', 'VM Uncached IOPS Consumed Percentage',
            'VM Cached Bandwidth Consumed Percentage', 'VM Uncached Bandwidth Consumed Percentage',
            'OS Disk IOPS Consumed Percentage', 'OS Disk Bandwidth Consumed Percentage',
@@ -121,7 +122,7 @@ class Analyzer:
         vms = d.rows('vms')
         running = [v for v in vms if v.get('power') == 'PowerState/running']
         month = self.month_vm_usage()
-        inv, nodata, p1_hits, p4_hits = [], [], [], []
+        inv, nodata, short, p1_hits, p4_hits = [], [], [], [], []
         for v in running:
             rid = v['id']
             e = self.env_of(rid, v['name'], v.get('tags'))
@@ -145,6 +146,9 @@ class Analyzer:
                     disk[m] = {'avgPct': fmt(x.get('avg')), 'maxDailyMaxPct': fmt(x.get('maxDailyMax')), 'daysMaxGE95': x.get('daysMaxGE')}
             rec['disk'] = disk
             inv.append(rec)
+            if rec['daysWithData'] is not None and rec['daysWithData'] < MIN_DAYS:
+                short.append(v['name'])     # new or recycled nodes: averages over a few days say little, as in 02
+                continue
             sustained_cpu = (cpu.get('avg') or 0) >= 80
             sustained_mem = mem_used is not None and mem_used >= 85
             peaks = (cpu.get('daysMaxGE') or 0) >= 7
@@ -160,6 +164,9 @@ class Analyzer:
         self.p4_vm_findings(p4_hits)
         self.cov['P1']['notes'].append(f'评估 {len(running)} 台运行中的虚拟机（{len(vms) - len(running)} 台已停止，未评估）；'
                                        f'{len(nodata)} 台没有指标数据。')
+        if short:
+            self.cov['P1']['notes'].append(f"{len(short)} 台虚拟机有效数据不足 {MIN_DAYS} 天（多为新建或自动伸缩的节点），没有判断是否满负荷或 IO 打满："
+                                           f"{'、'.join(sorted(short)[:10])}{' 等' if len(short) > 10 else ''}。")
         self.cov['P1']['notes'].append('AKS 节点所在的规模集已读取实例级 CPU 和可用内存；节点层面的饱和度在 P2 用 AKS 平台指标（工作集占可分配内存）判断。')
 
     def p1_finding(self, v, rec, sustained_cpu, sustained_mem, month):
@@ -179,13 +186,14 @@ class Analyzer:
               'reviewMonthCpuAvgPct': fmt(month.get('cpuAverage')), 'reviewMonthMemUsedAvgPct': fmt(month.get('memoryAverage')),
               'thresholds': f'持续：{D}天加权平均CPU≥80% 或 平均内存使用≥85%；频繁峰值：日最高CPU≥95%的天数≥7天。与成本降配检查方向相反。',
               'disk': {DISK_CN[k]: x for k, x in rec['disk'].items() if (x['daysMaxGE95'] or 0) >= 3}}
+        span = f'过去 {D} 天' if not rec['daysWithData'] or rec['daysWithData'] >= D else f"过去 {D} 天中有数据的 {rec['daysWithData']} 天"
         if sustained_cpu:
-            f = (f"虚拟机 {v['name']}（{rec['vmSize']}）过去 {D} 天 CPU 加权平均 {rec['cpuAvgPct']}%，"
+            f = (f"虚拟机 {v['name']}（{rec['vmSize']}）{span} CPU 加权平均 {rec['cpuAvgPct']}%，"
                  f"{rec['cpuDaysMaxGE95']} 天的日最高 CPU ≥95%（最高 {rec['cpuMaxDailyMaxPct']}%），处于长期满负荷状态。")
             r = (f'确认该机上运行的进程是否为预期负载；若是业务负载，建议升到更高 vCPU 规格{double_vcpu(rec["vmSize"])}或拆分到多台/改为可横向扩展的部署；'
                  '若是异常进程（死循环、挖矿、日志风暴）先处理进程。' + UNCHANGED)
         elif sustained_mem:
-            f = f"虚拟机 {v['name']} 过去 {D} 天平均内存使用 {rec['memUsedAvgPct']}%，长期接近上限。"
+            f = f"虚拟机 {v['name']} {span}平均内存使用 {rec['memUsedAvgPct']}%，长期接近上限。"
             r = '确认应用内存配置（如 JVM、数据库或缓存的内存上限）；若属正常增长，建议升到更大内存规格（E 系列）。' + UNCHANGED
         else:
             f = (f"虚拟机 {v['name']}（{rec['vmSize']}）CPU 平均 {rec['cpuAvgPct']}%，但有 {rec['cpuDaysMaxGE95']} 天日最高 CPU ≥95%"

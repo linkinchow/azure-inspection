@@ -552,3 +552,58 @@ class FlexibleScaleSetTests(unittest.TestCase):
         self.assertIn('去掉 40 条重复记录', text)
         self.assertIn('7 个实例在采集时已不存在或无法读取', text)
         self.assertEqual(scalesets.note(0, 0), '')
+
+
+class OrphanQueryCaseTests(unittest.TestCase):
+    """Resource Graph joins are case-sensitive; resource IDs differ in case between a gateway and the connections that use it."""
+
+    def test_joins_on_lowercase_ids(self):
+        from azinspect.cost import orphan
+        _meta, todo = orphan.queries()
+        kql = {q['key']: q['kql'] for q in todo}
+        gw = kql['virtual-network-gateways']
+        self.assertIn('ResourceKey = tolower(id)', gw)
+        self.assertIn('tolower(tostring(properties.virtualNetworkGateway1.id))', gw)
+        self.assertIn('on ResourceKey', gw)
+        self.assertIn('Resource = id', gw)                     # the reported ID keeps its original case
+        api = kql['api-connections']
+        self.assertIn('on $left.ResourceKey == $right.connectionKey', api)
+        self.assertIn('connectionKey = tolower(connectionId)', api)
+
+    def test_vendor_text_unchanged(self):
+        from azinspect.cost import orphan
+        raw = {q['key']: q['kql'] for q in json.loads(orphan.VENDOR.read_text(encoding='utf-8'))['queries']}
+        self.assertNotIn('tolower', raw['virtual-network-gateways'])   # the fix is applied when the queries are loaded
+
+
+class ShortMetricHistoryTests(unittest.TestCase):
+    """P1/P4 need at least 7 days of data, as 02 does; texts state the days that had data."""
+
+    def run_p1(self, metrics):
+        a = perf_analyze.Analyzer.__new__(perf_analyze.Analyzer)
+        found = []
+        vms = [{'id': f'/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/{n}', 'name': n, 'power': 'PowerState/running',
+                'vmSize': 'Standard_E64s_v5', 'location': 'eastus'} for n in sorted({k[0] for k in metrics})]
+        a.days, a.window, a.inv = 30, {'start': '2026-09-01T00:00:00Z', 'end': '2026-10-01T00:00:00Z'}, {}
+        a.cov = {f'P{i}': {'notes': []} for i in range(1, 11)}
+        a.add = lambda check, sev, rid, rtype, name, env, finding, *rest, **k: found.append((check, name, finding))
+        a.month_vm_usage = lambda: {}
+        a.env_of = lambda rid, name, tags=None: {'value': 'prod', 'label': '生产', 'basis': ''}
+        a.metric = lambda label, rid, m, *th: metrics.get((rid.rsplit('/', 1)[-1], m), {'error': 'not queried'})
+        a.data = SimpleNamespace(rows=lambda n: vms, subname=lambda rid: 'app-prod', series=lambda *x: ([], None), daily=lambda s: [])
+        a.p1_p4_vms()
+        return found, a
+
+    def test_short_history_not_reported(self):
+        busy = {'avg': 85.0, 'maxDailyMax': 99.0, 'daysMaxGE': 2}
+        disk = {'avg': 90.0, 'maxDailyMax': 99.0, 'daysMaxGE': 1}
+        metrics = {('vm-new', 'Percentage CPU'): dict(busy, days=2), ('vm-new', perf_analyze.VM_DISK[0]): dict(disk, days=2),
+                   ('vm-13', 'Percentage CPU'): dict(busy, days=13), ('vm-full', 'Percentage CPU'): dict(busy, days=30)}
+        found, a = self.run_p1(metrics)
+        names = {(check, name) for check, name, _f in found}
+        self.assertNotIn(('P1', 'vm-new'), names)
+        self.assertNotIn('vm-new', {name for check, name, _f in found if check == 'P4'} | {n for _c, n, f in found if 'vm-new' in f})
+        text = {name: f for check, name, f in found if check == 'P1'}
+        self.assertIn('过去 30 天中有数据的 13 天', text['vm-13'])
+        self.assertIn('过去 30 天 CPU', text['vm-full'])
+        self.assertTrue(any('1 台虚拟机有效数据不足 7 天' in n and 'vm-new' in n for n in a.cov['P1']['notes']))

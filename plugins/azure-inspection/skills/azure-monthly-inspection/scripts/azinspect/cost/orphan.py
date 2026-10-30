@@ -30,9 +30,33 @@ CHARGED = {'app-service-plans', 'sql-elastic-pool', 'load-balancers', 'applicati
            'virtual-network-gateways', 'ddos-protections', 'traffic-manager-profiles'}
 
 
+# Local fixes on top of the vendored queries (the vendor file stays verbatim). Resource Graph joins are case-sensitive and
+# a gateway's ID can differ in case from the gateway ID a connection refers to (e.g. the resource group name), so a gateway
+# with connections was listed as idle; joins on resource IDs compare lowercase keys. The reported Resource keeps its case.
+LOCAL_FIXES = {
+    'virtual-network-gateways': [
+        ('| extend Resource = id\n', '| extend Resource = id, ResourceKey = tolower(id)\n'),
+        ('| mv-expand Resource = pack_array(properties.virtualNetworkGateway1.id, properties.virtualNetworkGateway2.id) to typeof(string)\n'
+         '    | project Resource, connectionId = id, ConnectionProperties=properties\n    ) on Resource',
+         '| mv-expand ResourceKey = pack_array(tolower(tostring(properties.virtualNetworkGateway1.id)), '
+         'tolower(tostring(properties.virtualNetworkGateway2.id))) to typeof(string)\n'
+         '    | project ResourceKey, connectionId = id, ConnectionProperties=properties\n    ) on ResourceKey')],
+    'api-connections': [
+        ('| project subscriptionId, Resource = id , apiName = name,', '| project subscriptionId, Resource = id , ResourceKey = tolower(id), apiName = name,'),
+        ('    | project connectionId, name\n    )\n    on $left.Resource == $right.connectionId',
+         '    | project connectionId, connectionKey = tolower(connectionId), name\n    )\n    on $left.ResourceKey == $right.connectionKey')],
+}
+
+
 def queries():
     data = json.loads(VENDOR.read_text(encoding='utf-8'))
-    return data, [q for q in data['queries'] if q['key'] not in SKIP and q['key'] in LABELS]
+    todo = [dict(q) for q in data['queries'] if q['key'] not in SKIP and q['key'] in LABELS]
+    for q in todo:
+        for old, new in LOCAL_FIXES.get(q['key'], []):
+            if old not in q['kql']:   # the vendor query changed: review the fix instead of running the old join silently
+                raise ValueError(f"vendor/orphan 查询 {q['key']} 与本地修补不匹配，请核对后更新 LOCAL_FIXES")
+            q['kql'] = q['kql'].replace(old, new)
+    return data, todo
 
 
 def collect(ws, client, subscription_ids, log=print):

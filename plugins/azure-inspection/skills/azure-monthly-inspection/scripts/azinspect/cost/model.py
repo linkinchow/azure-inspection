@@ -149,6 +149,11 @@ def save(fdir: Path, model: dict) -> None:
     slim = {k: v for k, v in model.items() if k != 'resources'}
     slim['topResources'] = model['resources'][:TOP_RESOURCES]
     slim['resourceCount'] = len(model['resources'])
+    review = model.get('resourceReview')
+    if isinstance(review, dict) and 'vmMetrics' in review:
+        # per-VM daily metrics of the month usage review are already in raw/cost/review/results.json; not repeated here
+        slim['resourceReview'] = {**{k: v for k, v in review.items() if k != 'vmMetrics'}, 'vmMetricsCount': len(review['vmMetrics']),
+                                  'vmMetricsSource': 'raw/cost/review/results.json'}
     write_json(Path(fdir) / 'model.json', slim)
     write_json(Path(fdir) / 'resources.json', {'columns': RESOURCE_COLUMNS,
                                                'rows': [[r[c] for c in RESOURCE_COLUMNS] for r in model['resources']]}, compact=True)

@@ -223,6 +223,15 @@ class ModelSplitTests(unittest.TestCase):
             self.assertEqual(cost_model.load_resources(fdir), m['resources'])
             self.assertNotIn('\n', (fdir / 'resources.json').read_text(encoding='utf-8').strip())
 
+    def test_vm_usage_metrics_stay_in_raw_file(self):
+        m = dict(self.model(), resourceReview={'summary': {'vms': 2}, 'vmMetrics': [{'name': 'vm-a'}, {'name': 'vm-b'}]})
+        with tempfile.TemporaryDirectory() as d:
+            cost_model.save(Path(d), m)
+            review = json.loads((Path(d) / 'model.json').read_text(encoding='utf-8'))['resourceReview']
+        self.assertNotIn('vmMetrics', review)
+        self.assertEqual((review['vmMetricsCount'], review['summary']), (2, {'vms': 2}))
+        self.assertEqual(len(m['resourceReview']['vmMetrics']), 2)          # the model in memory is unchanged
+
     def test_old_model_file_still_read(self):
         m = self.model(3)
         with tempfile.TemporaryDirectory() as d:
