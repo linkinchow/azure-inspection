@@ -1,6 +1,6 @@
 {
   "name": "azure-inspection",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "只读的 Azure 月度巡检：成本、虚拟机规格、可靠性、安全、卓越运营、性能效率、同类资源对比和汇总报告（中文）",
   "license": "MIT",
   "author": {

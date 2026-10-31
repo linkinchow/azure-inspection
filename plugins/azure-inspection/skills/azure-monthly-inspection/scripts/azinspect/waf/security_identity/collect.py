@@ -41,7 +41,7 @@ QUERIES = {
            "linuxPatchSettings=properties.osProfile.linuxConfiguration.patchSettings, "
            "windowsPatchSettings=properties.osProfile.windowsConfiguration.patchSettings, "
            "enableAutomaticUpdates=properties.osProfile.windowsConfiguration.enableAutomaticUpdates, "
-           "securityProfile=properties.securityProfile, imageReference=properties.storageProfile.imageReference, "
+           "securityProfile=properties.securityProfile, "
            "powerState=tostring(properties.extended.instanceView.powerState.code), provisioningState=tostring(properties.provisioningState), "
            "nicIds=properties.networkProfile.networkInterfaces",
     'vm_nics': "resources | where type =~ 'microsoft.network/networkinterfaces' | mv-expand ipc=properties.ipConfigurations "
