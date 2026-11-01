@@ -50,6 +50,15 @@ def _name(resource_id):
     return str(resource_id or '').rstrip('/').split('/')[-1]
 
 
+def _member(resource_id, subs):
+    """A resource with its subscription's name; a subscription itself is named, not shown as its ID."""
+    parts = str(resource_id or '').split('/')
+    sub = subs.get(parts[2].lower()) if len(parts) > 2 and parts[1].lower() == 'subscriptions' else None
+    rtype = _type(resource_id)
+    name = sub if rtype == 'Microsoft.Resources/subscriptions' and sub else _name(resource_id)
+    return {'name': name, 'type': rtype, 'subscription': sub}
+
+
 def _type(resource_id):
     parts = str(resource_id or '').split('/')
     lower = [p.lower() for p in parts]
@@ -115,7 +124,7 @@ def analyze(ws, cfg, log=print):
         if (age is not None and age > STALE_DAYS) or (undated and r['severity'] == 'High'):
             stale[(r['displayName'], r['severity'])].append({**r, 'age': age})
     for (title, sev), rows in sorted(stale.items(), key=lambda kv: (kv[0][1] != 'High', -len(kv[1]), kv[0][0])):
-        names = sorted({_name(r['resourceId']) for r in rows})
+        names = sorted({_member(r['resourceId'], subs)['name'] for r in rows})
         subs_hit = sorted({subs.get(str(r['subscriptionId']).lower(), r['subscriptionId']) for r in rows})
         envs = [env(cfg, subs.get(str(r['subscriptionId']).lower(), ''), _name(r['resourceId'])) for r in rows]
         if all(e['value'] in ('test', 'dev') for e in envs) and sev == 'Medium':
@@ -131,8 +140,7 @@ def analyze(ws, cfg, log=print):
                      resource_name=names[0] if len(names) == 1 else f'{len(names)} 个资源', environment=mixed_env(envs),
                      evidence={'recommendation': title, 'severity': sev, 'oldestDays': oldest, 'subscriptions': subs_hit,
                                'portalLink': rows[0].get('link')},
-                     members=[{'name': _name(r['resourceId']), 'type': _type(r['resourceId']),
-                               'subscription': subs.get(str(r['subscriptionId']).lower())} for r in rows],
+                     members=[_member(r['resourceId'], subs) for r in rows],
                      key=f'defender|{title}')
     if assessments and not stale:
         c['notes'].append(f'未处理的建议都在 {STALE_DAYS} 天以内')
@@ -152,7 +160,7 @@ def analyze(ws, cfg, log=print):
                      subscription=subs_hit[0] if len(subs_hit) == 1 else f'多个订阅（{len(subs_hit)} 个）',
                      resource_name=f'{len(resources)} 个资源', environment={'value': 'mixed', 'label': '多个环境', 'basis': '见涉及资源'},
                      evidence={'assignment': assignment, 'definitions': sorted({r['definition'] for r in rows})[:20]},
-                     members=[{'name': _name(rid), 'type': _type(rid), 'subscription': None} for rid in resources],
+                     members=[_member(rid, subs) for rid in resources],
                      key=f'policy|{assignment}')
     c['notes'].insert(0, f'Defender 建议只列出超过 {STALE_DAYS} 天未处理的高、中严重性建议（中严重性只看生产）；'
                          f'Policy 只列出客户已分配策略的不合规资源。')

@@ -10,6 +10,8 @@ import yaml
 
 GUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 FILE_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$')
+REPORTS = ('01', '02', '03', '04', '05')   # optional reports; 00 always summarises the chosen ones
+GROUPS = {'可靠性': '03', '安全': '03', '卓越运营': '04', '性能效率': '04'}   # WAF pillars of 03/04, each can be chosen alone
 ENVIRONMENTS = {'prod': '生产', 'test': '测试', 'dev': '开发', 'dr': '灾备', 'unknown': '未知'}
 
 
@@ -62,6 +64,8 @@ class CustomerConfig:
     public_storage_names: str | None = None
     currency: str = 'USD'
     vm_detail_max_rows: int = 500   # 02 Markdown attaches the per-machine table up to this many machines
+    reports: tuple = REPORTS        # report.include: the reports this customer gets
+    groups: tuple = tuple(GROUPS)   # the pillars of 03/04 they get ('03' in report.include = 可靠性 and 安全)
     path: Path | None = None
 
     # ---------------------------------------------------------------- scope
@@ -172,6 +176,16 @@ def load(path: str | Path) -> CustomerConfig:
     detail_rows = report.get('vmDetailMaxRows', 500)
     if isinstance(detail_rows, bool) or not isinstance(detail_rows, int) or detail_rows < 0:
         errors.append('report.vmDetailMaxRows 必须是不小于 0 的整数')
+    chosen = report.get('include')
+    if chosen is None:
+        chosen = list(REPORTS)
+    chosen = [str(x).strip() if str(x).strip() in GROUPS else str(x).strip().zfill(2) for x in chosen] if isinstance(chosen, list) else None
+    if not chosen or any(x not in REPORTS and x not in GROUPS for x in chosen):
+        errors.append('report.include 是要做的报告编号或支柱列表，可选 ' + '、'.join(REPORTS) + ' 或 ' + '、'.join(GROUPS)
+                      + "，例如 ['01', '03'] 或 ['可靠性']；不写等于全部")
+        chosen = []
+    # a report number means all its pillars; a pillar name means its report with that pillar only
+    groups = tuple(g for g, code in GROUPS.items() if g in chosen or code in chosen)
     if errors:
         raise ConfigError('customer.yaml 有误：\n- ' + '\n- '.join(errors))
     return CustomerConfig(
@@ -187,4 +201,5 @@ def load(path: str | Path) -> CustomerConfig:
         standard_tag=dict(rules.get('standardDeploymentTag') or {}),
         vendor_managed=_rules(rules.get('vendorManaged'), 'rules.vendorManaged'), stateful_vm_names=stateful, network_appliance_names=appliances, extra_risky_ports=ports,
         public_storage_names=public_storage,
-        currency=str(report.get('currency') or 'USD'), vm_detail_max_rows=detail_rows, path=path)
+        currency=str(report.get('currency') or 'USD'), vm_detail_max_rows=detail_rows,
+        reports=tuple(x for x in REPORTS if x in chosen or x in {GROUPS[g] for g in groups}), groups=groups, path=path)

@@ -345,14 +345,16 @@ def top_storage(ws) -> dict:
 PHASES = ['arg', 'subscription_reads', 'deployments', 'diagnostics', 'vm_dcra', 'management_groups', 'aks_activity', 'workspace_tables']
 
 
-def collect(ws, cfg, client, window, log=print):
+def collect(ws, cfg, client, window, log=print, phases=None):
+    """`phases`: only these (e.g. ['arg'] for the resource inventory of 03's architecture overview); recorded in the manifest
+    so the partial data is never analysed as the pillar."""
     c = _Collector(ws, cfg, client, window, log)
     first_call = len(client.calls)
-    log(f'卓越运营：{len(c.enabled)} 个订阅，采集告警、诊断设置、部署历史、治理配置')
-    for phase in PHASES:
+    log(f'卓越运营：{len(c.enabled)} 个订阅，' + ('只读资源清单（供 03 的架构总览）' if phases else '采集告警、诊断设置、部署历史、治理配置'))
+    for phase in phases or PHASES:
         getattr(c, phase)()
     calls = client.calls[first_call:]
     c.raw.save('index.json', {'calls': calls, 'count': len(calls)})
-    c.raw.save('manifest.json', {'collectedAt': now(), 'window': window})
+    c.raw.save('manifest.json', {'collectedAt': now(), 'window': window, **({'phases': phases} if phases else {})})
     denied = sum(1 for x in calls if x.get('status') in (401, 403))
     log(f'卓越运营采集完成：{len(calls)} 次读取，无权限 {denied} 次')

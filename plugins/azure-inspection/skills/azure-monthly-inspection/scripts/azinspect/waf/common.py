@@ -14,6 +14,7 @@ Rules that apply to every pillar:
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 
 from ..core.io import read_json, sanitize, write_json
@@ -29,6 +30,33 @@ LOOKBACK_DAYS = 30
 ADVISOR_NO_TEXT = 'Advisor 未返回说明'
 # Pillars whose keyed rows are tenant-wide categories (one row per problem type): ids ignore the subscription list
 TENANT_WIDE = {'operations'}
+# subscription labels of rows merged across subscriptions: '(多个订阅)', '多个订阅（4 个）', '全部 3 个可读订阅', '1 个订阅'
+AGGREGATE_SUBSCRIPTION = re.compile(r'多个订阅|\d+\s*个(?:可读|生产)?订阅|^[（(]')
+
+
+# rows about the tenant itself ('租户', '租户根管理组（继承到全部订阅）'): checked tenant-wide whatever the subscription scope
+TENANT_LABEL = re.compile(r'^租户')
+
+
+def is_tenant_label(label) -> bool:
+    return bool(label) and bool(TENANT_LABEL.match(str(label)))
+
+
+def subs_phrase(names, unit='订阅', then='') -> str:
+    """'订阅 core' for one subscription, '3 个订阅' for several (unit: '订阅', '生产订阅', ...); `then` follows with a
+    space after a name ('订阅 core 的', '3 个订阅的')."""
+    names = list(names)
+    return (f'{unit} {names[0]}' + (f' {then}' if then else '')) if len(names) == 1 else f'{len(names)} 个{unit}{then}'
+
+
+def none_have(names, unit='订阅') -> str:
+    """'订阅 core 没有' for one subscription, '3 个订阅都没有' for several."""
+    names = list(names)
+    return f'{unit} {names[0]} 没有' if len(names) == 1 else f'{len(names)} 个{unit}都没有'
+
+
+def is_aggregate_subscription(label) -> bool:
+    return bool(label) and bool(AGGREGATE_SUBSCRIPTION.search(str(label)))
 
 
 def now():
@@ -148,7 +176,17 @@ class Findings:
     """
 
     def __init__(self, pillar: str):
-        self.pillar, self.items, self._ids = pillar, [], set()
+        self.pillar, self.items, self._ids, self._previous, self._bases = pillar, [], set(), set(), {}
+
+    @staticmethod
+    def _unique(check, stable, taken):
+        fid = f'{check}-{hashlib.sha1(stable.encode()).hexdigest()[:6]}'
+        n = 2
+        while fid in taken:
+            fid = f'{check}-{hashlib.sha1(f"{stable}|{n}".encode()).hexdigest()[:6]}'
+            n += 1
+        taken.add(fid)
+        return fid
 
     def add(self, check, severity, finding, recommendation, *, subscription=None, resource_group=None, resource_name=None,
             resource_type=None, resource_id=None, environment=None, evidence=None, needs_confirmation=None, members=None,
@@ -156,13 +194,13 @@ class Findings:
         assert severity in SEVERITIES, severity
         # a row merged across subscriptions keeps its id when the subscription list or the count changes
         multi = bool(key) and (self.pillar in TENANT_WIDE or any(x in str(subscription or '') for x in ('、', ',', '多个订阅')))
-        stable = f'{check}|{"*" if multi else (subscription or "").lower()}|{(key or resource_id or resource_name or "").lower()}'
-        fid = f'{check}-{hashlib.sha1(stable.encode()).hexdigest()[:6]}'
-        n = 2
-        while fid in self._ids:
-            fid = f'{check}-{hashlib.sha1(f"{stable}|{n}".encode()).hexdigest()[:6]}'
-            n += 1
-        self._ids.add(fid)
+        before = f'{check}|{"*" if multi else (subscription or "").lower()}|{(key or resource_id or resource_name or "").lower()}'
+        # a per-resource row with a fixed key (S-I1 'api-server' per cluster): the resource tells the rows apart; before 0.9.0
+        # the order of processing did, so a new resource could take an old one's id (previousId keeps that id for narratives)
+        stable = f'{before}|{resource_id.lower()}' if key and resource_id and not multi else before
+        fid = self._unique(check, stable, self._ids)
+        previous = self._unique(check, before, self._previous)
+        self._bases[before] = self._bases.get(before, 0) + 1
         if members is None:
             members = [{'name': resource_name, 'type': resource_type, 'subscription': subscription}] if resource_name else []
         if isinstance(needs_confirmation, list):
@@ -174,11 +212,29 @@ class Findings:
                 'evidence': evidence or {}, 'members': members}
         if legacy_id:
             item['legacyId'] = legacy_id
+        if previous != fid:
+            item['previousId'], item['_previousBase'] = previous, before
         self.items.append(item)
         return item
 
     def write(self, ws, *, window: dict | None, coverage: dict, scope: dict, inventory: dict | None = None,
               limitations: list | None = None, extra: dict | None = None) -> dict:
+        for f in self.items:
+            # the old scheme told rows under one key apart by processing order: its id says which resource only when alone
+            if self._bases.get(f.pop('_previousBase', None), 0) > 1:
+                f.pop('previousId', None)
+        try:   # a merged row over one subscription reads as that subscription (wording only: the id does not change)
+            only = [s['name'] for s in load_scope(ws) if s.get('state') == 'Enabled']
+        except FileNotFoundError:
+            only = []
+        for f in self.items:
+            if not is_aggregate_subscription(f.get('subscriptionName')):
+                continue
+            subs = {m.get('subscription') for m in f.get('members') or [] if m.get('subscription') and not is_aggregate_subscription(m['subscription'])}
+            if len(subs) == 1:
+                f['subscriptionName'] = subs.pop()
+            elif not subs and len(only) == 1:
+                f['subscriptionName'] = only[0]
         data = {'pillar': self.pillar, 'report': REPORT_OF[self.pillar], 'analyzedAt': now(), 'window': window,
                 'scope': scope, 'coverage': coverage, 'findings': self.items, 'inventory': inventory or {},
                 'limitations': limitations or [], 'complete': True, **(extra or {})}

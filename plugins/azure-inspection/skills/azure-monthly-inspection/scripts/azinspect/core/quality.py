@@ -127,9 +127,22 @@ def check_narratives(month_dir: Path) -> list[str]:
     return issues
 
 
+def left_out(root: Path) -> list[str]:
+    """Report files in reports/ of reports not chosen this month (findings/selection.json): left from an earlier build, not packaged."""
+    import json
+    sel = Path(root).parent / 'findings' / 'selection.json'
+    if Path(root).name != 'reports' or not sel.exists():
+        return []
+    chosen = {'00', *json.loads(sel.read_text(encoding='utf-8')).get('reports', [])}
+    return sorted(p.name for p in Path(root).glob('*.md') if p.name[:2].isdigit() and p.name[:2] not in chosen)
+
+
 def check_tree(root: Path) -> dict[str, list[str]]:
     results = {}
+    skipped = set(left_out(root))
     for md in sorted(Path(root).rglob('*.md')):
+        if md.parent == Path(root) and md.name in skipped:
+            continue
         issues = check_markdown(md)
         if issues:
             results[str(md.relative_to(root))] = issues

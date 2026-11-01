@@ -254,6 +254,20 @@ def collect(ws, client, period, log=print, reuse=None):
     return out
 
 
+def collect_vm_coverage(ws, client, period, log=print, reuse=None):
+    """02 without 01: only which machines RI/SP cover (part 1), for the subscriptions that have machines.
+    Without it a covered machine's downsizing would be counted as a saving it cannot bring."""
+    subs = read_json(ws.raw('vm/inventory/subscriptions.json'))
+    active = [s['id'] for s in subs if s.get('state') == 'Enabled' and s.get('vmCount')]
+    log(f'RI/SP：01 未选择，只读 {len(active)} 个有虚拟机的订阅中哪些机器由 RI/SP 覆盖（02 要用）')
+    machine_pricing, by_model, pricing_status = pricing(ws, client, active, period, reuse)
+    out = {'collectedAt': now(), 'month': period.current.key, 'subscriptionsQueried': len(active), 'scope': 'vm-coverage-only',
+           'pricingByResource': machine_pricing, 'pricingByModel': by_model, 'pricingScope': 'machines', 'pricingStatus': pricing_status}
+    write_json(ws.raw('cost/commitments.json'), out)
+    log(f'RI/SP：{sum(1 for s in pricing_status.values() if s["machines"])}/{len(active)} 个订阅读取成功')
+    return out
+
+
 def load(ws):
     path = ws.raw('cost/commitments.json')
     return read_json(path) if path.exists() else None

@@ -126,7 +126,135 @@ def _arm_metrics_as_batch(call, resource_id, kind, start, end):
             'source': 'ARM per-resource metrics API (Batch API returned HTTP403)'}
 
 
-def collect(ws, cfg, client, period, log=print):
+def _read_metrics(ws, call, save, vms, resources, start, end, regions, subnames, errors, log):
+    """30-day daily averages for every machine (02). Fills v['metrics'], cpuAverage, memoryAverage in place."""
+    avg_dir = 'vm/metrics'
+    groups = defaultdict(dict)
+    for v in vms:
+        groups[(v['subscriptionId'].lower(), v['region'], v['kind'])][v['metricResourceId'].lower()] = v['metricResourceId']
+    jobs = []
+    for (sub, region, kind), mapping in sorted(groups.items()):
+        resource_ids = sorted(mapping.values(), key=str.lower)
+        for offset in range(0, len(resource_ids), 50):
+            params = {'api-version': '2023-10-01', 'metricnamespace': 'Microsoft.Compute/virtualMachines' if kind == 'vm' else 'Microsoft.Compute/virtualMachineScaleSets',
+                      'metricnames': ','.join(METRICS), 'starttime': start, 'endtime': end,
+                      'interval': 'P1D', 'aggregation': 'Average,Count', 'top': '1000'}
+            if kind == 'vmss':
+                params['filter'] = "VMName eq '*'"
+            url = f'https://{region}.metrics.monitor.azure.com/subscriptions/{sub}/metrics:getBatch?' + urlencode(params)
+            jobs.append((sub, region, kind, resource_ids[offset:offset + 50], url, offset // 50))
+
+    def batch(job):
+        sub, region, kind, resource_ids, url, index = job
+        filename = f'batch-{sub}-{region}-{kind}-{index:03d}.json'
+        cached = ws.raw(f'{avg_dir}/{filename}')
+        if cached.exists():
+            old = read_json(cached)
+            if not old.get('error') and old.get('url') == url and {x.lower() for x in old.get('body', {}).get('resourceids', [])} == {x.lower() for x in resource_ids}:
+                return job, {**old, 'cacheSource': 'same-run cache'}
+        try:
+            if regions and region not in regions:
+                raise RuntimeError(f'区域 {region!r} 不在 Azure 官方区域列表中，未调用指标接口')
+            if not re.fullmatch(r'[a-z][a-z0-9]{1,40}', region):
+                raise RuntimeError('Invalid Azure region name')
+            try:
+                response = call.post(url, {'resourceids': resource_ids})
+                stored = {'url': url, 'body': {'resourceids': resource_ids}, 'queriedAt': now(), 'response': response}
+            except RuntimeError as e:
+                if not str(e).startswith('HTTP 403'):
+                    raise
+                values = []
+                for rid in resource_ids:
+                    try:
+                        values.append(_arm_metrics_as_batch(call, rid, kind, start, end))
+                    except Exception as inner:
+                        errors.append({'phase': 'armMetricsFallback', 'resourceId': rid, 'error': str(inner)})
+                stored = {'url': url, 'body': {'resourceids': resource_ids}, 'queriedAt': now(), 'batchError': str(e)[:500],
+                          'fallback': 'ARM per-resource metrics API', 'response': {'values': values}}
+                log(f'批量指标接口 403：{subnames.get(sub)} {region}，已改为逐台读取 {len(values)}/{len(resource_ids)} 台')
+            save(avg_dir, filename, stored)
+            return job, stored
+        except Exception as e:
+            stored = {'url': url, 'body': {'resourceids': resource_ids}, 'queriedAt': now(), 'error': str(e)}
+            save(avg_dir, filename, stored)
+            log(f'指标读取失败：{subnames.get(sub)} {region} {kind}：{str(e)[:200]}')
+            return job, stored
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        batches = list(pool.map(batch, jobs))
+    byid, batch_errors, sources = {}, {}, {}
+    for job, stored in batches:
+        if stored.get('error'):
+            errors.append({'phase': 'batch', 'subscriptionId': job[0], 'region': job[1], 'kind': job[2], 'resourceIds': job[3], 'error': stored['error']})
+            for rid in job[3]:
+                batch_errors[rid.lower()] = stored['error']
+            continue
+        wanted = {x.lower() for x in job[3]}
+        for r in stored['response'].get('values', []):
+            rid = r.get('resourceid', '').lower()
+            if rid not in wanted:
+                errors.append({'phase': 'batchResponse', 'error': 'Unexpected resource returned', 'resourceId': rid})
+                continue
+            if r.get('interval') != 'P1D' or r.get('starttime') != start or r.get('endtime') != end:
+                batch_errors[rid] = 'Batch response window/interval differs from exact requested window'
+                continue
+            byid[rid] = r
+            if r.get('source'):
+                sources[rid] = r['source']
+        for rid in wanted - set(byid):
+            batch_errors.setdefault(rid, stored.get('batchError') or 'Resource not returned by Batch API')
+    processing_errors, instance_coverage = [], []
+    for v in vms:
+        rid = v['metricResourceId'].lower()
+        result = byid.get(rid) or {}
+        returned = {m.get('name', {}).get('value', '').lower(): m for m in result.get('value', [])}
+        metrics = {}
+        for name in METRICS:
+            m = returned.get(name.lower())
+            error = batch_errors.get(rid)
+            if not m:
+                error = error or 'Metric not returned / unsupported by API'
+            elif m.get('errorCode', 'Success').lower() not in ('success', ''):
+                error = f'{m.get("errorCode")}: {m.get("errorMessage", "")}'
+            matches = []
+            if m and not error:
+                for s in m.get('timeseries', []):
+                    metadata = {a['name']['value'].lower(): str(a['value']) for a in s.get('metadatavalues', [])}
+                    if v['kind'] == 'vm' or metadata.get('vmname', '').lower() == v['metricName'].lower():
+                        matches.append(s)
+                if len(matches) != 1:
+                    error = f'Expected exactly one instance series; returned {len(matches)} matching series'
+            metrics[name] = weighted(matches[0].get('data', []) if len(matches) == 1 and not error else [], start, end, error)
+            if metrics[name].get('error'):
+                processing_errors.append({'vmId': v['id'], 'subscriptionId': v['subscriptionId'], 'metric': name, 'error': metrics[name]['error']})
+        v['metrics'] = metrics
+        if rid in sources:
+            v['metricsSource'] = sources[rid]
+        v['cpuAverage'] = metrics['Percentage CPU']['average']
+        available = metrics['Available Memory Percentage']['average']
+        v['memoryAverage'] = 100 - available if available is not None else None
+        v['metricsCoverageStatus'] = 'complete' if all(m['validDays'] == WINDOW_DAYS for m in metrics.values()) else 'partial-or-missing'
+    for rid, parent in ((r['id'].lower(), r) for r in resources if r['type'].lower() == VMSS):
+        actual = {v['metricName'].lower() for v in vms if v['kind'] == 'vmss' and v['metricResourceId'].lower() == rid}
+        if not actual:
+            continue
+        result = byid.get(rid) or {}
+        per_metric = {}
+        for name in METRICS:
+            m = next((m for m in result.get('value', []) if m.get('name', {}).get('value', '').lower() == name.lower()), {})
+            names = {str(a.get('value', '')).lower() for s in m.get('timeseries', []) for a in s.get('metadatavalues', []) if a.get('name', {}).get('value', '').lower() == 'vmname'}
+            per_metric[name] = {'returnedInstanceCount': len(names), 'actualInstanceCount': len(actual),
+                                'missingCurrentInstances': sorted(actual - names), 'historicalInstancesNotInFreshInventory': sorted(names - actual),
+                                'top1000PotentialTruncation': len(names) >= 1000}
+        instance_coverage.append({'metricResourceId': parent['id'], 'subscriptionId': parent['subscriptionId'], 'actualInstanceCount': len(actual),
+                                  'parentCapacity': (parent.get('sku') or {}).get('capacity'), 'perMetric': per_metric})
+    save(avg_dir, 'vmss-instance-coverage.json', instance_coverage)
+    save(avg_dir, 'metric-processing-errors.json', processing_errors)
+    save(avg_dir, 'vms-average.json', vms)
+    return sum(len(x) for x in groups.values()), byid, sources, processing_errors, jobs
+
+
+def collect(ws, cfg, client, period, log=print, inventory_only=False):
     raw_dir, avg_dir = 'vm/inventory', 'vm/metrics'
     save = lambda folder, name, data: ws.save_raw(f'{folder}/{name}', data)
     call = _Caller(client)
@@ -253,128 +381,11 @@ def collect(ws, cfg, client, period, log=print):
                       'queriedAt': snapshot_at, 'error': error})
     save(raw_dir, 'aks-pools.json', pools)
 
-    groups = defaultdict(dict)
-    for v in vms:
-        groups[(v['subscriptionId'].lower(), v['region'], v['kind'])][v['metricResourceId'].lower()] = v['metricResourceId']
-    jobs = []
-    for (sub, region, kind), mapping in sorted(groups.items()):
-        resource_ids = sorted(mapping.values(), key=str.lower)
-        for offset in range(0, len(resource_ids), 50):
-            params = {'api-version': '2023-10-01', 'metricnamespace': 'Microsoft.Compute/virtualMachines' if kind == 'vm' else 'Microsoft.Compute/virtualMachineScaleSets',
-                      'metricnames': ','.join(METRICS), 'starttime': start, 'endtime': end,
-                      'interval': 'P1D', 'aggregation': 'Average,Count', 'top': '1000'}
-            if kind == 'vmss':
-                params['filter'] = "VMName eq '*'"
-            url = f'https://{region}.metrics.monitor.azure.com/subscriptions/{sub}/metrics:getBatch?' + urlencode(params)
-            jobs.append((sub, region, kind, resource_ids[offset:offset + 50], url, offset // 50))
-
-    def batch(job):
-        sub, region, kind, resource_ids, url, index = job
-        filename = f'batch-{sub}-{region}-{kind}-{index:03d}.json'
-        cached = ws.raw(f'{avg_dir}/{filename}')
-        if cached.exists():
-            old = read_json(cached)
-            if not old.get('error') and old.get('url') == url and {x.lower() for x in old.get('body', {}).get('resourceids', [])} == {x.lower() for x in resource_ids}:
-                return job, {**old, 'cacheSource': 'same-run cache'}
-        try:
-            if regions and region not in regions:
-                raise RuntimeError(f'区域 {region!r} 不在 Azure 官方区域列表中，未调用指标接口')
-            if not re.fullmatch(r'[a-z][a-z0-9]{1,40}', region):
-                raise RuntimeError('Invalid Azure region name')
-            try:
-                response = call.post(url, {'resourceids': resource_ids})
-                stored = {'url': url, 'body': {'resourceids': resource_ids}, 'queriedAt': now(), 'response': response}
-            except RuntimeError as e:
-                if not str(e).startswith('HTTP 403'):
-                    raise
-                values = []
-                for rid in resource_ids:
-                    try:
-                        values.append(_arm_metrics_as_batch(call, rid, kind, start, end))
-                    except Exception as inner:
-                        errors.append({'phase': 'armMetricsFallback', 'resourceId': rid, 'error': str(inner)})
-                stored = {'url': url, 'body': {'resourceids': resource_ids}, 'queriedAt': now(), 'batchError': str(e)[:500],
-                          'fallback': 'ARM per-resource metrics API', 'response': {'values': values}}
-                log(f'批量指标接口 403：{subnames.get(sub)} {region}，已改为逐台读取 {len(values)}/{len(resource_ids)} 台')
-            save(avg_dir, filename, stored)
-            return job, stored
-        except Exception as e:
-            stored = {'url': url, 'body': {'resourceids': resource_ids}, 'queriedAt': now(), 'error': str(e)}
-            save(avg_dir, filename, stored)
-            log(f'指标读取失败：{subnames.get(sub)} {region} {kind}：{str(e)[:200]}')
-            return job, stored
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        batches = list(pool.map(batch, jobs))
-    byid, batch_errors, sources = {}, {}, {}
-    for job, stored in batches:
-        if stored.get('error'):
-            errors.append({'phase': 'batch', 'subscriptionId': job[0], 'region': job[1], 'kind': job[2], 'resourceIds': job[3], 'error': stored['error']})
-            for rid in job[3]:
-                batch_errors[rid.lower()] = stored['error']
-            continue
-        wanted = {x.lower() for x in job[3]}
-        for r in stored['response'].get('values', []):
-            rid = r.get('resourceid', '').lower()
-            if rid not in wanted:
-                errors.append({'phase': 'batchResponse', 'error': 'Unexpected resource returned', 'resourceId': rid})
-                continue
-            if r.get('interval') != 'P1D' or r.get('starttime') != start or r.get('endtime') != end:
-                batch_errors[rid] = 'Batch response window/interval differs from exact requested window'
-                continue
-            byid[rid] = r
-            if r.get('source'):
-                sources[rid] = r['source']
-        for rid in wanted - set(byid):
-            batch_errors.setdefault(rid, stored.get('batchError') or 'Resource not returned by Batch API')
-    processing_errors, instance_coverage = [], []
-    for v in vms:
-        rid = v['metricResourceId'].lower()
-        result = byid.get(rid) or {}
-        returned = {m.get('name', {}).get('value', '').lower(): m for m in result.get('value', [])}
-        metrics = {}
-        for name in METRICS:
-            m = returned.get(name.lower())
-            error = batch_errors.get(rid)
-            if not m:
-                error = error or 'Metric not returned / unsupported by API'
-            elif m.get('errorCode', 'Success').lower() not in ('success', ''):
-                error = f'{m.get("errorCode")}: {m.get("errorMessage", "")}'
-            matches = []
-            if m and not error:
-                for s in m.get('timeseries', []):
-                    metadata = {a['name']['value'].lower(): str(a['value']) for a in s.get('metadatavalues', [])}
-                    if v['kind'] == 'vm' or metadata.get('vmname', '').lower() == v['metricName'].lower():
-                        matches.append(s)
-                if len(matches) != 1:
-                    error = f'Expected exactly one instance series; returned {len(matches)} matching series'
-            metrics[name] = weighted(matches[0].get('data', []) if len(matches) == 1 and not error else [], start, end, error)
-            if metrics[name].get('error'):
-                processing_errors.append({'vmId': v['id'], 'subscriptionId': v['subscriptionId'], 'metric': name, 'error': metrics[name]['error']})
-        v['metrics'] = metrics
-        if rid in sources:
-            v['metricsSource'] = sources[rid]
-        v['cpuAverage'] = metrics['Percentage CPU']['average']
-        available = metrics['Available Memory Percentage']['average']
-        v['memoryAverage'] = 100 - available if available is not None else None
-        v['metricsCoverageStatus'] = 'complete' if all(m['validDays'] == WINDOW_DAYS for m in metrics.values()) else 'partial-or-missing'
-    for rid, parent in ((r['id'].lower(), r) for r in resources if r['type'].lower() == VMSS):
-        actual = {v['metricName'].lower() for v in vms if v['kind'] == 'vmss' and v['metricResourceId'].lower() == rid}
-        if not actual:
-            continue
-        result = byid.get(rid) or {}
-        per_metric = {}
-        for name in METRICS:
-            m = next((m for m in result.get('value', []) if m.get('name', {}).get('value', '').lower() == name.lower()), {})
-            names = {str(a.get('value', '')).lower() for s in m.get('timeseries', []) for a in s.get('metadatavalues', []) if a.get('name', {}).get('value', '').lower() == 'vmname'}
-            per_metric[name] = {'returnedInstanceCount': len(names), 'actualInstanceCount': len(actual),
-                                'missingCurrentInstances': sorted(actual - names), 'historicalInstancesNotInFreshInventory': sorted(names - actual),
-                                'top1000PotentialTruncation': len(names) >= 1000}
-        instance_coverage.append({'metricResourceId': parent['id'], 'subscriptionId': parent['subscriptionId'], 'actualInstanceCount': len(actual),
-                                  'parentCapacity': (parent.get('sku') or {}).get('capacity'), 'perMetric': per_metric})
-    save(avg_dir, 'vmss-instance-coverage.json', instance_coverage)
-    save(avg_dir, 'metric-processing-errors.json', processing_errors)
-    save(avg_dir, 'vms-average.json', vms)
+    if inventory_only:   # 01's month usage review needs the inventory and SKU capabilities only
+        metric_resources, byid, sources, processing_errors, jobs = 0, {}, {}, [], []
+        log('02 未选择：只采虚拟机清单和规格能力表（01 的本月虚拟机使用情况要用），不读 30 天指标')
+    else:
+        metric_resources, byid, sources, processing_errors, jobs = _read_metrics(ws, call, save, vms, resources, start, end, regions, subnames, errors, log)
 
     needed = defaultdict(set)
     for v in vms:
@@ -418,14 +429,19 @@ def collect(ws, cfg, client, period, log=print):
         sub.update({'inventoryQueriedAt': snapshot_at, 'vmCount': len(subset), 'standaloneVMCount': sum(v['kind'] == 'vm' for v in subset),
                     'vmssInstanceCount': sum(v['kind'] == 'vmss' for v in subset), 'resourceCount': sum(r['subscriptionId'].lower() == sid for r in resources),
                     'hasVM': bool(subset), 'states': dict(Counter(v['state'] for v in subset)),
-                    'metricMissingVMCount': sum(v['cpuAverage'] is None for v in subset),
-                    'metricPartialVMCount': sum(v['metricsCoverageStatus'] != 'complete' for v in subset),
+                    'metricMissingVMCount': None if inventory_only else sum(v['cpuAverage'] is None for v in subset),
+                    'metricPartialVMCount': None if inventory_only else sum(v['metricsCoverageStatus'] != 'complete' for v in subset),
                     'skuScopeFailures': [r['region'] for r in sku_records if r['subscriptionId'] == sid and not r['ok']]})
     save(raw_dir, 'subscriptions.json', subscriptions)
     save(raw_dir, 'manifest.json', {'collectedAt': snapshot_at, 'tenantId': cfg.tenant_id, 'subscriptions': len(subscriptions),
-                                    'resourceCount': len(resources), 'instanceCount': len(vms), 'start': start, 'end': end, 'interval': 'P1D'})
+                                    'resourceCount': len(resources), 'instanceCount': len(vms), 'start': start, 'end': end, 'interval': 'P1D',
+                                    'metricsCollected': not inventory_only})
+    if inventory_only:
+        save(avg_dir, 'collection-errors.json', errors)
+        log(f'采集完成：{len(vms)} 台机器的清单和规格能力表（未读指标）')
+        return None
     manifest = {'customer': cfg.name, 'start': start, 'end': end, 'interval': 'P1D', 'aggregation': 'Average,Count',
-                'queriedAt': now(), 'inventorySnapshotAt': snapshot_at, 'metricResourceCount': sum(len(x) for x in groups.values()),
+                'queriedAt': now(), 'inventorySnapshotAt': snapshot_at, 'metricResourceCount': metric_resources,
                 'metricResourceReturnedCount': len(byid), 'instanceCount': len(vms), 'batchRequests': len(jobs),
                 'armFallbackResourceCount': len(sources), 'tenantId': cfg.tenant_id,
                 'subscriptionCount': len(subscriptions), 'subscriptionCountWithVM': sum(s['hasVM'] for s in subscriptions),

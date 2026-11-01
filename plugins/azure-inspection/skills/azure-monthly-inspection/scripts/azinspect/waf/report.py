@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import Counter, defaultdict
 
 from openpyxl import Workbook
@@ -18,6 +19,7 @@ from ..core.charts import clear as clear_charts
 from ..core.excel import SEVERITY_FILL, verify
 from ..core.fmt_md import format_and_check
 from ..core.io import write_json
+from ..selection import load as load_selection, load_groups, subscription_scope
 from . import architecture
 from . import charts as waf_charts
 from .checks import ACCEPTANCE, CHECKS, check_number, count_text, group_of, report_of, type_label
@@ -51,12 +53,77 @@ LIST_COLUMNS = ['编号', '支柱', '检查项', '严重程度', '订阅', '资�
                 '需要客户确认', '与同类资源的差异', '根本原因', '对齐标准的做法', '涉及资源数', '涉及资源', '与上月相比', '负责人', '客户决定', '处理状态', '完成日期']
 
 
+def list_note(chosen):
+    """Line under the issue list title. The peer columns stay in place without 05, so the customer's tracking layout never moves."""
+    return ('每行一个问题；同类问题已按订阅或资源合并，涉及的资源见“涉及资源”。负责人、客户决定、处理状态和完成日期由客户填写。'
+            + ('' if chosen is None or '05' in chosen else '本月没有做 05 同类资源配置对比，“与同类资源的差异”“根本原因”“对齐标准的做法”三列为空。'))
+
+
 class NarrativeError(ValueError):
     pass
 
 
-def stems(report):
-    title = REPORTS[report]['title']
+# the pillar a scope note or reference link belongs to (by its opening words); untagged ones go with any pillar
+TEXT_PILLAR = {'端口是否对公网开放': '安全', '集群内部配置': '可靠性', '只读取了凭据': '安全', '没有集群只读访问时': '卓越运营',
+               '可靠性检查表': '可靠性', '安全性检查表': '安全', 'AKS API Server 访问控制': '安全',
+               '卓越运营检查表': '卓越运营', '性能效率检查表': '性能效率', 'Azure Monitor 建议告警规则（AKS）': '卓越运营'}
+
+
+def _belongs(text, groups):
+    owner = next((g for head, g in TEXT_PILLAR.items() if text.startswith(head)), None)
+    return owner is None or owner in groups
+
+
+def meta_of(report, groups=None):
+    """03/04 metadata for the pillars done this month: title, sections, notes and links of those pillars only."""
+    meta = REPORTS[report]
+    mine = [g for g in meta['groups'] if groups is None or g in groups]
+    if mine == meta['groups']:
+        return meta
+    return {**meta, 'title': '与'.join(mine) + '巡检', 'groups': mine,
+            'notes': [n for n in meta['notes'] if _belongs(n, mine)], 'links': [x for x in meta['links'] if _belongs(x[0], mine)]}
+
+
+def notes_text(notes):
+    """Coverage notes in one cell: joined by '；', without the stop of the note before ('xxx.；', 'xxx。；')."""
+    if not isinstance(notes, list):
+        return notes
+    parts = [str(n) for n in notes if n]
+    return '；'.join([p.rstrip('.。；;') for p in parts[:-1]] + parts[-1:])
+
+
+def _failed(c):
+    return (c.get('denied') or 0) + (c.get('otherErrors') or 0)
+
+
+def check_note(fs, cov, note=None):
+    """The check table's 主要发现: a check with failed reads never reads as 未发现问题."""
+    base = note or (default_check_note(fs) if fs else None)
+    if not _failed(cov):
+        if cov.get('incomplete'):   # rules that cannot see resources in subscriptions left out (customer.yaml scope)
+            return f'{base or "所选订阅中未发现问题"}；涉及其他订阅的部分可能漏报（见“检查范围与限制”）'
+        return base or '未发现问题'
+    if base:
+        return f'{base}；部分读取失败，结果可能不完整'
+    if not (cov.get('succeeded') or 0):
+        return '读取失败，未能检查（见 Excel“检查覆盖”页）'
+    return '部分读取失败，未能完整检查（见 Excel“检查覆盖”页）'
+
+
+def failure_limit(coverage):
+    """Scope note naming the checks with failed reads, or ''."""
+    names = [CHECKS.get(k, k) for k, c in coverage.items() if _failed(c)]
+    return (f'{"、".join(dict.fromkeys(names))}有读取失败（无权限或接口报错），这些检查项的结果可能不完整，'
+            '没有列出问题不代表没有问题，见 Excel“检查覆盖”页。') if names else ''
+
+
+def window_line(report, groups, perf_window):
+    """04 states the performance window only when the performance pillar was done."""
+    return f'性能数据窗口：{cn_span(*perf_window)}。' if report == '04' and '性能效率' in groups and perf_window else ''
+
+
+def stems(report, groups=None):
+    title = meta_of(report, groups)['title']
     return f'{report}_{title}报告', f'{report}_{title}问题清单'
 
 
@@ -65,17 +132,22 @@ def stems(report):
 def load(ws, report):
     SUB_NAMES.update({s['id'].lower(): s['name'] for s in load_scope(ws)})
     links_path = ws.month_dir('findings') / 'peer' / 'links.json'
-    peer_links = json.loads(links_path.read_text(encoding='utf-8')) if links_path.exists() else {}
+    # peer columns only when 05 is chosen this month: a left-out 05 may have older results in the month folder
+    peer_links = json.loads(links_path.read_text(encoding='utf-8')) if links_path.exists() and '05' in load_selection(ws) else {}
+    groups = load_groups(ws)
+    ours = lambda check: report_of(check) == report and group_of(check) in groups  # noqa: E731
     datasets, findings = {}, []
     for p in PILLARS:
         if not (ws.month_dir('findings') / 'waf' / f'{p}.json').exists():
             continue
         data = load_findings(ws, p)
-        mine = [f for f in data['findings'] if report_of(f['check']) == report]
-        if REPORT_OF[p] != report and not mine:
+        mine = [f for f in data['findings'] if ours(f['check'])]
+        coverage = {k: v for k, v in data['coverage'].items() if ours(k)}
+        # a pillar can contribute to the other report (APRL O11 goes to 04) or to a pillar not done this month (APRL S-N9):
+        # keep only this report's chosen pillars; Landing Zone is a reference table of any 03
+        if not (mine or coverage or (p == 'landing_zone' and report == '03')):
             continue
-        # a pillar can contribute to the other report (APRL O11 goes to 04): keep only this report's rows and coverage
-        datasets[p] = {**data, 'findings': mine, 'coverage': {k: v for k, v in data['coverage'].items() if report_of(k) == report}}
+        datasets[p] = {**data, 'findings': mine, 'coverage': coverage}
         for f in mine:
             peer = {k: v for k, v in (peer_links.get(f['id']) or {}).items() if v and not f.get(k)}   # the finding's own text wins
             findings.append({**f, **peer, 'pillar': p, 'group': group_of(f['check']), 'checkName': CHECKS.get(f['check'], f['check'])})
@@ -83,9 +155,17 @@ def load(ws, report):
 
 
 def resolve(findings, fid):
+    """A narrative's id: this month's id (or an old legacy id), else last month's id through the rows tracking matched
+    by resource (previousIds) or the old id of a row that was alone under its key (previousId)."""
     for f in findings:
         if fid in (f['id'], f.get('legacyId')):
             return f
+    earlier = [f for f in findings if fid == f.get('previousId') or fid in (f.get('previousIds') or [])]
+    if len(earlier) == 1:
+        return earlier[0]
+    if earlier:
+        raise NarrativeError(f'说明文件引用的问题编号 {fid} 是上月编号，本月对应 {len(earlier)} 条问题（'
+                             + '、'.join(f['id'] for f in earlier) + '），请改用本月编号')
     raise NarrativeError(f'说明文件引用的问题编号不存在：{fid}')
 
 
@@ -170,11 +250,60 @@ def cn_date(iso):
 
 # ---------------------------------------------------------------- defaults
 
+BRACKETED = re.compile(r'（[^（）]*）|\([^()]*\)')
+
+
+def _first(text):
+    """(first clause, the rest): up to the first '。' or '；' outside brackets."""
+    depth = 0
+    for i, ch in enumerate(text):
+        depth += ch in '（(' and 1 or ch in '）)' and -1 or 0
+        if depth <= 0 and ch in '。；':
+            return text[:i], (text[i + 1:] if ch == '；' else '')
+    return text, ''
+
+
+def _holds_point(before, bracket):
+    """Whether a bracket ending the clause is its point: it says what is wrong with the bare name before it
+    ('…未设置：stacc1（…）') or lists the items counted before it ('4 条建议（a、b、c）')."""
+    return '、' in bracket or not re.search(r'[\u4e00-\u9fff]', re.split(r'[：，、:]', before)[-1])
+
+
+def _drop_details(text):
+    """Remove bracketed details, innermost first: those that more text follows, and one ending the clause unless it is the
+    point. A short qualifier such as （推断） stays: without it a guess would read as fact."""
+    while True:
+        m = next((m for m in BRACKETED.finditer(text)
+                  if len(m.group()) > 6 and (text[m.end():].strip() or not _holds_point(text[:m.start()], m.group()))), None)
+        if not m:   # no space left between Chinese words where a bracket was
+            return re.sub(r'(?<=[\u4e00-\u9fff]) +(?=[\u4e00-\u9fff])', '', re.sub(r' {2,}', ' ', text))
+        text = text[:m.start()] + text[m.end():]
+
+
 def first_clause(text, limit=70):
-    text = str(text or '')
-    for sep in ('。', '；'):
-        text = text.split(sep)[0]
-    return text if len(text) <= limit else text[:limit].rstrip('，、') + '……'
+    """The first sentence, up to its first '；' ('……' when items after it are left out), shortened to `limit`: details
+    in brackets go first (the point often follows them); then the cut is at a comma near the end, else never inside a
+    number or English word; a bracket or quote cut into is closed."""
+    text, rest = _first(str(text or ''))
+    more = '……' if rest.strip() else ''
+    if len(text) <= limit:
+        return text + more
+    text = _drop_details(text)
+    if len(text) <= limit:
+        return text + more
+    cut = text[:limit]
+    comma = max(cut.rfind('，'), cut.rfind('、'))
+    if comma >= limit * 0.6:
+        cut = cut[:comma]
+    else:
+        word = lambda c: c.isascii() and (c.isalnum() or c in '._-')  # noqa: E731
+        while cut and word(cut[-1]) and word(text[len(cut)]):
+            cut = cut[:-1]
+    cut, closing = cut.rstrip('，、 ') + '……', ''
+    for opening, close in (('（', '）'), ('(', ')'), ('“', '”')):
+        if cut.count(opening) > cut.count(close):   # cut inside: say so inside, then close
+            closing = close + closing
+    return cut + closing + (more if closing else '')
 
 
 def default_top_issues(findings):
@@ -229,11 +358,12 @@ def recommendation_text(rec):
 
 # ---------------------------------------------------------------- Excel
 
-def write_excel(path, cfg, report, findings, by_check, datasets, checks, snapshot, scope_note, ssh_rows, tracked=None):
+def write_excel(path, cfg, report, findings, by_check, datasets, checks, snapshot, scope_note, ssh_rows, tracked=None, chosen=None,
+                groups=None):
     wb, expected = Workbook(), {}
     ov = wb.active
     ov.title = '概览'
-    meta = REPORTS[report]
+    meta = meta_of(report, groups)
     ov.append([f'{cfg.name} {meta["title"]}问题清单（{cn_date(snapshot).replace(" ", "")}只读读取）'])
     ov.append([meta['severity'].replace('**', '') + '环境（生产/测试）按名称或标签推断。高、中、低为问题条数（问题清单行数），涉及资源数按资源去重。'])
     ov.append(['支柱', '检查项', '编号', '高', '中', '低', '合计', '涉及资源数'])
@@ -255,7 +385,7 @@ def write_excel(path, cfg, report, findings, by_check, datasets, checks, snapsho
 
     fl = wb.create_sheet('问题清单')
     fl.append([f'{meta["title"].replace("巡检", "")}问题清单'])
-    fl.append(['每行一个问题；同类问题已按订阅或资源合并，涉及的资源见“涉及资源”。负责人、客户决定、处理状态和完成日期由客户填写。'])
+    fl.append([list_note(chosen)])
     fl.append(LIST_COLUMNS)
     for f in findings:
         names = list(dict.fromkeys(str(m['name']) for m in members(f)))
@@ -281,7 +411,7 @@ def write_excel(path, cfg, report, findings, by_check, datasets, checks, snapsho
         for code, c in data['coverage'].items():
             notes = c.get('notes')
             cv.append([code, CHECKS.get(code, code), c.get('attempted'), c.get('succeeded'), (c.get('denied') or 0) + (c.get('otherErrors') or 0),
-                       '；'.join(map(str, notes)) if isinstance(notes, list) else notes])
+                       notes_text(notes)])
     if scope_note:
         cv.append(['未检查', '未启用订阅', None, None, None, scope_note])
     lz_rows = ((datasets.get('landing_zone') or {}).get('inventory') or {}).get('landingZone')
@@ -297,10 +427,10 @@ def write_excel(path, cfg, report, findings, by_check, datasets, checks, snapsho
     if gone:
         ht = wb.create_sheet('上月问题处理情况')
         ht.append([f'{tracked["previous"]} 的问题本月的情况'])
-        ht.append(['“已解决”：对应检查本月已执行，问题不再出现。“本月未检查”：对应检查本月没有成功执行，不能判断是否解决。'])
-        ht.append(['编号', '检查项', '上月严重程度', '订阅', '资源', '上月发现', '本月情况'])
+        ht.append([TRACKING_HELP])
+        ht.append(['编号', '检查项', '上月严重程度', '订阅', '资源', '上月发现', '本月情况', '未检查原因'])
         for r in sorted(gone, key=lambda r: (r['status'], r['check'])):
-            ht.append([r['id'], CHECKS.get(r['check'], r['check']), r['severity'], r.get('subscription'), r.get('resource'), r['finding'], r['status']])
+            ht.append(gone_row(r))
     recommended = ((datasets.get('amba') or {}).get('inventory') or {}).get('recommendedAlerts')
     if recommended:
         am = wb.create_sheet('推荐告警（AMBA）')
@@ -395,6 +525,17 @@ def month_status(tracked, fid):
     return row['status'] + (f'（上月为{row["previousSeverity"]}）' if row.get('previousSeverity') else '')
 
 
+TRACKING_HELP = ('“已解决”：对应检查本月已执行，问题不再出现。“本月未检查”：不能判断是否解决，原因见“未检查原因”列——'
+                 '读取失败（对应检查本月读取失败）；不在本月范围（所在的订阅或支柱本月按贵司选择没有检查）；'
+                 '范围不完整（相关资源可能在本月没有检查的订阅中，例如专线线路）。')
+
+
+def gone_row(r):
+    """A row of the Excel sheet 上月问题处理情况."""
+    return [r['id'], CHECKS.get(r['check'], r['check']), r['severity'], r.get('subscription'), r.get('resource'), r['finding'], r['status'],
+            r.get('notChecked') if r['status'] == '本月未检查' else None]
+
+
 def month_sentence(tracked, report):
     """One paragraph comparing with last month; new checks are named so they do not read as a deterioration."""
     from ..tracking import summary
@@ -411,21 +552,26 @@ def month_sentence(tracked, report):
         names = '、'.join(dict.fromkeys(check_label(k, src) for k, src in s['newChecks']))
         text += f'“新增检查项发现”来自本月起新增或首次成功执行的检查（{names}），不代表情况变差。'
     if c.get('本月未检查'):
-        text += '“本月未检查”是对应检查本月读取失败，不能判断是否已解决。'
+        why = Counter(r.get('notChecked') or '读取失败' for r in tracked['rows'] if r['status'] == '本月未检查' and report_of(r['check']) == report)
+        reasons = ([f'{n} 项是对应检查本月读取失败' for k, n in why.items() if k == '读取失败']
+                  + [f'{n} 项所在的订阅或支柱本月按贵司选择没有检查' for k, n in why.items() if k == '不在本月范围']
+                  + [f'{n} 项涉及本月没有检查的订阅中的相关资源（如专线线路）' for k, n in why.items() if k == '范围不完整'])
+        text += f'“本月未检查”中{"，".join(reasons)}，{"都" if len(reasons) > 1 else ""}不能判断是否已解决。'
     if s['severityChanged']:
         text += f'另有 {len(s["severityChanged"])} 项严重程度有变化，见 Excel“与上月相比”列。'
     return text
 
 
 def markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows=None,
-             tracked=None, arch=None, limits=None):
-    meta = REPORTS[report]
+             tracked=None, arch=None, limits=None, chosen_scope='', groups=None, coverage=None):
+    meta = meta_of(report, groups)
     c = Counter((f['group'], f['severity']) for f in findings)
     pending = sum(1 for f in findings if f.get('needsConfirmation'))
     groups = [g for g in meta['groups'] if any(group_of(k) == g for k in checks)]
-    window_text = f'性能数据窗口：{cn_span(*perf_window)}。' if report == '04' and perf_window else ''
+    window_text = window_line(report, meta['groups'], perf_window)
     lines = [f'# {cfg.name} Azure {meta["title"]}报告', '',
-             f'**检查时间：{cn_date(snapshot)}。范围：{cfg.name} {readable} 个 Azure 订阅' + (f'（{scope_note}）' if scope_note else '') + f'。{window_text}'
+             f'**检查时间：{cn_date(snapshot)}。范围：{cfg.name} {readable} 个 Azure 订阅' + (f'（{scope_note}）' if scope_note else '')
+             + (f'。{chosen_scope}' if chosen_scope else '') + f'。{window_text}'
              f'方式：{meta["method"]}。**', '',
              f'共发现 **{len(findings)}** 项问题：' + '，'.join(
                  f'{g} {sum(c[(g, s)] for s in "高中低")} 项（高 {c[(g, "高")]}、中 {c[(g, "中")]}、低 {c[(g, "低")]}）' for g in groups)
@@ -446,7 +592,7 @@ def markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_
         for code in [k for k in checks if group_of(k) == group]:
             fs = [f for f in findings if f['check'] == code]
             h, m, lo = (by_check.get((code, s), 0) for s in ('高', '中', '低'))
-            note = notes.get(code) or (default_check_note(fs) if fs else '未发现问题')
+            note = check_note(fs, (coverage or {}).get(code) or {}, notes.get(code))
             lines.append(f'|{CHECKS.get(code, code)}|{h}|{m}|{lo}|{resources_text(fs)}|{note.replace("|", "/")}|')
         if group in pngs:
             lines += ['', f'![{group}各检查项问题数量]({pngs[group]})']
@@ -485,7 +631,7 @@ def markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_
             lines += [f'- **{label}：**'] + [f'  - {x}' for x in items]
     lines += ['', '每项问题的资源明细、建议、验收标准和需要客户确认的内容见 Excel“问题清单”，可直接用于分配负责人和跟踪处理状态。', '',
               f'## {n + 1}. 检查范围与限制', '']
-    limits = ([f'{scope_note}。'] if scope_note else []) + meta['notes'] + list(limits or []) + [
+    limits = ([f'{scope_note}。'] if scope_note else []) + ([f'{chosen_scope}。'] if chosen_scope else []) + meta['notes'] + list(limits or []) + [
         '生产或测试环境按订阅、资源名称和标签推断，请客户确认。',
         f'配置为 {cn_date(snapshot)}读取的状态；读取后客户如有调整，以实际为准。'] + list(narrative.get('limitations') or [])
     lines += [f'- {x}' for x in limits]
@@ -501,17 +647,26 @@ def build(ws, cfg, report, narrative=None, log=print):
     if not datasets:
         log(f'{report}：没有分析结果（findings/waf/*.json），跳过')
         return None
+    from ..tracking import load as load_tracking
+    earlier = {r['id']: r['previousIds'] for r in (load_tracking(ws) or {}).get('rows') or [] if r.get('previousIds')}
+    for f in findings:   # last month's ids of the same problem regrouped, so narratives written last month still apply
+        if f['id'] in earlier:
+            f['previousIds'] = earlier[f['id']]
     apply_narrative(findings, narrative)
     findings.sort(key=sort_key)
     by_check = Counter((f['check'], f['severity']) for f in findings)
     pillars_present = set(datasets)
     covered = {k for d in datasets.values() for k in d['coverage']}
-    checks = [k for k in CHECKS if report_of(k) == report and (_check_in(k, pillars_present) or k in covered)]
+    groups = load_groups(ws)
+    checks = [k for k in CHECKS if report_of(k) == report and group_of(k) in groups and (_check_in(k, pillars_present) or k in covered)]
     checks += sorted({f['check'] for f in findings} - set(checks), key=check_number)
     snapshot, perf_window = window_of(datasets)
     readable, scope_note = scope_text(ws)
     out = ws.month_dir('reports')
-    md_stem, xlsx_stem = stems(report)
+    md_stem, xlsx_stem = stems(report, groups)
+    for old in out.glob(f'{report}_*'):   # the title follows the pillars done: drop this report's files under another title
+        if old.is_file() and old.suffix in ('.md', '.xlsx') and old.stem not in (md_stem, xlsx_stem):
+            old.unlink()
     ssh_rows, ssh_open, ssh_pwd = ssh_cross(datasets) if report == '03' else ([], 0, 0)
     clear_charts(out / 'charts', report)
     pngs = waf_charts.make_pngs(report, findings, checks, out / 'charts')
@@ -519,13 +674,22 @@ def build(ws, cfg, report, narrative=None, log=print):
     xlsx = out / f'{xlsx_stem}.xlsx'
     from ..tracking import load as load_tracking
     tracked = load_tracking(ws)
-    expected = write_excel(xlsx, cfg, report, findings, by_check, datasets, checks, snapshot, scope_note, ssh_rows, tracked)
+    expected = write_excel(xlsx, cfg, report, findings, by_check, datasets, checks, snapshot, scope_note, ssh_rows, tracked, load_selection(ws), groups)
     lz_rows = ((datasets.get('landing_zone') or {}).get('inventory') or {}).get('landingZone')
     arch = architecture.summary(ws, cfg) if report == '03' else None
     # customer-facing limits written by the analysis (e.g. R11 stale health records)
     limits = [x for d in datasets.values() for c in d['coverage'].values() for x in c.get('limits') or []]
+    coverage = {}   # per check across pillars: a failed read in any of them counts
+    for d in datasets.values():
+        for k, c in d['coverage'].items():
+            mine = coverage.setdefault(k, {})
+            for f in ('attempted', 'succeeded', 'denied', 'otherErrors'):
+                mine[f] = (mine.get(f) or 0) + (c.get(f) or 0)
+            if c.get('incomplete'):
+                mine.setdefault('incomplete', []).extend(c['incomplete'])
+    limits += [x for x in [failure_limit(coverage)] if x]
     md = markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows, tracked,
-                  arch, limits)
+                  arch, limits, chosen_scope=subscription_scope(ws, cfg, report), groups=groups, coverage=coverage)
     (out / f'{md_stem}.md').write_text(md, encoding='utf-8')
     fdir = ws.month_dir('findings') / 'waf'
     result = verify(xlsx, expected, fdir / f'verification-{report}.json')
@@ -558,7 +722,7 @@ def audit(ws, cfg, report, log=print):
         return None
     meta = json.loads((ws.month_dir('findings') / 'waf' / f'report-{report}.json').read_text(encoding='utf-8'))
     assert meta['total'] == len(findings), '问题数与分析结果不一致'
-    md_stem, xlsx_stem = stems(report)
+    md_stem, xlsx_stem = stems(report, load_groups(ws))
     out = ws.month_dir('reports')
     wb = load_workbook(out / f'{xlsx_stem}.xlsx', read_only=True)
     ids = [r[0] for r in wb['问题清单'].iter_rows(min_row=4, values_only=True)]

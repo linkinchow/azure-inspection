@@ -120,7 +120,7 @@ def budget_text(model, labels):
     rest = len(model['subscriptions']) - queried
     if rest > 0:
         text += f'；其余{rest}个订阅未查询预算'
-    return text + f'。年度累计支出不作为{labels["cur"]}超预算证明'
+    return text + f'。是否超预算按{labels["cur"]}月度预算判断，年度累计支出只作参考'
 
 
 def unreadable(model):
@@ -218,7 +218,7 @@ def action_items(ws, model, sup, labels, narrative, period, cs=None):
                   'finding': (f'{snap}资源清单发现{waste.get("unattachedDiskCandidate", 0)}块未挂载磁盘、{waste.get("unassociatedPublicIPCandidate", 0)}个未关联公网IP、'
                               f'{waste.get("unassociatedNICCandidate", 0)}个未关联网卡及{waste.get("snapshotRetentionReview", 0)}个待复核快照'
                               + (f'，另有{sum(v for k, v in waste.items() if k.startswith("orphan:"))}个其他孤立资源（如空的负载均衡、未关联的 NSG、空资源组）'
-                                 if any(k.startswith('orphan:') for k in waste) else '') + f'；不代表{Lc}历史状态')
+                                 if any(k.startswith('orphan:') for k in waste) else '') + '；以上为巡检时的状态')
                   if rr else '资源是否可删除需核对用途、引用和保留要求',
                   'recommendation': '请资源负责人确认保留或退役；批准前不删除，删除前确认备份和恢复要求',
                   'saving': None, 'owner': '资源负责人', 'status': '待用途确认', 'evidencePeriod': '当前配置检查'})
@@ -507,7 +507,8 @@ def build(ws, cfg, period, narrative=None, log=print):
     wb.calculation = CalcProperties(fullCalcOnLoad=True)
     wb.save(path)
     write_json(fdir / 'expected-formulas.json', expected)
-    md = markdown(cfg, period, labels, model, actions, sup, pngs, narrative, cs)
+    from ..selection import subscription_scope
+    md = markdown(cfg, period, labels, model, actions, sup, pngs, narrative, cs, subscription_scope(ws, cfg, '01'))
     (out / f'{stem(period)}.md').write_text(md, encoding='utf-8')
     result = verify(path, expected, fdir / 'verification.json')
     log(f'01 报告：{Lc}费用 USD {tot["cur"]:,.2f}（{n_comp}个订阅），较{Lp} {percent(tot["changeRate"])}；Excel 公式 {result["formulaCount"]} 个'
@@ -519,7 +520,16 @@ def _day(d):
     return f'{d.year}年{d.month}月{d.day}日'
 
 
-def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None):
+def forecast_note(sup, Lc):
+    """Subscriptions without a forecast: a failed read (e.g. throttled) is not a subscription without costs."""
+    missing = [s['next'] for s in sup['forecast']['subscriptions'] if s['next'].get('fullMonthEstimate') is None]
+    failed = sum(1 for n in missing if n.get('status') not in ('success', 'empty', None))
+    empty = len(missing) - failed
+    return ((f'；{failed}个订阅的预测读取失败（如接口限流），未计入预测' if failed else '')
+            + (f'；{empty}个订阅没有返回预测结果（多为{Lc}无费用的订阅）' if empty else ''))
+
+
+def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, chosen_scope=''):
     Lp, Lc, Ln = labels['prev'], labels['cur'], labels['next']
     dp, dc, dn = labels['prevDays'], labels['curDays'], labels['nextDays']
     t, cov = m['comparableTotals'], m['scope']['coverage']
@@ -532,7 +542,8 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None):
     unread = unreadable_text(m)
     lines = [f'# {cfg.name} {labels["curLabel"]}月度成本巡检报告', '',
              f'**统计期间：{_day(period.current.first)}至{period.current.last.day}日；对比{_day(period.previous.first)}至{period.previous.last.day}日。'
-             f'范围：{cfg.name} {n_comp}个Azure订阅' + (f'（另有{sum(map(len, unreadable(m).values()))}个订阅的费用无法读取，见第8节）' if unread else '') + '。金额单位：USD。**', '',
+             f'范围：{cfg.name} {n_comp}个Azure订阅' + (f'（另有{sum(map(len, unreadable(m).values()))}个订阅的费用无法读取，见第8节）' if unread else '')
+             + (f'。{chosen_scope}，费用合计只含这些订阅' if chosen_scope else '') + '。金额单位：USD。**', '',
              '历史费用来自Azure Cost Management的实际费用查询，不是官网列表价；优化建议中的公开报价另行标注为列表价。', '',
              f'{Lp}和{Lc}费用查询完成时间：{queried}（UTC）；区域、预测、变化原因、数据库、存储和日志检查于{cn_date(db["snapshotAt"])}读取。', '',
              '## 1. 费用总览', '',
@@ -601,18 +612,18 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None):
         lines.append(row([r['subscriptionName'], r['resourceGroup'], r['resourceName'], r['serviceName'], amount(r['cost'])]))
     lines += ['', '完整订阅、服务、资源组、资源和每日费用见Excel。未归属资源的费用保持未归属，不根据名称猜测。', '',
               '## 5. 资源利用率与后续优化建议', '', '### 虚拟机', '',
-              f'{Lc}历史费用与当前资源建议分开。当前仍存在的机器可读取{Lc}历史指标，但不能还原{Lc}已删除的全部资源，也不能把当前规格和电源状态当作{Lc}状态。', '']
+              f'{Lc}历史费用与当前资源建议分开。当前仍存在的机器可读取{Lc}历史指标；{Lc}已删除的资源无法还原，当前规格和电源状态只反映巡检时的情况。', '']
     rr = m.get('resourceReview') or {}
     if rr:
         rc, stats = rr.get('coverage', {}), rr.get('summary', {})
         lines += [f'可查询{Lc}历史指标的当前机器有{rc.get("eligibleMonthInstances", 0)}台：{rc.get("completeMonthCPUMemoryInstances", 0)}台有完整{dc}个有效日，'
                   f'{rc.get("partialCPUMemoryInstances", 0)}台只有部分日期，{rc.get("missingBothInstances", 0)}台缺CPU/内存数据；另有{rc.get("excludedCreatedAfterMonth", 0)}台在{Lc}之后才创建，不计入{Lc}用量。', '',
                   f'完整{dc}个有效日的机器中，{stats.get("lowCPUFullMonthCount", 0)}台CPU平均低于20%，{stats.get("lowMemoryUsedFullMonthCount", 0)}台内存平均低于20%。'
-                  '这说明值得进一步做容量评审，不等于这些机器都能直接降配。', '']
+                  '建议先对这些机器做容量评审，确认峰值和业务需求后再逐台决定是否降配。', '']
         high = [r for r in rr.get('vmMetrics', []) if r.get('validDays') == dc and r.get('memoryAverage') is not None and r['memoryAverage'] >= 80]
         if high:
             lines += ['**高内存用量需保留余量：**' + '；'.join(f'{r["subscriptionName"]}/{r["name"]}：内存平均{r["memoryAverage"]:.2f}%' for r in high[:3])
-                      + '。这表示月平均较高，不代表已确认发生性能故障；不建议直接减少内存。', '']
+                      + '。这表示月平均较高，尚未确认发生性能故障；建议保留现有内存。', '']
     lines += ['### 数据库和缓存', '', f'按{Lc}每日平均值计算；规格为{cn_date(db["snapshotAt"])}的当前配置。“CPU和内存均低于20%”只作为容量评审线索，调整前需确认峰值、高可用和副本需求。', '',
               f'|类型|数量|{Lc}费用USD|完整{dc}日|CPU和内存均低于20%|这些资源{Lc}费用USD|', '|---|---:|---:|---:|---:|---:|']
     for k, v in db['coverage'].items():
@@ -666,7 +677,6 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None):
                                                                                  '- 本次未检查备份保管库的备份策略；快照清单见Excel“当前闲置资源待确认”。', '',
                                                                                  '### 日志', '', f'共{lg["coverage"]["found"]}个Log Analytics工作区，{Lc}费用USD {amount(lg["coverage"]["curCostUSD"])}。{Lc}费用较高的{len([w for w in lg["workspaces"] if w.get("top3")])}个工作区：', '']
     tail = lg['period'].get('sourceWindow') or ['', '']
-    no_forecast = len([s for s in sup['forecast']['subscriptions'] if s['next'].get('fullMonthEstimate') is None])
     lines += [f'|订阅|工作区|{Lc}费用USD|{Lc}可计费GB|主要数据类型|保留天数|主要来源（{cn_date(tail[0])}至{period.current.last.day}日）|', '|---|---|---:|---:|---|---:|---|']
     for w in [w for w in lg['workspaces'] if w.get('top3')]:
         rows_ = (w.get('topDataTypeBreakdown') or {}).get('rows') or []
@@ -684,11 +694,11 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None):
         f'- {Lc}和{Lp}均使用完整自然月ActualCost查询，不以月中或月底预测代替历史费用。']
     if unread:
         lines.append(f'- {unread}；未取得其费用，不能确认为0。本文费用是{n_comp}个订阅的合计，最终费用以账单为准。')
-    lines += [f'- {Ln}费用为Azure Cost Management的预测值，不是账单' + (f'；{no_forecast}个订阅没有返回预测结果（多为{Lc}无费用的订阅）。' if no_forecast else '。'),
+    lines += [f'- {Ln}费用为Azure Cost Management的预测值，不是账单' + forecast_note(sup, Lc) + '。',
               f'- 数据库、缓存、存储和日志的规格和配置为{cn_date(db["snapshotAt"])}读取的当前状态；使用率和用量是{Lc}历史数据。',
               f'- 日志来源明细只查询了{cn_date(tail[0])}至{period.current.last.day}日；全月摄取量来自工作区用量记录。',
-              f'- 成本管理费用不等于最终发票；没有{Lc}月度预算目标时不判断是否超预算，没有执行记录时不声称已经省钱。',
-              '- RI/SP订单、预算及订阅指标权限的读取情况在Excel“数据覆盖与说明”列出；缺失记录不等于没有订单或预算。',
+              f'- 成本管理费用以最终发票为准；没有{Lc}月度预算目标时不判断是否超预算，没有执行记录时不声称已经省钱。',
+              '- RI/SP订单、预算及订阅指标权限的读取情况在Excel“数据覆盖与说明”列出；读不到的记录按“未知”处理，可能仍有订单或预算。',
               f'- 当前资源配置与公开列表价来自巡检时读取，单独标注，不能追溯为{Lc}部署状态或已实现收益。', '',
               '## 参考', '',
               '- [Microsoft WAF Cost Optimization](https://learn.microsoft.com/en-us/azure/well-architected/cost-optimization/checklist)',

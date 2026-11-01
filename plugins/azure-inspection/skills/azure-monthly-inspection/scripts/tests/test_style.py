@@ -94,6 +94,24 @@ class HandEditTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 package.build(ws, cfg, ReportPeriod.build('2026-09'), log=lambda *_: None)
 
+    def test_rewritten_file_with_old_mtime_is_recorded(self):
+        # Excel's save can leave a file's modification time before the build started: a file whose content the build
+        # changed is still the build's own
+        cfg = config.load(TEMPLATE)
+        with tempfile.TemporaryDirectory() as d:
+            ws = io.Workspace(d, '2026-09')
+            ws.create()
+            reports = ws.month_dir('reports')
+            book = reports / '02_虚拟机利用率与规格优化.xlsx'
+            book.write_bytes(b'old')
+            before = package.snapshot(ws)
+            started = book.stat().st_mtime + 100
+            book.write_bytes(b'new')
+            os.utime(book, (started - 50, started - 50))
+            package.record_build(ws, started, before)
+            hashes = io.read_json(ws.month_dir('findings') / 'build-hashes.json')
+        self.assertEqual(hashes.get(book.name), package._sha_bytes(b'new'))
+
 
 if __name__ == '__main__':
     unittest.main()

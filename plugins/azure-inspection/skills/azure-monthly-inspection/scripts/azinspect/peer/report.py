@@ -81,7 +81,7 @@ def pct(v):
 
 
 def ratio(h, n, p):
-    return f'{n} 个全部（100%）' if h == n else f'{n} 个中有 {h} 个（{pct(p)}%）'
+    return f'{h}/{n} 个（{pct(p)}%）'
 
 
 def table(header, rows):
@@ -102,7 +102,7 @@ def compliance(t):
                   for d in t['deviations'] if 'publicIp' in d['differingAttributes'])
         m = re.search(r'共 (\d+) 台', t['population'].get('note') or '')
         vms = int(m.group(1)) if m else total
-        return 0 if t['deviations'] else total, total, f'{total} 个订阅组中 {total - len(t["deviations"])} 个完全符合（{vms} 台中 {pub} 台直接带公网 IP）'
+        return 0 if t['deviations'] else total, total, f'{total - len(t["deviations"])}/{total} 个订阅组完全符合（{vms} 台中 {pub} 台直接带公网 IP）'
     if k == 'dbdiag':
         miss = all_ = 0
         for d in t['deviations']:
@@ -113,7 +113,7 @@ def compliance(t):
     if not b.get('attributeAdoption'):
         return 0, total, f'{total} 个都不符合（没有内部范例）' if t['uniformGaps'] else f'{total} 个配置一致，无偏差'
     n = len(b['fullyCompliantResources'])
-    return n, total, f'{total} 个都不完全符合' if n == 0 else f'{total} 个全部符合' if n == total else f'{total} 个中 {n} 个'
+    return n, total, f'{n}/{total} 个完全符合'
 
 
 def flat_diff(dev):
@@ -254,7 +254,10 @@ def make_charts(hi, chart_dir, by_line=True):
 def scope_line(ws, cfg):
     subs = load_scope(ws)
     disabled = [s for s in subs if s.get('state') != 'Enabled']
-    return f'{cfg.name} {len(subs) - len(disabled)} 个 Azure 订阅' + (f'（另有 {len(disabled)} 个未启用订阅无法读取）' if disabled else '')
+    from ..selection import subscription_scope
+    chosen = subscription_scope(ws, cfg, '05')
+    return (f'{cfg.name} {len(subs) - len(disabled)} 个 Azure 订阅' + (f'（另有 {len(disabled)} 个未启用订阅无法读取）' if disabled else '')
+            + (f'。{chosen}' if chosen else ''))
 
 
 def markdown(ws, cfg, data, narrative, pngs, labels):

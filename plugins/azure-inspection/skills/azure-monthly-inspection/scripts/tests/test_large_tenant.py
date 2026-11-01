@@ -23,6 +23,7 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
 from azinspect.core import excel, http  # noqa: E402
+from azinspect.core.config import GROUPS, REPORTS  # noqa: E402
 from azinspect.cost import report as cost_report  # noqa: E402
 from azinspect.vm import prices  # noqa: E402
 from azinspect.vm import report as vm_report  # noqa: E402
@@ -401,7 +402,7 @@ class CollectCommandTests(unittest.TestCase):
             return fn
         out = io.StringIO()
         with (tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(out),
-              mock.patch.object(cli, '_client', return_value=(None, None, SimpleNamespace(calls=[]))),
+              mock.patch.object(cli, '_client', return_value=(SimpleNamespace(reports=REPORTS, groups=tuple(GROUPS)), None, SimpleNamespace(calls=[]))),
               mock.patch.object(azinspect.vm.collect, 'collect', part('vm')),
               mock.patch.object(azinspect.cost.pipeline, 'collect', part('cost')),
               mock.patch.object(azinspect.waf.pipeline, 'collect', part('waf', list(failed_pillars))),
@@ -429,7 +430,7 @@ class CollectCommandTests(unittest.TestCase):
         import azinspect.cost.pipeline
         seen = {}
         with (tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()),
-              mock.patch.object(cli, '_client', return_value=(None, None, SimpleNamespace(calls=[]))),
+              mock.patch.object(cli, '_client', return_value=(SimpleNamespace(reports=REPORTS, groups=tuple(GROUPS)), None, SimpleNamespace(calls=[]))),
               mock.patch.object(azinspect.cost.pipeline, 'collect', lambda *a, **k: seen.update(k))):
             self.assertEqual(cli.main(['collect', '--workspace', d, '--month', '2026-09', '--part', 'cost', '--resume']), 0)
         self.assertEqual(seen, {'resume': True})

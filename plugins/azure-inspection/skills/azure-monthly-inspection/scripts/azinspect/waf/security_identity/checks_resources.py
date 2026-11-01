@@ -35,7 +35,8 @@ def audit(ctx):
     if no_export:
         envs = [ctx.sub_env(x) for x in no_export]
         ctx.add('S-I7', '中', _many(len(no_export)), None, None, 'Microsoft.Insights/diagnosticSettings', mixed_env(envs),
-                finding=f'{len(no_export)} 个已启用订阅（含 {sum(is_prod(e) for e in envs)} 个生产订阅）都没有把活动日志导出到 Log Analytics、存储或事件中心，'
+                finding=(f'{len(no_export)} 个已启用订阅（含 {sum(is_prod(e) for e in envs)} 个生产订阅）都没有' if len(no_export) > 1 else
+                         f'订阅 {no_export[0]} 没有') + '把活动日志导出到 Log Analytics、存储或事件中心，'
                         '平台只保留 90 天，超过后无法追溯谁在何时修改或删除了资源。',
                 evidence={'subscriptionsWithoutExport': no_export},
                 recommendation='用 Azure Policy（“Configure Azure Activity logs to stream to specified Log Analytics workspace”）在根管理组统一导出活动日志到'

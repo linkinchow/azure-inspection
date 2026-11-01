@@ -62,6 +62,15 @@ def _rows(raw, name):
     return data.get('rows') if isinstance(data, dict) else data
 
 
+def threshold_text(metric, value):
+    """80.0 -> '80'; byte capacities in TB or GB (UsedCapacity 500000000000000 -> '500 TB')."""
+    if not isinstance(value, (int, float)):
+        return '' if value is None else str(value)
+    if str(metric or '').lower().endswith(('capacity', 'bytes')) and value >= 1e9:
+        return f'{value / 1e12:g} TB' if value >= 1e12 else f'{value / 1e9:g} GB'
+    return f'{value:g}'
+
+
 def analyze(ws, cfg, log=print):
     meta, core = baseline()
     ops = Raw(ws, 'operations')
@@ -102,14 +111,15 @@ def analyze(ws, cfg, log=print):
                      evidence={'missing': {res['name']: m for res, m, _ in items}, 'ambaCommit': meta['commit']},
                      members=[{'name': res['name'], 'type': res['type'], 'subscription': sub} for res, _, _ in items], key=f'amba|{rtype}')
     recommended = [{'resourceType': rtype, 'label': type_label(rtype), 'metric': a['metricName'], 'description': a.get('description'),
-                    'condition': f'{a.get("aggregation") or ""} {OPERATORS.get(a.get("operator"), a.get("operator") or "")} {a.get("threshold")}'.strip()
+                    'condition': f'{a.get("aggregation") or ""} {OPERATORS.get(a.get("operator"), a.get("operator") or "")} '
+                                 f'{threshold_text(a.get("metricName"), a.get("threshold"))}'.strip()
                     if a.get('criterion') != 'DynamicThresholdCriterion' else '动态阈值',
                     'window': a.get('windowSize'), 'severity': a.get('severity')}
                    for rtype, alerts in core.items() for a in alerts]
     manifest = Raw(ws, 'amba').load('manifest.json') or {}
     out = findings.write(ws, window=manifest.get('window'), coverage={'O2': {'attempted': 1, 'succeeded': 1 if resources else 0, 'denied': 0,
                                                                               'otherErrors': 0 if resources else 1,
-                                                                              'notes': [f'与 AMBA 推荐告警对比（提交 {meta["commit"][:12]}）；只看已有部分告警的生产资源']}},
+                                                                              'notes': [f'与微软 AMBA 推荐告警（{meta.get("commitDate") or "当前"} 版）对比；只看已有部分告警的生产资源']}},
                          scope={'subscriptions': len(subs)}, inventory={'recommendedAlerts': recommended}, extra={'ambaCommit': meta['commit']})
     log(f'AMBA：{len(out["findings"])} 项问题，推荐告警 {len(recommended)} 条')
     return out

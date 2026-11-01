@@ -1,7 +1,7 @@
 """Cross-report checks X1-X9 (references/cross-checks.md). Read-only over the month's findings and reports.
 
 Writes findings/crosscheck.json. Each rule returns status '通过', '需要处理' (items listed with a suggested action),
-'需人工确认' or '未检查' (inputs missing). Nothing here changes a report: the agent decides, writes notes into the
+'需人工确认', '未检查' (inputs missing) or '不适用' (a report it compares was not chosen this month). Nothing here changes a report: the agent decides, writes notes into the
 narrative files (e.g. narrative/02.json crossCheckNotes) and rebuilds.
 """
 from __future__ import annotations
@@ -9,7 +9,10 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
+from .core.config import GROUPS, REPORTS
 from .core.io import read_json, write_json
+from .selection import load as load_selection, load_groups
+from .waf.checks import group_of
 
 RECOMMENDED = '建议试点调整'
 
@@ -137,7 +140,7 @@ def x4(ws):
 EXPOSED_TYPES = {'microsoft.network/networkinterfaces', 'microsoft.network/publicipaddresses'}
 
 
-def x5(ws):
+def x5(ws, chosen=REPORTS, groups=None):
     review = _load(ws.raw('cost/review/results.json'))
     if review is None:
         return _result('X5', '闲置资源 vs 仍在使用', [], '缺少 01 资源复查结果')
@@ -147,6 +150,8 @@ def x5(ws):
     items = []
     for pillar in ('performance', 'operations', 'reliability', 'security_network'):
         for f in _findings(ws, pillar) or []:
+            if groups is not None and group_of(f['check']) not in groups:
+                continue
             names = _names(f)
             if pillar == 'security_network':
                 # only network interfaces and public IPs listed as exposed; idle NSGs are already a latent risk there
@@ -160,14 +165,12 @@ def x5(ws):
     return _result('X5', '闲置资源 vs 仍在使用', items, manual=True)
 
 
-def x6_x7(ws):
-    """Numbers and subscription counts. X6 compares 00 against 01-05 when 00 exists."""
+def x6_x7(ws, chosen=REPORTS):
+    """Numbers and subscription counts. X6 compares 00 against the chosen reports when 00 exists."""
     reports = ws.month_dir('reports')
-    model = _load(ws.month_dir('findings') / 'cost' / 'model.json')
-    vm = _load(ws.month_dir('findings') / 'vm' / 'summary.json')
-    r03 = _load(ws.month_dir('findings') / 'waf' / 'report-03.json')
-    r04 = _load(ws.month_dir('findings') / 'waf' / 'report-04.json')
-    peer = _load(ws.month_dir('findings') / 'peer' / 'baseline.json')
+    pick = lambda code, rel: _load(ws.month_dir('findings') / rel) if code in chosen else None  # noqa: E731
+    model, vm = pick('01', 'cost/model.json'), pick('02', 'vm/summary.json')
+    r03, r04, peer = pick('03', 'waf/report-03.json'), pick('04', 'waf/report-04.json'), pick('05', 'peer/baseline.json')
     expected = {}
     if model:
         expected['01 本月费用'] = f'{model["comparableTotals"]["cur"]:,.2f}'
@@ -196,7 +199,8 @@ def x6_x7(ws):
         counts['02'] = vm.get('subscriptionCount')
     from .waf.common import load_scope
     try:
-        counts['03/04'] = sum(1 for s in load_scope(ws) if s.get('state') == 'Enabled')
+        if {'03', '04'} & set(chosen):
+            counts['03/04'] = sum(1 for s in load_scope(ws) if s.get('state') == 'Enabled')
     except FileNotFoundError:
         pass
     values = {v for v in counts.values() if v is not None}
@@ -206,11 +210,13 @@ def x6_x7(ws):
     return [x6, x7], expected
 
 
-def x8(ws):
+def x8(ws, chosen=REPORTS, groups=None):
     """Same resource with different severities across 03/04 (high vs low): review that the advice agrees."""
     seen = defaultdict(list)
     for pillar in ('reliability', 'aprl', 'security_network', 'security_identity', 'performance', 'operations'):
         for f in _findings(ws, pillar) or []:
+            if groups is not None and group_of(f['check']) not in groups:
+                continue
             for n in _names(f):
                 seen[n].append(f)
     items = []
@@ -226,15 +232,37 @@ CHART_SOURCES = {'01': ('cost',), '02': ('vm',), '03': ('waf',), '04': ('waf',),
 CHART_SKIP = ('report', 'verification', 'audit', 'expected-formulas', 'actions')   # written by build itself
 
 
-def x9(ws):
+def _sha(path):
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def chart_sources(ws, code):
+    """Fingerprint of the analysis results a report's charts are drawn from (build records it; X9 compares)."""
+    import hashlib
+    findings = ws.month_dir('findings')
+    files = sorted(f for d in CHART_SOURCES.get(code, ()) for f in (findings / d).glob('*.json') if not f.name.startswith(CHART_SKIP))
+    h = hashlib.sha256()
+    for f in files:
+        h.update(f'{f.parent.name}/{f.name}'.encode('utf-8'))
+        h.update(f.read_bytes())
+    return h.hexdigest() if files else None
+
+
+def x9(ws, chosen=REPORTS):
     reports, findings = ws.month_dir('reports'), ws.month_dir('findings')
-    charts = list((reports / 'charts').glob('*.png'))
+    charts = [p for p in (reports / 'charts').glob('*.png') if p.name[:2] in chosen or p.name[:2] == '00']
     if not charts:
         return _result('X9', '图表与数据一致', [], '还没有图表')
+    path = findings / 'build-hashes.json'
+    drawn = (read_json(path) if path.exists() else {}).get('_charts') or {}
     stale = []
     for p in charts:
         dirs = CHART_SOURCES.get(p.name[:2])
         if not dirs:
+            continue
+        # drawn by a build from the results still there: fresh, whatever the file times say (a save can leave them older)
+        if drawn.get(p.name) == [_sha(p), chart_sources(ws, p.name[:2])]:
             continue
         data = [f.stat().st_mtime for d in dirs for f in (findings / d).glob('*.json') if not f.name.startswith(CHART_SKIP)]
         if data and p.stat().st_mtime + 1 < max(data):
@@ -242,10 +270,30 @@ def x9(ws):
     return _result('X9', '图表与数据一致', stale)
 
 
+# reports a rule compares; a rule is not applicable when a report it needs was not chosen this month
+# (reports or pillars of 03/04): X1-X4 compare the performance pillar of 04 (P1, P2, P4, P5)
+PILLARS_ALL = {'可靠性', '安全', '卓越运营', '性能效率'}
+NEEDS = {'X1': [{'02'}, {'性能效率'}], 'X2': [{'02'}, {'性能效率'}], 'X3': [{'02'}, {'性能效率'}], 'X4': [{'01'}, {'性能效率'}],
+         'X5': [{'01'}, PILLARS_ALL], 'X8': [PILLARS_ALL]}
+
+
+def _applicable(rule, chosen):
+    """The rule as computed, or 不适用 naming what was left out (each set needs one of its reports or pillars)."""
+    label = lambda need: '03 或 04' if need == PILLARS_ALL else '或'.join(  # noqa: E731
+        x if x in REPORTS else f'{GROUPS[x]} {x}' for x in sorted(need))
+    left_out = [label(need) for need in NEEDS.get(rule['rule'], []) if not need & set(chosen)]
+    if not left_out:
+        return rule
+    return {'rule': rule['rule'], 'title': rule['title'], 'status': '不适用', 'items': [],
+            'reason': '本月未选择 ' + '、'.join(left_out)}
+
+
 def run(ws, log=print):
-    rules = x1_x2_x3(ws) + [x4(ws), x5(ws)]
-    x67, expected = x6_x7(ws)
-    rules += x67 + [x8(ws), x9(ws)]
+    chosen, groups = load_selection(ws), load_groups(ws)
+    rules = x1_x2_x3(ws) + [x4(ws), x5(ws, chosen, groups)]
+    x67, expected = x6_x7(ws, chosen)
+    rules += x67 + [x8(ws, chosen, groups), x9(ws, chosen)]
+    rules = [_applicable(r, chosen + groups) for r in rules]
     out = {'rules': rules, 'expectedNumbers': expected}
     write_json(ws.month_dir('findings') / 'crosscheck.json', out)
     for r in rules:

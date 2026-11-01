@@ -67,7 +67,7 @@ def summary(ws, cfg) -> dict | None:
         loc = {r['id'].lower(): r.get('location') for r in resources if r['type'] == 'microsoft.network/virtualnetworks'}
         cross_region = sum(1 for p in peerings if loc.get((p.get('remote') or '').lower()) not in (None, p.get('location')))
     return {'subscriptions': subs, 'network': network, 'peerings': None if peerings is None else len(peerings),
-            'crossRegionPeerings': cross_region}
+            'crossRegionPeerings': cross_region, 'narrowed': bool(cfg.include or cfg.exclude)}
 
 
 def section(arch: dict | None, narrative: dict) -> list[str]:
@@ -91,7 +91,8 @@ def section(arch: dict | None, narrative: dict) -> list[str]:
         elif arch['peerings']:
             text += f'；虚拟网络对等 {arch["peerings"]} 个' + (f'，其中跨区域 {arch["crossRegionPeerings"]} 个' if arch['crossRegionPeerings'] else '')
         if missing:
-            text += f'。Azure 中没有{"、".join(missing)}；Azure 之外是否有专线、VPN 或第三方防火墙，需要客户确认'
+            text += (f'。所选订阅中没有{"、".join(missing)}；其他订阅或 Azure 之外是否有专线、VPN 或第三方防火墙，需要客户确认'
+                     if arch.get('narrowed') else f'。Azure 中没有{"、".join(missing)}；Azure 之外是否有专线、VPN 或第三方防火墙，需要客户确认')
         lines += ['', text + '。']
     for p in paragraphs:
         lines += ['', p]

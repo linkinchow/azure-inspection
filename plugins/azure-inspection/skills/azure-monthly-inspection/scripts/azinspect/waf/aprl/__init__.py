@@ -57,6 +57,17 @@ def _label(row, guid):
     return name
 
 
+def _has_gateway(rel, kind) -> bool:
+    """Whether the chosen subscriptions have a gateway of `kind` (reliability's gateway read); True when not known."""
+    if not kind:
+        return True
+    data = rel.load('arg/vnetgw.json')
+    if not isinstance(data, dict) or data.get('error') or data.get('status') not in (None, 200):
+        return True
+    return any(str(r.get('type')).lower() == 'microsoft.network/virtualnetworkgateways'
+               and str((r.get('properties') or {}).get('gatewayType')).lower() == kind for r in data.get('rows') or [])
+
+
 def analyze(ws, cfg, log=print):
     raw = Raw(ws, 'aprl')
     data = raw.load('results.json')
@@ -81,6 +92,12 @@ def analyze(ws, cfg, log=print):
             c['notes'].append(f'APRL {guid[:8]} 查询失败：{result.get("error")}')
             continue
         rows = result['rows']
+        if rule.get('related') and cfg and (cfg.include or cfg.exclude) and _has_gateway(rel, rule.get('relatedGateway')):
+            text = (f'本次只检查了所选订阅：{rule["related"]}如果在其他订阅中就读不到，“{rule["finding"].split("，")[0]}”这一项'
+                    f'（APRL {guid[:8]}）可能漏报。')
+            c.setdefault('incomplete', []).append(guid[:8])
+            c.setdefault('limits', []).append(text)
+            c['notes'].append(text)
         if rule.get('excludeAppliances'):
             # firewalls and other network appliances need this setting: not a finding for them
             skipped = [r for r in rows if str(r.get('id') or '').lower() in devices]
@@ -109,7 +126,7 @@ def analyze(ws, cfg, log=print):
                                    'rows': [{k: v for k, v in r.items() if k != 'tags'} for r in rows]},
                          members=[{'name': n, 'type': rule['type'], 'subscription': sub} for n in names], key=guid)
     for c in coverage.values():
-        c['notes'].insert(0, f'APRL 白名单查询（提交 {meta["commit"][:12]}，{meta["commitDate"]}）；测试和开发资源降一级。')
+        c['notes'].insert(0, f'按微软 APRL 规则库（{meta["commitDate"]} 版）查询；测试和开发资源降一级。')
     out = findings.write(ws, window=manifest.get('window'), coverage=coverage,
                          scope={'subscriptions': len(subs)}, extra={'aprlCommit': meta['commit']})
     log(f'APRL：{len(out["findings"])} 项问题')

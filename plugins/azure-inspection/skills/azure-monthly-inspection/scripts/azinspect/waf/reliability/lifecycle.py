@@ -8,10 +8,11 @@ GET only); a value that was not read is reported as not judged, never as "still 
 from __future__ import annotations
 
 import base64
+import html
 import json
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ...core import appliance
@@ -42,9 +43,12 @@ def load_calendar(path: Path = CALENDAR):
 
 
 def parse_date(value):
-    """Aware UTC datetime from 'YYYY-MM-DD', ISO text or epoch milliseconds; None when absent or unreadable."""
+    """Aware UTC datetime from 'YYYY-MM-DD', ISO text, epoch milliseconds or .NET ticks (Resource Graph's
+    todatetime(ImpactMitigationTime)); None when absent or unreadable."""
     if value in (None, ''):
         return None
+    if re.fullmatch(r'\d{17,19}', str(value)):
+        return datetime(1, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=int(value) // 10)
     if isinstance(value, (int, float)) or re.fullmatch(r'\d{10,13}', str(value)):
         n = float(value)
         return datetime.fromtimestamp(n / 1000 if n > 1e11 else n, tz=timezone.utc)
@@ -338,11 +342,36 @@ def _app_gateway(run, out, member):
         run.coverage['R9']['notes'].append(f'{unread} 个应用网关证书未取得到期日期（接口没有返回公钥证书数据，常见于引用 Key Vault 的证书）。')
 
 
+def _retirement_note(run, events, impacted):
+    """What the check of the retirement notices found, for the coverage sheet."""
+    linked = [t for t in events if impacted.get(t)]
+    head = f'微软退役公告 {len(events)} 条'
+    if linked:
+        return f'{head}，其中 {len(linked)} 条列出了本租户受影响的资源（共 {sum(len(impacted[t]) for t in linked)} 个）。'
+    read = run.raw.load('arg/retirement_resources.json') or {}
+    if read.get('status') not in (None, 200):
+        return f'{head}，受影响资源未能读取（Service Health 查询失败），全部按未关联到资源处理。'
+    probe = run.raw.load('arg/retirement_resources_probe.json')
+    if probe is None:
+        return f'{head}，受影响资源查询没有返回结果。'
+    listed = {str(r.get('trackingId') or '').lower() for r in probe.get('rows') or []}
+    missed = [t for t in events if str(t).lower() in listed]
+    if missed:
+        return f'{head}，其中 {len(missed)} 条在 Service Health 有受影响资源记录，但未能与公告对应，资源未列出。'
+    return f'{head}，Service Health 没有为它们列出受影响的资源。'
+
+
 def _retirements(run, out, member, limits):
     events = defaultdict(lambda: {'subs': set()})
     for e in run.rows('retirements'):
         ev = events[e.get('trackingId') or e.get('id')]
         ev.update({k: e.get(k) for k in ('trackingId', 'title', 'summary', 'status', 'retirementDate') if e.get(k)})
+        for k in ('title', 'summary'):   # Service Health text arrives HTML-escaped ('&amp;')
+            if ev.get(k):
+                ev[k] = html.unescape(str(ev[k]))
+        date = parse_date(ev.get('retirementDate'))
+        if date:
+            ev['retirementDate'] = date.date().isoformat()
         ev['subs'].add(run.subname(e.get('subscriptionId') or ''))
     impacted = defaultdict(dict)
     for r in run.rows('retirement_resources') + run.rows('retirement_advisor'):
@@ -372,18 +401,21 @@ def _retirements(run, out, member, limits):
         subs = sorted({run.subname(rid) for rid in res})
         days = (date - run.now).days if date else None
         when = '退役日期未取得' if date is None else f'已于 {date.date()} 退役' if days < 0 else f'将于 {date.date()} 退役（还有 {days} 天）'
-        run.add('R9', sev, None, next(iter(res.values())), f'{len(res)} 个资源',
+        item = run.add('R9', sev, None, next(iter(res.values())), f'{len(res)} 个资源',
                 _mixed([run.env(run.subname(rid), rid.rsplit('/', 1)[-1]) for rid in res]),
                 f"微软服务退役公告（跟踪 ID {tid}）：{ev.get('title')}。{when}；本租户 {len(res)} 个资源受影响（{kinds}）。",
                 {'notice': record, 'resources': sorted(res)},
                 f'按公告中的迁移指引在退役日期前完成迁移；公告全文可在 Azure 门户“服务运行状况 > 健康公告”中按跟踪 ID {tid} 查看。', None,
                 sub='、'.join(subs[:3]) + (' 等' if len(subs) > 3 else ''), rg=None,
                 members=[member(rid.rsplit('/', 1)[-1], t, run.subname(rid)) for rid, t in sorted(res.items())], key=f'retirement|{tid}')
+        item['acceptance'] = '在退役日期前按公告完成迁移，Service Health 不再列出受影响的资源'
     if unlinked:
         lines = '；'.join(f"{x['title']}（{(x['retirementDate'] or '')[:10] or '日期未取得'}）" for x in unlinked[:5])
-        run.add('R9', '低', None, '多种', f'{len(unlinked)} 条退役公告', None,
+        item = run.add('R9', '低', None, '多种', f'{len(unlinked)} 条退役公告', None,
                 f"另有 {len(unlinked)} 条涉及本租户订阅的微软退役公告未能关联到具体资源，例如：{lines}{' 等' if len(unlinked) > 5 else ''}。",
                 {'notices': unlinked}, '在 Azure 门户“服务运行状况 > 健康公告”中按跟踪 ID 查看公告，确认是否在使用相关服务或功能。',
                 '确认这些服务或功能是否在使用。', sub='多个订阅', rg=None, members=[], key='retirement|unlinked')
+        item['acceptance'] = '已确认这些服务或功能是否在使用；在用的已在退役日期前完成迁移'
     if events:
         limits.append('微软退役公告的受影响资源只覆盖部分服务，且公告发布后最长约两周才会出现；未关联到资源的公告单独列出。')
+        run.coverage['R9']['notes'].append(_retirement_note(run, events, impacted))

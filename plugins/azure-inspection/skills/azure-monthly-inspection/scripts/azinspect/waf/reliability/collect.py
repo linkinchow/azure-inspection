@@ -43,15 +43,22 @@ ARG_QUERIES = {
 # (service-health/resource-graph-samples, service-retirement-unified-impact-queries).
 _RETIREMENT_EVENTS = ("servicehealthresources | where type =~ 'microsoft.resourcehealth/events' | extend p = parse_json(properties) "
                       "| where tostring(p.EventType) == 'HealthAdvisory' and tostring(p.EventSubType) == 'Retirement'")
+def retirement_resources_query(tracking_ids):
+    """Resources hit by the given retirement notices. Read after 'retirements', filtered by their tracking ids: the same
+    query joined with the events in Resource Graph was answered with 400 BadRequest."""
+    ids = ', '.join("'" + str(t).replace("'", "''") + "'" for t in tracking_ids)
+    return ("servicehealthresources | where type =~ 'microsoft.resourcehealth/events/impactedresources' "
+            f"| extend trackingId = tostring(split(id, '/')[6]) | where trackingId in~ ({ids}) | extend p = parse_json(properties) "
+            "| project id, subscriptionId, trackingId, targetResourceId = tostring(p.targetResourceId), "
+            "targetResourceType = tostring(p.targetResourceType)")
+
+
+RETIREMENT_BATCH = 100   # tracking ids per impacted-resources query
+
 ARG_QUERIES.update({
     'retirements': _RETIREMENT_EVENTS + " | project id, subscriptionId, trackingId = tostring(p.TrackingId), title = tostring(p.Title), "
                    "summary = tostring(p.Summary), status = tostring(p.Status), retirementDate = tostring(todatetime(p.ImpactMitigationTime)), "
                    "impactStart = tostring(todatetime(p.ImpactStartTime)), impact = p.Impact",
-    'retirement_resources': "servicehealthresources | where type =~ 'microsoft.resourcehealth/events/impactedresources' "
-                            "| extend p = parse_json(properties), trackingId = tostring(split(id, '/')[6]) "
-                            "| join kind=inner (" + _RETIREMENT_EVENTS + " | distinct trackingId = tostring(p.TrackingId)) on trackingId "
-                            "| project id, subscriptionId, trackingId, targetResourceId = tostring(p.targetResourceId), "
-                            "targetResourceType = tostring(p.targetResourceType)",
     'retirement_advisor': """advisorresources
 | where type == "microsoft.advisor/metadata"
 | extend props = parse_json(properties)
@@ -112,10 +119,34 @@ class _Collector:
     def arg(self):
         ids = [s['id'] for s in self.subs]
         summary = {}
+        read = {}
         for name, q in ARG_QUERIES.items():
             rows, st, err = self.c.arg(q, ids, 'ARG', name)
             self.raw.save(f'arg/{name}.json', {'query': q, 'status': st, 'error': err, 'rows': rows})
             summary[name] = {'status': st, 'error': err, 'rows': None if rows is None else len(rows)}
+            read[name] = rows
+        # resources hit by the retirement notices just read; none to read when there is no notice
+        tids = sorted({r['trackingId'] for r in read.get('retirements') or [] if r.get('trackingId')})
+        rows, st, err, queries = [], 200, None, []
+        for i in range(0, len(tids), RETIREMENT_BATCH):
+            q = retirement_resources_query(tids[i:i + RETIREMENT_BATCH])
+            part, st_, err_ = self.c.arg(q, ids, 'ARG', 'retirement_resources')
+            queries.append(q)
+            if part is None:
+                rows, st, err = None, st_, err_
+                break
+            rows += part
+        self.raw.save('arg/retirement_resources.json', {'query': queries, 'status': st, 'error': err, 'rows': rows,
+                                                       **({} if tids else {'note': '没有退役公告，未查询受影响资源'})})
+        summary['retirement_resources'] = {'status': st, 'error': err, 'rows': None if rows is None else len(rows)}
+        if tids and rows == []:
+            # none listed: count impacted resources per notice without the filter (numbers only), to tell
+            # "Service Health lists none for these notices" from "notice ids that do not match"
+            q = ("servicehealthresources | where type =~ 'microsoft.resourcehealth/events/impactedresources' "
+                 "| extend trackingId = tostring(split(id, '/')[6]) | summarize resources = count() by trackingId")
+            rows_, st_, err_ = self.c.arg(q, ids, 'ARG', 'retirement_resources_probe')
+            self.raw.save('arg/retirement_resources_probe.json', {'query': q, 'status': st_, 'error': err_, 'rows': rows_})
+            summary['retirement_resources_probe'] = {'status': st_, 'error': err_, 'rows': None if rows_ is None else len(rows_)}
         self.raw.save('arg/_summary.json', summary)
 
     # ------------------------------------------------------------------ AKS

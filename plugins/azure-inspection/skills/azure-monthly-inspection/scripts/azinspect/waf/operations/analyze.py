@@ -102,6 +102,11 @@ def analyze(ws, cfg, log=print):
     if d.disabled:
         limitations.append(f'{len(d.disabled)} 个未启用订阅不可读，未纳入。')
     limitations += [f'未取得{m}，相关检查未评估。' for m in d.missing]
+    if d.missing_cost:
+        why = '本次没有做 01 月度成本巡检' if '01' not in cfg.reports else '没有取得 01 月度成本巡检的数据'
+        text = f'{why}，以下依赖费用数据的部分未评估或缩小了范围：{"、".join(dict.fromkeys(d.missing_cost))}。'
+        limitations.append(text)
+        cov['O3'].setdefault('limits', []).append(text)   # customer-facing: 04 “检查范围与限制” (once, under O3)
     scope = {'subscriptionsTotal': len(d.subs), 'subscriptionsEnabled': len(d.enabled),
              'subscriptionsInspected': [s['name'] for s in d.enabled],
              'notInspected': [{'name': s['name'], 'reason': '订阅未启用，Resource Graph/ARM 不可读'} for s in d.disabled],
@@ -118,7 +123,7 @@ def _notes(cov, d, vm_rows, inventory):
     cov['O1']['notes'] += [f'AKS 监控属性来自 Resource Graph 和安全检查已采集的集群 GET/诊断设置；{len(vm_rows)} 台非 AKS 虚拟机逐台读取 DCR 关联；'
                            f'{len(d.diag)} 个关键资源读取诊断设置。', '数据库/缓存的平台指标默认可用，本检查只看诊断日志和告警。']
     cov['O2']['notes'] += [f'告警规则来自 Resource Graph（{len(d.alertrules)} 条规则、{len(d.ags)} 个操作组；操作组只读取接收人类型计数，未读取地址）。']
-    cov['O3']['notes'] += ['工作区保留期/上限来自 Resource Graph，表级保留期逐工作区读取；未执行 Log Analytics 查询，用量与来源复用成本巡检 logs.json。']
+    cov['O3']['notes'] += ['工作区保留期/上限来自 Resource Graph，表级保留期逐工作区读取；未执行 Log Analytics 查询，用量与来源复用月度成本巡检（01）读取的日志数据。']
     cov['O4']['notes'] += ['AKS 维护配置复用安全检查原始数据；AKS 操作记录为近 90 天活动日志（按订阅和 resourceProvider 过滤）。',
                            '虚拟机补丁与 Update Manager 由安全检查 S-I8 覆盖。']
     cov['O5']['notes'] += [f'{len(d.deps)} 个资源组和 {len(d.subreads)} 个订阅的部署历史；基础设施代码判断基于标签与状态存储账户，属推断。']

@@ -318,6 +318,8 @@ def build(ws, cfg, narrative=None, log=print):
     wb.save(path)
     write_json(fdir / 'expected-formulas.json', expected)
     md_path = out / f'{STEM}.md'
+    from ..selection import subscription_scope
+    data['subscriptionScope'] = subscription_scope(ws, cfg, '02')
     md_path.write_text(markdown(cfg, unified, recs, subscriptions, manifest, pools, total, portfolio, data, pngs, narrative), encoding='utf-8')
     result = verify(path, expected, fdir / 'verification.json')
     log(f'02 报告：{len(unified)} 台机器，建议调整 {len(accepted)} 台，预计每月节省 USD {total:,.2f}（官网列表价）；'
@@ -416,6 +418,17 @@ def summary_section(rows, total, limit):
     return lines
 
 
+def title_line(name, subscriptions_with_vm):
+    return f'# {name}：{"各订阅" if subscriptions_with_vm > 1 else ""}VM规格建议与预计节省'
+
+
+def adjust_line(accepted, pool_nodes, pool_count):
+    if not pool_nodes:
+        return f'- 建议调整 **{accepted}台机器**，都是独立VM。'
+    return (f'- 建议调整 **{accepted}台机器**，其中{accepted - pool_nodes}台独立VM，{pool_nodes}台在{pool_count}个节点池中。'
+            '节点池里的机器已包含在总数中。')
+
+
 def markdown(cfg, rows, recs, subs, manifest, pools, total, portfolio, data, pngs, narrative):
     accepted = [r for r in recs if r['status'] == '建议试点调整']
     state = Counter(r['state'] for r in recs)
@@ -427,12 +440,13 @@ def markdown(cfg, rows, recs, subs, manifest, pools, total, portfolio, data, png
     running, deallocated = state['PowerState/running'], state['PowerState/deallocated']
     fallback = [u for u in rows if u.get('metricsSource')]
     unverified_text = _unverified_text(unverified)
-    lines = [f'# {cfg.name}：各订阅VM规格建议与预计节省', '', '**' + PRICE_NOTE + '**', '', '## 1. 范围和结果', '',
+    lines = [title_line(cfg.name, len(with_vm)), '', '**' + PRICE_NOTE + '**', '', '## 1. 范围和结果', '',
              f'- 已核对{cfg.name}纳入巡检的 **{len(subs) - len(unverified)}个订阅**：{len(with_vm)}个有VM/VMSS，{len(without)}个没有VM。{unverified_text}'
              f'发现的 **{len(rows)}台机器**中，{running}台运行、{deallocated}台已释放计算资源。',
              *([f'- {data["scaleSetNote"]}'] if data.get('scaleSetNote') else []),
+             *([f'- {data["subscriptionScope"]}。'] if data.get('subscriptionScope') else []),
              f'- 数据窗口为 **{manifest["start"]}至{manifest["end"]}（UTC）**，所有订阅使用同一完整7天。',
-             f'- 建议调整 **{len(accepted)}台机器**，其中{len(accepted) - pool_nodes}台独立VM，{pool_nodes}台在{pool_count}个节点池中。节点池里的机器已包含在总数中。',
+             adjust_line(len(accepted), pool_nodes, pool_count),
              f'- 仅调整规格、不购买RI/SP，**预计每月节省 USD {fmt(total)}，每年节省 USD {fmt(total * 12)}**。当前费用及五种方案汇总如下。',
              '- 没有数据或权限不足的机器仍列在逐台明细中，明确写“暂不判断”，不把缺数据当成空闲；数量见 2.2。', '',
              '**先小范围调整，确认业务正常后再推广。**平均用量低不代表每个忙碌时刻都够用；业务团队需确认重要任务、故障接管和AKS资源需求。报告提供分析建议，实际调整需经业务负责人批准。', '',

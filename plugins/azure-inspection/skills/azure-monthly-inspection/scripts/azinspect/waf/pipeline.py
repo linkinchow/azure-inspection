@@ -21,12 +21,14 @@ def collect(ws, cfg, client, log=print, pillars=None):
     if not pillars or not (ws.raw('waf/scope.json')).exists():
         save_scope(ws, cfg, client, log)
     w, failed = window(), []
-    log(f'指标和活动日志时间窗：{w["start"][:10]} 至 {w["end"][:10]}（{w["days"]} 天）')
+    if any(not p.endswith(':inventory') for p in pillars or PILLARS):   # the inventory alone reads no metrics or logs
+        log(f'指标和活动日志时间窗：{w["start"][:10]} 至 {w["end"][:10]}（{w["days"]} 天）')
     for pillar in pillars or PILLARS:
+        name, _, mode = pillar.partition(':')   # 'operations:inventory': its resource inventory only (03's architecture overview)
         try:
-            _module(pillar).collect(ws, cfg, client, w, log)
+            _module(name).collect(ws, cfg, client, w, log, **({'phases': ['arg']} if mode == 'inventory' else {}))
         except Exception as e:  # keep the other pillars running; the error is shown to the user
-            failed.append(pillar)
+            failed.append(name)   # rerun as --pillars <name>: the plan narrows it to the inventory again
             log(f'{pillar} 采集失败：{type(e).__name__}: {e}')
             log(traceback.format_exc(limit=3))
     return failed
@@ -37,6 +39,9 @@ def analyze(ws, cfg, log=print, pillars=None):
     for pillar in pillars or PILLARS:
         if not Raw(ws, pillar).exists('manifest.json'):
             log(f'{pillar}：没有原始数据，跳过分析')
+            continue
+        if (Raw(ws, pillar).load('manifest.json') or {}).get('phases'):
+            log(f'{pillar}：只采了资源清单（供 03 的架构总览），不能分析；要做这个支柱，先补采 collect --part waf --pillars {pillar}')
             continue
         data = _module(pillar).analyze(ws, cfg, log)
         done.append(pillar)
@@ -91,10 +96,10 @@ def parse(text):
     return names
 
 
-def build(ws, cfg, narratives, log=print):
+def build(ws, cfg, narratives, log=print, codes=('03', '04')):
     from . import report
     from .. import tracking
     tracking.update(ws, log)
-    for code in ('03', '04'):
+    for code in codes:
         if report.build(ws, cfg, code, narratives.get(code), log):
             report.audit(ws, cfg, code, log)

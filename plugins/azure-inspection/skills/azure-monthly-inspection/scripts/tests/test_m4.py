@@ -12,7 +12,7 @@ sys.dont_write_bytecode = True
 os.environ.setdefault('AZINSPECT_NO_EXCEL', '1')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from azinspect import crosscheck, package, tracking  # noqa: E402
+from azinspect import crosscheck, package, selection, tracking  # noqa: E402
 from azinspect.core import config, io  # noqa: E402
 from azinspect.core.period import ReportPeriod  # noqa: E402
 
@@ -58,14 +58,16 @@ class PackageTests(unittest.TestCase):
             (reports / 'charts').mkdir(parents=True, exist_ok=True)
             (reports / 'charts' / '03_1_x.png').write_bytes(b'png')
             (reports / '03_可靠性与安全巡检报告.md').write_text('# 报告\n\n![图](charts/03_1_x.png)\n', encoding='utf-8')
+            (reports / '00_Azure巡检汇总报告_2026年10月.md').write_text('# 汇总\n', encoding='utf-8')
             (reports / '~$锁文件.xlsx').write_bytes(b'lock')
+            selection.save(ws, ['03'])
             period = ReportPeriod.build('2026-09')
             io.write_json(ws.month_dir('findings') / 'crosscheck.json', {'rules': [{'rule': 'X1', 'status': '需要处理'}]})
             with self.assertRaises(SystemExit):
                 package.build(ws, cfg, period, log=lambda *_: None)
             manifest = package.build(ws, cfg, period, allow_open=True, log=lambda *_: None)
             names = [f['name'] for f in manifest['files']]
-            self.assertEqual(sorted(names), ['03_可靠性与安全巡检报告.md', 'charts/03_1_x.png'])
+            self.assertEqual(sorted(names), ['00_Azure巡检汇总报告_2026年10月.md', '03_可靠性与安全巡检报告.md', 'charts/03_1_x.png'])
             with zipfile.ZipFile(manifest['zip']) as z:
                 self.assertIsNone(z.testzip())
 

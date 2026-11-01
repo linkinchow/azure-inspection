@@ -5,17 +5,22 @@ summary cannot disagree with them (crosscheck X6 verifies this again).
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
 
 from .core import charts as cs
 from .core.charts import clear as clear_charts
 from .core.fmt_md import format_and_check
+from .core.config import REPORTS
 from .core.io import read_json, write_json
-from .waf.checks import CHECKS
-from .waf.report import PLAN_PERIODS, action_plan, default_top_issues, recommendation_text
+from .selection import TITLES, load as load_selection, load_groups, subscription_scope, title as report_title
+from .vm.collect import WINDOW_DAYS as VM_WINDOW_DAYS
+from .waf.checks import CHECKS, group_of
+from .waf.report import PLAN_PERIODS, action_plan, default_top_issues, recommendation_text, stems
 
 GROUPS = ['可靠性', '安全', '卓越运营', '性能效率']
 SEVERITY_ORDER = ('高', '中', '低')
+NUMERALS = '一二三四五六'
 
 
 def _load(path):
@@ -35,16 +40,21 @@ def ws_of(d):
 
 
 def gather(ws, period):
+    """The chosen reports' results only: a report left out this month may still have older results in the month folder."""
     f = ws.month_dir('findings')
-    d = {'model': _load(f / 'cost' / 'model.json'), 'vm': _load(f / 'vm' / 'summary.json'), 'prices': _load(f / 'vm' / 'price-summary.json'),
-         'forecast': _load(ws.raw('cost/supplement/forecast.json')), 'r03': _load(f / 'waf' / 'report-03.json'),
-         'r04': _load(f / 'waf' / 'report-04.json'), 'peer': _load(f / 'peer' / 'baseline.json'), 'peerReport': _load(f / 'peer' / 'report.json'), 'actions': _load(f / 'cost' / 'actions.json')}
-    d['narrative'] = {code: _load(ws.month_dir('narrative') / f'{code}.json') or {} for code in ('01', '03', '04', '05')}
+    chosen = load_selection(ws)
+    pick = lambda code, path: _load(path) if code in chosen else None  # noqa: E731
+    d = {'model': pick('01', f / 'cost' / 'model.json'), 'vm': pick('02', f / 'vm' / 'summary.json'),
+         'prices': pick('02', f / 'vm' / 'price-summary.json'), 'forecast': pick('01', ws.raw('cost/supplement/forecast.json')),
+         'r03': pick('03', f / 'waf' / 'report-03.json'), 'r04': pick('04', f / 'waf' / 'report-04.json'),
+         'peer': pick('05', f / 'peer' / 'baseline.json'), 'peerReport': pick('05', f / 'peer' / 'report.json'),
+         'actions': pick('01', f / 'cost' / 'actions.json'), 'reports': chosen, 'groups': load_groups(ws)}
+    d['narrative'] = {code: (_load(ws.month_dir('narrative') / f'{code}.json') or {}) if code in chosen else {} for code in ('01', '03', '04', '05')}
     waf = []
     for p in sorted((f / 'waf').glob('*.json')):
         data = read_json(p)
         if isinstance(data, dict) and 'findings' in data and data.get('pillar'):
-            waf += data['findings']
+            waf += [x for x in data['findings'] if group_of(x['check']) in d['groups']]   # the chosen pillars of 03/04 only
     d['waf'] = waf
     d['ws'] = ws
     return d
@@ -99,8 +109,8 @@ def default_pillar_notes(d):
     notes = {}
     for code in ('03', '04'):
         for check, text in (d['narrative'][code].get('checkNotes') or {}).items():
-            group = '可靠性' if check.startswith('R') else '安全' if check.startswith('S-') else '卓越运营' if check.startswith('O') else '性能效率'
-            if text and text != '未发现问题':
+            group = group_of(check)
+            if text and text != '未发现问题' and group in d['groups']:
                 notes.setdefault(group, []).append(text)
     return {g: v[:5] for g, v in notes.items()}
 
@@ -122,6 +132,17 @@ def plan_lines(plan):
     return lines
 
 
+def month_row(tracked, waf_reports):
+    """00's comparison with last month for the chosen 03/04; problems of a report not chosen are counted, not listed."""
+    from .tracking import summary as tracking_summary
+    c = tracking_summary(tracked, None if len(waf_reports) == 2 else waf_reports[0])['all']
+    text = '，'.join(f'{k} {c[k]} 项' for k in c)
+    others = sum(tracking_summary(tracked)['all'].values()) - sum(c.values())
+    if others:
+        text += f'（另有 {others} 项上月问题属于本月没有选择的报告，未列入）'
+    return [f'与 {tracked["previous"]} 相比', text]
+
+
 def table(header, rows, align):
     out = ['|' + '|'.join(header) + '|', '|' + '|'.join(align) + '|']
     out += ['|' + '|'.join(str(c).replace('|', '/').replace('\n', ' ') for c in r) + '|' for r in rows]
@@ -129,17 +150,31 @@ def table(header, rows, align):
 
 
 def markdown(cfg, period, d, n, pngs, scope):
-    model, vm, prices = d['model'], d['vm'], d['prices']
+    model, vm, prices, chosen = d['model'], d['vm'], d['prices'], d['reports']
     counts = pillar_counts(d)
     cur, prev, nxt = period.current, period.previous, period.following
+    costs = bool({'01', '02'} & set(chosen))
+    section = iter(range(1, 20))
+    times = ([f'- 费用：对比 {cur.label}与{prev.short_label if cur.year == prev.year else prev.label}两个完整自然月。'] if '01' in chosen else []) + \
+            ([f'- 虚拟机利用率：{scope["vmWindow"]}（UTC）的 {VM_WINDOW_DAYS} 天指标。'] if scope.get('vmWindow') else []) + \
+            ([f'- 配置：{scope["snapshot"]}读取。'] if scope.get('snapshot') else []) + ([f'- 性能：{scope["window"]}的数据。'] if scope.get('window') else [])
+    # what was read: 01 and 02 read costs (02 the RI/SP coverage); 01 (month usage), 02, 03 and 04 read metrics; 03 and 04 read logs
+    kinds = (['费用'] if costs else []) + ['配置'] + (['监控指标'] if {'01', '02', '03', '04'} & set(chosen) else []) + \
+            (['日志'] if {'03', '04'} & set(chosen) else [])
+    reads = '、'.join(kinds[:-1]) + '和' + kinds[-1] if len(kinds) > 1 else kinds[0]
+    if tuple(chosen) == REPORTS and len(d['groups']) == 4:
+        waf = '本报告按 Microsoft Azure Well-Architected Framework（WAF）的五个支柱汇总结论：成本优化、可靠性、安全、卓越运营、性能效率。每项问题的资源明细见附件。'
+        content = []
+    else:
+        covered = (['成本优化'] if costs else []) + list(d['groups'])
+        waf = (f'本报告按 Microsoft Azure Well-Architected Framework（WAF）汇总结论，本次涉及{"、".join(covered)}。' if covered else '') + '明细见附件。'
+        names = '、'.join(f'{c} {report_title(c, d["groups"])}' for c in chosen)
+        content = [f'**内容**：按贵司选择，本次包含 {names}，本报告只汇总这些内容。', '']
     lines = [f'# {cfg.name} Azure 巡检汇总报告（{nxt.label}）', '',
-             f'**范围**：{cfg.name} {scope["readable"]} 个 Azure 订阅。' + (f'{scope["note"]}。' if scope['note'] else ''), '',
-             '**方式**：使用贵司提供的账号，以只读方式读取费用、配置、监控指标和日志，没有修改任何资源，也没有做端口扫描。', '',
-             '**时间**：', '',
-             f'- 费用：对比 {cur.label}与{prev.short_label if cur.year == prev.year else prev.label}两个完整自然月。'] + ([f'- 配置：{scope["snapshot"]}读取。'] if scope.get('snapshot') else []) + \
-            ([f'- 性能：{scope["window"]}的数据。'] if scope.get('window') else []) + [
-             '', '本报告按 Microsoft Azure Well-Architected Framework（WAF）的五个支柱汇总结论：成本优化、可靠性、安全、卓越运营、性能效率。每项问题的资源明细见附件。', '',
-             '## 1. 总体结论', '']
+             f'**范围**：{cfg.name} ' + (f'{scope["readable"]} 个' if scope['readable'] is not None else '的') + ' Azure 订阅。'
+             + (f'{scope["note"]}。' if scope['note'] else '') + (f'{scope["chosen"]}。' if scope.get('chosen') else ''), ''] + content + [
+             f'**方式**：使用贵司提供的账号，以只读方式读取{reads}，没有修改任何资源，也没有做端口扫描。', ''] + \
+            (['**时间**：', ''] + times + [''] if times else []) + [waf, '', f'## {next(section)}. 总体结论', '']
     rows = []
     if model:
         t = model['comparableTotals']
@@ -154,32 +189,40 @@ def markdown(cfg, period, d, n, pngs, scope):
     if 'ri1' in plan_by:
         rows.append(['VM 降配后再购买 1 年 RI', f'VM 计算费用每月从 USD {money(prices["currentMonthly"])} 降到 USD {money(plan_by["ri1"]["monthlyCost"])}，'
                                             f'**每月约节省 USD {money(plan_by["ri1"]["monthlySaving"])}**（官网列表价）'])
-    for code, title in (('r03', '可靠性与安全'), ('r04', '卓越运营与性能效率')):
+    for code, title in (('r03', report_title('03', d['groups'])), ('r04', report_title('04', d['groups']))):
         if d[code]:
             rows.append([title, f'发现 {d[code]["total"]} 项问题，其中高风险 {d[code]["bySeverity"].get("高", 0)} 项'])
-    from .tracking import load as load_tracking, summary as tracking_summary
-    tracked = load_tracking(ws_of(d))
+    from .tracking import load as load_tracking
+    waf_reports = [c for c in ('03', '04') if c in chosen]
+    tracked = load_tracking(ws_of(d)) if waf_reports else None
     if tracked and not tracked.get('first'):
-        c = tracking_summary(tracked)['all']
-        rows.append([f'与 {tracked["previous"]} 相比', '，'.join(f'{k} {c[k]} 项' for k in c)])
+        rows.append(month_row(tracked, waf_reports))
     peer = d['peerReport'] or {}
-    if peer.get('deviations'):
-        rows.append(['同类资源配置对比', f'{peer["deviations"]} 处配置偏差，其中高风险 {peer.get("highImpact", 0)} 处'])
-    lines += table(['项目', '结果'], rows, ['---', '---'])
+    if d['peerReport'] is not None:
+        rows.append(['同类资源配置对比', f'{peer["deviations"]} 处配置偏差，其中高风险 {peer.get("highImpact", 0)} 处'
+                     if peer.get('deviations') else '未发现明显的配置偏差'])
+    if rows:
+        lines += table(['项目', '结果'], rows, ['---', '---'])
     if pngs.get('pillars'):
         lines += ['', f'![各支柱发现的问题数量]({pngs["pillars"]})']
     lines += [''] + [x for p in (n.get('conclusion') or []) for x in (p, '')]
-    lines += ['费用和预计费用来自 Azure 账单和 Azure 预测；规格调整和 RI/SP 的节省按 Azure 官网公开列表价计算，不是贵司的合同价。' if vm else '', '',
-              '## 2. 需要立即处理的问题', '']
+    basis = ''
+    if vm:
+        basis = ('费用和预计费用来自 Azure 账单和 Azure 预测；' if model else '') + '规格调整和 RI/SP 的节省按 Azure 官网公开列表价计算，不是贵司的合同价。'
+    lines += [basis, '']
     issues = n.get('immediate') or default_immediate(d)
-    impact = any(i.get('impact') for i in issues)
-    rows = []
-    for i, t in enumerate(issues, 1):
-        detail = t.get('detail') or ''
-        problem = f'**{t["title"].rstrip("。")}' + ('**' if detail[:1] in '，；、' else '。**') + detail
-        rows.append([i, problem] + ([t.get('impact') or ''] if impact else []) + [recommendation_text(t.get('recommendation'))])
-    lines += table(['#', '问题'] + (['影响'] if impact else []) + ['建议'], rows, ['---'] * (4 if impact else 3))
-    lines += ['', '## 3. 成本优化', '']
+    if issues:
+        lines += [f'## {next(section)}. 需要立即处理的问题', '']
+        impact = any(i.get('impact') for i in issues)
+        rows = []
+        for i, t in enumerate(issues, 1):
+            detail = t.get('detail') or ''
+            problem = f'**{t["title"].rstrip("。")}' + ('**' if detail[:1] in '，；、' else '。**') + detail
+            rows.append([i, problem] + ([t.get('impact') or ''] if impact else []) + [recommendation_text(t.get('recommendation'))])
+        lines += table(['#', '问题'] + (['影响'] if impact else []) + ['建议'], rows, ['---'] * (4 if impact else 3))
+        lines += ['']
+    if costs:
+        lines += [f'## {next(section)}. 成本优化', '']
     if model:
         lines += [f'### {cur.short_label}费用', ''] + [f'- {x}' for x in (n.get('costNotes') or d['narrative']['01'].get('highlights') or [])]
         if pngs.get('daily'):
@@ -192,35 +235,70 @@ def markdown(cfg, period, d, n, pngs, scope):
         lines += table(['方案', '当前每月 USD', '调整后每月 USD', '每月节省 USD'], rows, ['---', '---:', '---:', '---:'])
         notes = [p['note'] for p in prices['plans'] if p['key'] in ('ri1', 'sp1') and p.get('fallbackCount')]
         lines += ['', '- 各 VM 方案需要选择一种，节省不能相加。'] + [f'- {x}。' for x in sorted(set(notes))] + \
-                 ['- VM 的 3 年 RI 和 SP 价格见附件二。', '- 建议先降配并观察稳定后，再按实际长期用量确定 RI 或 SP 的数量和期限。']
-    if n.get('savingsPending'):
+                 [f'- VM 的 3 年 RI 和 SP 价格见附件{attachment_no(chosen, "02")}。', '- 建议先降配并观察稳定后，再按实际长期用量确定 RI 或 SP 的数量和期限。']
+    if costs and n.get('savingsPending'):
         lines += ['', '### 需要贵司确认后才能估算节省的项目', ''] + table(['项目', '现状'], [[r['item'], r['status']] for r in n['savingsPending']], ['---', '---'])
     notes = n.get('pillarNotes') or default_pillar_notes(d)
-    for i, g in enumerate(GROUPS, 4):
+    for g in GROUPS:
         c = counts[g]
         if not sum(c.values()):
             continue
-        lines += ['', f'## {i}. {g}', '', f'共 {sum(c.values())} 项问题：高 {c["高"]} 项、中 {c["中"]} 项、低 {c["低"]} 项。', '']
+        lines += ['', f'## {next(section)}. {g}', '', f'共 {sum(c.values())} 项问题：高 {c["高"]} 项、中 {c["中"]} 项、低 {c["低"]} 项。', '']
         lines += [f'- {x}' for x in notes.get(g, [])]
-    lines += ['', '## 8. 建议处理计划', ''] + plan_lines(action_plan(n.get('actionPlan')) or default_plan(d))
-    lines += ['## 9. 需要贵司确认或提供的信息', ''] + [f'- {x}' for x in (n.get('customerQuestions') or [
-        '生产和测试环境的划分：本次按订阅、资源名称和标签判断。', 'RI/SP 现有订单和预算目标，以及各资源的负责人。'])]
-    lines += ['', '## 10. 后续', '', n.get('followUp') or
-              f'建议每月做一次巡检，覆盖费用变化、资源利用率、闲置资源和 RI/SP 使用情况，并跟踪本报告中各项问题的处理结果。下一次可在 {nxt.short_label}账单完整后开始。',
-              '', '## 附件', '']
+    plan = plan_lines(action_plan(n.get('actionPlan')) or default_plan(d))
+    if plan:
+        lines += ['', f'## {next(section)}. 建议处理计划', ''] + plan
+    questions = ['生产和测试环境的划分：本次按订阅、资源名称和标签判断。',
+                 'RI/SP 现有订单和预算目标，以及各资源的负责人。' if costs else '各资源的负责人。']
+    lines += [f'## {next(section)}. 需要贵司确认或提供的信息', ''] + [f'- {x}' for x in (n.get('customerQuestions') or questions)]
+    covers = ['费用变化'] + (['资源利用率'] if {'02', '04'} & set(chosen) else []) + ['闲置资源']
+    follow = (f'建议每月做一次巡检，覆盖{"、".join(covers)}和 RI/SP 使用情况，并跟踪本报告中各项问题的处理结果。下一次可在 {nxt.short_label}账单完整后开始。'
+              if '01' in chosen else '建议定期巡检，并跟踪本报告中各项问题的处理结果。')
+    lines += ['', f'## {next(section)}. 后续', '', n.get('followUp') or follow, '', '## 附件', '']
     att = []
     if model:
-        att.append(['一', f'01_{cur.short_label}月度成本巡检报告（Markdown、Excel）', f'{cur.short_label}费用对比、变化原因、数据库与存储日志用量、闲置资源、建议跟踪表'])
+        att.append([f'01_{cur.short_label}月度成本巡检报告（Markdown、Excel）', f'{cur.short_label}费用对比、变化原因、数据库与存储日志用量、闲置资源、建议跟踪表'])
     if vm:
-        att.append(['二', '02_虚拟机利用率与规格优化（Markdown、Excel）', '逐台 VM 的利用率、建议规格及按需、1 年和 3 年 RI、SP 价格'])
+        att.append(['02_虚拟机利用率与规格优化（Markdown、Excel）', '逐台 VM 的利用率、建议规格及按需、1 年和 3 年 RI、SP 价格'])
     if d['r03']:
-        att.append(['三', '03_可靠性与安全巡检报告、03_可靠性与安全巡检问题清单', f'{d["r03"]["total"]} 项问题的明细、建议、验收标准和跟踪列'])
+        att.append(['、'.join(stems('03', d['groups'])), f'{d["r03"]["total"]} 项问题的明细、建议、验收标准和跟踪列'])
     if d['r04']:
-        att.append(['四', '04_卓越运营与性能效率巡检报告、04_卓越运营与性能效率巡检问题清单', f'{d["r04"]["total"]} 项问题的明细、建议、验收标准和跟踪列'])
-    if d['peer']:
-        att.append(['五', '05_同类资源配置对比报告、05_同类资源配置对比明细', '各类资源的标准做法、不符合的资源及原因、需要修正的模板默认值'])
-    lines += table(['编号', '文件', '内容'], att, ['---', '---', '---'])
-    return format_and_check('\n'.join(x for x in lines if x is not None) + '\n')
+        att.append(['、'.join(stems('04', d['groups'])), f'{d["r04"]["total"]} 项问题的明细、建议、验收标准和跟踪列'])
+    if d['peer'] or d['peerReport'] is not None:
+        att.append(['05_同类资源配置对比报告、05_同类资源配置对比明细', '各类资源的标准做法、不符合的资源及原因、需要修正的模板默认值'])
+    lines += table(['编号', '文件', '内容'], [[NUMERALS[i]] + a for i, a in enumerate(att)], ['---', '---', '---'])
+    return format_and_check(tidy('\n'.join(x for x in lines if x is not None)) + '\n')
+
+
+SECTION = re.compile(r'^## \d+\. ')
+
+
+def tidy(text):
+    """One blank line between blocks and before every heading; a numbered section with nothing under it (e.g. 成本优化
+    when only 02 is chosen and no price plan was computed) is dropped and the sections renumbered."""
+    def collapse(lines):
+        out = []
+        for line in lines:
+            if line == '' and (not out or out[-1] == ''):
+                continue
+            if line.startswith('#') and out and out[-1] != '':
+                out.append('')
+            out.append(line)
+        return out
+    lines = collapse(text.split('\n'))
+    lines = [x for i, x in enumerate(lines)
+             if not (SECTION.match(x) and next((y for y in lines[i + 1:] if y), '').startswith('## '))]
+    lines, number = collapse(lines), 0
+    for i, x in enumerate(lines):
+        if SECTION.match(x):
+            number += 1
+            lines[i] = SECTION.sub(f'## {number}. ', x)
+    return '\n'.join(lines).rstrip('\n')
+
+
+def attachment_no(chosen, code):
+    """Attachments are numbered in the order of the chosen reports: 一 is the first chosen one."""
+    return NUMERALS[[c for c in REPORTS if c in chosen].index(code)]
 
 
 def build(ws, cfg, period, narrative=None, log=print):
@@ -228,25 +306,36 @@ def build(ws, cfg, period, narrative=None, log=print):
     d = gather(ws, period)
     n = narrative or {}
     out = ws.month_dir('reports')
+    missing = [c for c in d['reports'] if not any(out.glob(f'{c}_*.md'))]
+    if missing:
+        raise SystemExit(f'所选报告还没有生成：{"、".join(f"{c} {TITLES[c]}" for c in missing)}。先补采、分析并 build 这些部分，'
+                         '或在 customer.yaml 的 report.include 中去掉，再生成 00')
     clear_charts(out / 'charts', '00')
     pngs = {'pillars': chart(pillar_counts(d), out / 'charts' / '00_1_各支柱问题数量.png')}
     daily = sorted((out / 'charts').glob('01_1_*.png'))
     if daily:
         pngs['daily'] = f'charts/{daily[0].name}'
-    scope = {'readable': None, 'note': ''}
+    scope = {'readable': None, 'note': '', 'chosen': subscription_scope(ws, cfg)}
     try:
         scope['readable'], scope['note'] = scope_text(ws)
     except FileNotFoundError:
-        scope['readable'] = (d['model'] or {}).get('totals', {}).get('comparableSubscriptionCount')
+        scope['readable'] = (d['model'] or {}).get('totals', {}).get('comparableSubscriptionCount') or (d['vm'] or {}).get('subscriptionCount')
     datasets = {}
-    for name in ('reliability', 'performance'):
+    for name, group in (('reliability', '可靠性'), ('security_network', '安全'), ('operations', '卓越运营'), ('performance', '性能效率')):
         p = ws.month_dir('findings') / 'waf' / f'{name}.json'
-        if p.exists():
+        if p.exists() and group in d['groups']:
             datasets[name] = read_json(p)
-    snapshot, _ = window_of({k: v for k, v in datasets.items() if k == 'reliability'})
+    configured = [k for k in ('reliability', 'security_network', 'operations') if k in datasets]
+    snapshot, _ = window_of({configured[0]: datasets[configured[0]]} if configured else {})
     _, perf_window = window_of({k: v for k, v in datasets.items() if k == 'performance'})
+    if not snapshot and '05' in d['reports'] and ws.raw('waf/scope.json').exists():   # 05 alone: configuration read with the scope
+        snapshot = str(read_json(ws.raw('waf/scope.json')).get('collectedAt') or '')[:10] or None
     scope['snapshot'] = cn_date(snapshot) if snapshot else None
     scope['window'] = cn_span(*perf_window) if perf_window else None
+    vm_manifest = ws.raw('vm/metrics/manifest.json')
+    if '02' in d['reports'] and vm_manifest.exists():
+        m = read_json(vm_manifest)
+        scope['vmWindow'] = cn_span(str(m['start'])[:10], str(m['end'])[:10])
     md = markdown(cfg, period, d, n, pngs, scope)
     path = out / f'{stem(period)}.md'
     path.write_text(md, encoding='utf-8')

@@ -169,12 +169,19 @@ def check_edge(d, out, key_rows):
     fd_logs = sum(1 for k in gap if k['type'] == 'microsoft.cdn/profiles' and k['hasDiagnosticLogs'])
     gw_logs = sum(1 for k in gap if k['type'] == 'microsoft.network/applicationgateways' and k['hasDiagnosticLogs'])
     gw_text = '均未开访问/防火墙日志' if not gw_logs else f'{gw_logs} 个开了日志'
-    out.add('O2', '中', f"{len(gap)} 个生产入口和混合网络资源没有任何告警：应用网关 {n('microsoft.network/applicationgateways')} 个（{gw_text}）、"
-            f"Front Door {n('microsoft.cdn/profiles')} 个（仅 {fd_logs} 个开了日志）、"
-            f"ExpressRoute/VPN 网关和线路 {n('microsoft.network/virtualnetworkgateways', 'microsoft.network/expressroutecircuits')} 个（Advisor 另提示 {er} 处未配置 Connection Monitor），"
-            f"后端不健康、5xx 激增或专线中断时不会主动告警。",
-            '应用网关：为“不健康后端主机数>0”“失败请求/5xx 比例”“容量单位”配置指标告警并开启访问/防火墙日志；Front Door：为源站健康百分比、5xx 比例、总延迟配置告警；'
-            'ExpressRoute/VPN：为 BGP 可用性、ARP 可用性、隧道状态配置告警并启用 Connection Monitor；' + NO_CHANGE,
+    hybrid = n('microsoft.network/virtualnetworkgateways', 'microsoft.network/expressroutecircuits')
+    kinds = ([f"应用网关 {n('microsoft.network/applicationgateways')} 个（{gw_text}）"] if n('microsoft.network/applicationgateways') else []) + \
+            ([f"Front Door {n('microsoft.cdn/profiles')} 个（{f'仅 {fd_logs} 个开了日志' if fd_logs else '未开日志'}）"] if n('microsoft.cdn/profiles') else []) + \
+            ([f"ExpressRoute/VPN 网关和线路 {hybrid} 个" + (f"（Advisor 另提示 {er} 处未配置 Connection Monitor）" if er else '')] if hybrid else [])
+    present = [label for label, count in (('appgw', n('microsoft.network/applicationgateways')), ('fd', n('microsoft.cdn/profiles')),
+                                           ('hybrid', hybrid)) if count]
+    effects = {'appgw': '后端不健康', 'fd': '5xx 激增', 'hybrid': '专线或 VPN 中断'}
+    advice = {'appgw': '应用网关：为“不健康后端主机数>0”“失败请求/5xx 比例”“容量单位”配置指标告警并开启访问/防火墙日志；',
+              'fd': 'Front Door：为源站健康百分比、5xx 比例、总延迟配置告警；',
+              'hybrid': 'ExpressRoute/VPN：为 BGP 可用性、ARP 可用性、隧道状态配置告警并启用 Connection Monitor；'}
+    out.add('O2', '中', f"{len(gap)} 个生产入口和混合网络资源没有任何告警：{'、'.join(kinds)}，"
+            f"{'、'.join(effects[k] for k in present)}时不会主动告警。",
+            ''.join(advice[k] for k in present) + NO_CHANGE,
             subscription=subs_text(gap), resource_name=f"{len(gap)} 个入口/混合网络资源", resource_type='应用网关 / Front Door / ExpressRoute / VPN',
             environment=mixed_env([k['environment'] for k in gap]),
             evidence={'items': [{'resourceName': k['resourceName'], 'type': k['typeLabel'], 'subscriptionName': k['subscriptionName'],

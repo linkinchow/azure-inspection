@@ -163,7 +163,7 @@ class RightsizingNoteTests(unittest.TestCase):
                  'candidate': {'direction': '只减CPU，内存保留'}},
                 {'name': 'web-1', 'status': '保持现状：平均利用率不低', 'currentSKU': 'Standard_D4s_v5'}])
             a = perf.Analyzer.__new__(perf.Analyzer)
-            a.ws, a.F = ws, common.Findings('performance')
+            a.ws, a.F, a.cfg = ws, common.Findings('performance'), SimpleNamespace(reports=('02', '04'))
             a.F.add('P1', '高', '虚拟机 db-1 过去 30 天平均内存使用 92.0%，长期接近上限。', 'r', resource_name='db-1')
             a.F.add('P4', '高', '3 台虚拟机的磁盘/虚拟机 IO 上限频繁被打满。', 'r', resource_name='3 台虚拟机',
                     members=[{'name': n} for n in ('db-1', 'web-1', 'app-9')])

@@ -29,6 +29,14 @@ def files(labels, group='业务组'):
             'groups': f'01_3_各{group}{labels["prev"]}与{labels["cur"]}费用.png', 'services': '01_4_费用增减最大的服务.png', 'regions': '01_5_各区域费用增减.png'}
 
 
+def expected_charts(labels, group, data):
+    """The charts make_pngs draws: 01_2 only when some subscription's forecast was read."""
+    names = files(labels, group)
+    if not any(f for _, _, f in data['next']):
+        del names['forecast']
+    return names
+
+
 def _k(x, _=None):
     return f'{x / 1000:,.0f}K' if abs(x) >= 1000 else f'{x:,.0f}'
 
@@ -59,7 +67,7 @@ def _line(ax, x, y, color, **kw):
 
 
 def make_pngs(data, labels, chart_dir):
-    names = files(labels, data['groupLabel'])
+    names = expected_charts(labels, data['groupLabel'], data)
     Lp, Lc, Ln = labels['prev'], labels['cur'], labels['next']
     fig, ax = cs.figure(11, 4)
     cs.style(ax)
@@ -82,25 +90,26 @@ def make_pngs(data, labels, chart_dir):
     ax.legend(loc='lower left', frameon=False, fontsize=9, ncol=2, labelcolor=cs.INK2)
     cs.save(fig, chart_dir / names['daily'])
 
-    fig, ax = cs.figure(10, 4)
-    cs.style(ax)
     actual = [(d, a) for d, a, _ in data['next'] if a is not None]
     forecast = [(d, f) for d, _, f in data['next'] if f is not None]
-    if actual:
-        _line(ax, [d for d, _ in actual], [v for _, v in actual], cs.BLUE, label=f'{Ln}实际')
-    if forecast:
-        head = [actual[-1]] if actual else []
-        _line(ax, [d for d, _ in head + forecast], [v for _, v in head + forecast], cs.BLUE, linestyle=(0, (4, 3)), label=f'{Ln}预测（Azure）')
-    peak = max([v for _, v in actual + forecast] or [1])
-    ax.axhline(data['curDailyAverage'], color=cs.INK2, lw=1, alpha=0.6)
-    ax.text(1, data['curDailyAverage'] + peak * 0.02, f'{Lc}日均 {data["curDailyAverage"]:,.0f}', color=cs.INK2, fontsize=8)
-    ax.set_xlim(0.5, len(data['next']) + 0.5)
-    ax.set_xlabel(f'{Ln}日期（实线为实际，虚线为 Azure 预测）', fontsize=9, color=cs.INK2)
-    ax.yaxis.set_major_formatter(FuncFormatter(_k))
-    ax.set_ylim(0, peak * 1.15)
-    ax.set_title(f'{Ln}每日费用：实际与预测（USD）', loc='left', fontsize=11, color=cs.INK, pad=10)
-    ax.legend(loc='lower left', frameon=False, fontsize=9, ncol=2, labelcolor=cs.INK2)
-    cs.save(fig, chart_dir / names['forecast'])
+    if 'forecast' in names:   # some subscription's forecast was read; else no chart, and 01 says why
+        fig, ax = cs.figure(10, 4)
+        cs.style(ax)
+        if actual:
+            _line(ax, [d for d, _ in actual], [v for _, v in actual], cs.BLUE, label=f'{Ln}实际')
+        if forecast:
+            head = [actual[-1]] if actual else []
+            _line(ax, [d for d, _ in head + forecast], [v for _, v in head + forecast], cs.BLUE, linestyle=(0, (4, 3)), label=f'{Ln}预测（Azure）')
+        peak = max([v for _, v in actual + forecast] or [1])
+        ax.axhline(data['curDailyAverage'], color=cs.INK2, lw=1, alpha=0.6)
+        ax.text(1, data['curDailyAverage'] + peak * 0.02, f'{Lc}日均 {data["curDailyAverage"]:,.0f}', color=cs.INK2, fontsize=8)
+        ax.set_xlim(0.5, len(data['next']) + 0.5)
+        ax.set_xlabel(f'{Ln}日期（实线为实际，虚线为 Azure 预测）', fontsize=9, color=cs.INK2)
+        ax.yaxis.set_major_formatter(FuncFormatter(_k))
+        ax.set_ylim(0, peak * 1.15)
+        ax.set_title(f'{Ln}每日费用：实际与预测（USD）', loc='left', fontsize=11, color=cs.INK, pad=10)
+        ax.legend(loc='lower left', frameon=False, fontsize=9, ncol=2, labelcolor=cs.INK2)
+        cs.save(fig, chart_dir / names['forecast'])
 
     groups = list(reversed(data['groups']))
     fig, ax = cs.figure(10, 0.5 * len(groups) + 1.4)

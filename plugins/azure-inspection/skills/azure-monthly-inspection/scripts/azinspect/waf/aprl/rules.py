@@ -30,7 +30,10 @@ RULES = {
     'd37db635-157f-584d-9bce-4f6fc8c65ce5': {
         'check': 'R16', 'severity': '中', 'type': 'Microsoft.Network/virtualNetworkGateways',
         'finding': '专线网关只连接了同一对接点的线路，该对接点故障时专线全部中断',
-        'recommendation': '增加来自不同对接点的专线线路，或配置 VPN 作为备用连接'},
+        'recommendation': '增加来自不同对接点的专线线路，或配置 VPN 作为备用连接',
+        # the query sees the circuits only in the subscriptions read: a narrowed scope can hide them (and the finding)
+        # when the chosen subscriptions have an ExpressRoute gateway
+        'related': '专线线路', 'relatedGateway': 'expressroute'},
     '3e115044-a3aa-433e-be01-ce17d67e50da': {
         'check': 'R16', 'severity': '低', 'type': 'Microsoft.Network/virtualNetworkGateways',
         'finding': '专线网关未设置客户控制的维护窗口',

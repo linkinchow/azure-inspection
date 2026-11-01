@@ -78,3 +78,54 @@ class QueryTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CoverageNoteTests(unittest.TestCase):
+    """Coverage notes reach the customer's Excel (检查覆盖): plain Chinese, no English sentences, file names or commit ids."""
+
+    @staticmethod
+    def text_of(node):
+        """A note as the customer reads it: f-string values stand in as 1."""
+        import ast
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            return ''.join(v.value if isinstance(v, ast.Constant) else '1' for v in node.values)
+        if isinstance(node, ast.BinOp):
+            return (CoverageNoteTests.text_of(node.left) or '') + (CoverageNoteTests.text_of(node.right) or '')
+        return None
+
+    @staticmethod
+    def note_texts(tree):
+        """Every note appended, inserted, extended or written as 'notes': [...]."""
+        import ast
+
+        def is_notes(node):
+            return (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value == 'notes') or \
+                   (isinstance(node, ast.Name) and node.id == 'notes')
+        for node in ast.walk(tree):
+            values = []
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ('append', 'extend', 'insert')
+                    and is_notes(node.func.value)):
+                values = node.args[-1:]
+            elif isinstance(node, ast.AugAssign) and is_notes(node.target):
+                values = [node.value]
+            elif isinstance(node, ast.Dict):
+                values = [v for k, v in zip(node.keys, node.values) if isinstance(k, ast.Constant) and k.value == 'notes']
+            for value in values:
+                items = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+                for item in items:
+                    for sub in [item] + [x for x in ast.walk(item) if isinstance(x, (ast.JoinedStr, ast.Constant))]:
+                        text = CoverageNoteTests.text_of(sub)
+                        if text:
+                            yield node.lineno, text
+
+    def test_no_english_or_internal_details(self):
+        import ast
+        english = re.compile(r'(?:\b[A-Za-z0-9][\w/().,;:+-]*\s+){4,}[A-Za-z]')   # four or more English words (or numbers) in a row
+        bad = []
+        for path in sorted((Path(__file__).resolve().parents[1] / 'azinspect' / 'waf').rglob('*.py')):
+            for line, text in self.note_texts(ast.parse(path.read_text(encoding='utf-8'))):
+                if english.search(text) or '.json' in text or '提交' in text:
+                    bad.append(f'{path.parent.name}/{path.name}:{line}: {text[:80]}')
+        self.assertEqual(sorted(set(bad)), [])

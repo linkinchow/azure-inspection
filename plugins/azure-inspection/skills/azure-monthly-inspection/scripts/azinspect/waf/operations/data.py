@@ -80,7 +80,7 @@ class Data:
         self.enabled = enabled(self.subs)
         self.disabled = [s for s in self.subs if s.get('state') != 'Enabled']
         self.sn = {s['id'].lower(): s['name'] for s in self.subs}
-        self.missing = []
+        self.missing, self.missing_cost = [], []
         self._load_own()
         self._load_reused()
 
@@ -149,7 +149,7 @@ class Data:
         path = self.ws.raw(rel)
         if path.exists():
             return read_json(path)
-        self.missing.append(f'成本巡检数据 {rel}')
+        self.missing_cost.append(COST_DATA[rel])
         return None
 
     # ------------------------------------------------------------------ helpers
@@ -175,6 +175,10 @@ class Data:
     def standard_label(self):
         value = str(self.cfg.standard_tag.get('value') or '').strip()
         return 'Terraform' if value.lower() == 'terraform' else value or '标准方式'
+
+
+COST_DATA = {'cost/resources/logs.json': '日志用量（O3）', 'cost/resources/storage.json': '存储账户费用（诊断设置只检查数据库、缓存和入口资源）',
+             'cost/budgets.json': '预算（O9）', 'cost/cost-data.json': '预算（O9）'}
 
 
 def month_cost(row):

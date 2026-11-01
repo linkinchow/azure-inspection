@@ -112,6 +112,7 @@ class CheckTests(unittest.TestCase):
         def add(check, sev, rid_or_sub, rtype, name, environment, finding, evidence, rec, confirm=None, rg=None, sub=None, members=None, key=None):
             found.append({'severity': sev, 'name': name, 'finding': finding, 'confirm': confirm, 'sub': sub, 'evidence': evidence,
                           'members': sorted(m['name'] for m in members or [])})
+            return found[-1]   # like the real add: the finding, which callers may complete (e.g. acceptance)
         run = SimpleNamespace(rows=lambda name: rows.get(name, []), raw=SimpleNamespace(load=lambda name: (files or {}).get(name)), now=NOW,
                               coverage={'R9': common.coverage_entry()}, findings=SimpleNamespace(items=items), add=add,
                               subname=lambda x: {'a': 'app-prod', 'b': 'app-test'}.get(rel_analyze.sid_of(x) if '/' in x else x, x),
@@ -210,6 +211,82 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(any('受影响资源只覆盖部分服务' in x for x in run.coverage['R9']['limits']))
         found, run, _inv = self.run_check(rows, advisor_members=['stlegacy'])
         self.assertFalse(any('AB-1' in f['finding'] for f in found))
+
+
+    def test_retirement_dates_as_ticks(self):
+        # Resource Graph returns todatetime(ImpactMitigationTime) as .NET ticks (100 ns since 0001-01-01) and titles HTML-escaped
+        ticks = lambda d: str(int((d - datetime(1, 1, 1, tzinfo=timezone.utc)).total_seconds()) * 10_000_000)  # noqa: E731
+        st = rid('a', 'Microsoft.Storage/storageAccounts', 'stlegacy')
+        rows = {'retirements': [
+                    {'subscriptionId': 'a', 'trackingId': 'AB-1', 'title': 'Retirement notice: storage &amp; queues', 'status': 'Active',
+                     'retirementDate': ticks(datetime(2026, 12, 31, tzinfo=timezone.utc))},
+                    {'subscriptionId': 'a', 'trackingId': 'CD-2', 'title': 'Action required: feature X &amp; Y', 'status': 'Active',
+                     'retirementDate': ticks(datetime(2027, 3, 1, tzinfo=timezone.utc))}],
+                'retirement_resources': [{'trackingId': 'AB-1', 'targetResourceId': st, 'targetResourceType': 'Microsoft.Storage/storageAccounts'}],
+                'retirement_advisor': []}
+        found, _run, inv = self.run_check(rows)
+        notice = next(f for f in found if 'AB-1' in f['finding'])
+        self.assertIn('将于 2026-12-31 退役', notice['finding'])
+        self.assertIn('storage & queues', notice['finding'])
+        self.assertEqual(notice['severity'], '中')
+        unlinked = next(f for f in found if '未能关联到具体资源' in f['finding'])
+        self.assertIn('Action required: feature X & Y（2027-03-01）', unlinked['finding'])
+        self.assertEqual(sorted(r['retirementDate'] for r in inv['lifecycle']['retirements']), ['2026-12-31', '2027-03-01'])
+        self.assertEqual(lifecycle.parse_date('639263232000000000').date().isoformat(), '2026-09-30')
+
+
+class RetirementQueryTests(unittest.TestCase):
+    """Resources hit by Service Health retirement notices: read without a join (Resource Graph answered the joined query with 400)."""
+
+    def run_arg(self, retirements, impacted=()):
+        queries, saved = [], {}
+
+        def arg(q, ids, check, name):
+            queries.append((name, q))
+            return {'retirements': retirements, 'retirement_resources': list(impacted)}.get(name, []), 200, None
+        me = SimpleNamespace(subs=[{'id': 's1'}], c=SimpleNamespace(arg=arg),
+                             raw=SimpleNamespace(save=lambda rel, data: saved.__setitem__(rel, data)))
+        rel_collect._Collector.arg(me)
+        return dict(queries), saved
+
+    def test_impacted_resources_of_retirement_notices_only(self):
+        queries, saved = self.run_arg([{'trackingId': 'AB-1'}, {'trackingId': "CD'2"}, {'trackingId': 'AB-1'}])
+        q = queries['retirement_resources']
+        self.assertNotIn('join', q.lower())
+        self.assertIn("in~ ('AB-1', 'CD''2')", q)          # each notice once, quotes escaped
+        self.assertEqual(saved['arg/retirement_resources.json']['status'], 200)
+
+    def test_probe_only_when_no_impacted_resource(self):
+        # counts per notice without the filter tell "no resources listed" from "ids that do not match"
+        queries, saved = self.run_arg([{'trackingId': 'AB-1'}])
+        probe = queries['retirement_resources_probe']
+        self.assertIn('summarize', probe)
+        self.assertNotIn('join', probe.lower())
+        self.assertIn('arg/retirement_resources_probe.json', saved)
+        queries, _ = self.run_arg([{'trackingId': 'AB-1'}], impacted=[{'trackingId': 'AB-1', 'targetResourceId': 'x'}])
+        self.assertNotIn('retirement_resources_probe', queries)
+
+    def test_coverage_note(self):
+        notices = [{'subscriptionId': 'a', 'trackingId': t, 'title': t, 'status': 'Active', 'retirementDate': '2026-12-31T00:00:00Z'}
+                   for t in ('AB-1', 'CD-2')]
+        def note(impacted, probe=None, status=200):
+            files = {'arg/retirement_resources.json': {'status': status, 'rows': impacted}}
+            if probe is not None:
+                files['arg/retirement_resources_probe.json'] = {'status': 200, 'rows': probe}
+            run = CheckTests.run_check(CheckTests(), {'retirements': notices, 'retirement_resources': impacted}, files)[1]
+            return '；'.join(run.coverage['R9']['notes'])
+        st = rid('a', 'Microsoft.Storage/storageAccounts', 'st1')
+        self.assertIn('微软退役公告 2 条，其中 1 条列出了本租户受影响的资源（共 1 个）',
+                      note([{'trackingId': 'AB-1', 'targetResourceId': st, 'targetResourceType': 'Microsoft.Storage/storageAccounts'}]))
+        self.assertIn('微软退役公告 2 条，Service Health 没有为它们列出受影响的资源', note([], probe=[]))
+        self.assertIn('未能与公告对应', note([], probe=[{'trackingId': 'cd-2', 'resources': 3}]))
+        self.assertIn('受影响资源未能读取', note([], status=400))
+        self.assertIn('受影响资源查询没有返回结果', note([]))   # collected before the count by notice was kept
+
+    def test_no_notices_no_query(self):
+        queries, saved = self.run_arg([])
+        self.assertNotIn('retirement_resources', queries)
+        self.assertEqual(saved['arg/retirement_resources.json']['rows'], [])
 
 
 if __name__ == '__main__':

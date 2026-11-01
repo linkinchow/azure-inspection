@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from ..common import mixed_env
+from ..common import mixed_env, none_have, subs_phrase
 from .collect import ROLE_IDS
 from .context import SHARED_ACCOUNT, is_prod, is_test, member, parse_dt, subscription_members
 
@@ -79,8 +79,9 @@ def defender(ctx):
     if prod_off:
         with_high = [r for r in prod_off if (r['unhealthyHigh'] or 0) > 0]
         ctx.add('S-I4', '高' if with_high else '中', _many(len(prod_off)), None, None, rt,
-                finding=f'{len(prod_off)} 个生产（推断）订阅的 Defender for Cloud 工作负载保护计划全部是免费层（仅基础 CSPM），其中 {len(with_high)} 个订阅共有 '
-                        f'{sum(r["unhealthyHigh"] or 0 for r in prod_off)} 条高严重性未修复建议，VM、AKS、数据库和存储都没有威胁检测。',
+                finding=f'{subs_phrase((r["subscription"] for r in prod_off), "生产（推断）订阅", "的")} Defender for Cloud 工作负载保护计划全部是免费层（仅基础 CSPM），'
+                        + (f'其中 {len(with_high)} 个订阅' if len(prod_off) > 1 else '')
+                        + f'共有 {sum(r["unhealthyHigh"] or 0 for r in prod_off)} 条高严重性未修复建议，VM、AKS、数据库和存储都没有威胁检测。',
                 evidence={'subscriptions': [_brief(r) for r in prod_off]},
                 recommendation='至少在生产订阅为实际承载的工作负载启用对应计划：有 AKS 的启用 Defender for Containers，有 VM 的启用 Defender for Servers P1，'
                                '有 PostgreSQL/MySQL 的启用开源关系数据库计划，并启用 Defender for Resource Manager；启用前用 Defender 成本估算评估费用，'
@@ -88,20 +89,22 @@ def defender(ctx):
                 confirm='确认这些订阅承载的工作负载，以及启用 Defender 计划的预算。', key='defender-free-prod', **bucket(prod_off))
     if unk_off:
         ctx.add('S-I4', '中', _many(len(unk_off)), None, None, rt,
-                finding=f'{len(unk_off)} 个环境不明的订阅 Defender 工作负载保护全部是免费层，共有 {sum(r["unhealthyHigh"] or 0 for r in unk_off)} 条高严重性未修复建议。',
+                finding=f'{subs_phrase((r["subscription"] for r in unk_off), "环境不明的订阅", "的")} Defender 工作负载保护全部是免费层，'
+                        f'共有 {sum(r["unhealthyHigh"] or 0 for r in unk_off)} 条高严重性未修复建议。',
                 evidence={'subscriptions': [_brief(r) for r in unk_off]},
                 recommendation='先确认这些订阅是否承载生产或敏感数据（如 AI 服务、客户数据）；如是，按生产标准启用对应 Defender 计划。' + NO_CHANGE,
                 confirm='确认这些订阅是否承载生产或敏感数据。', key='defender-free-unknown', **bucket(unk_off))
     if test_off:
         ctx.add('S-I4', '低', _many(len(test_off)), None, None, rt,
-                finding=f'{len(test_off)} 个测试/开发订阅 Defender 工作负载保护全部是免费层。',
+                finding=f'{subs_phrase((r["subscription"] for r in test_off), "测试/开发订阅", "的")} Defender 工作负载保护全部是免费层。',
                 evidence={'subscriptions': [_brief(r) for r in test_off]},
                 recommendation='测试环境可保持免费层，但建议处理高严重性建议，并确保测试环境与生产网络和凭据隔离。' + NO_CHANGE,
                 key='defender-free-test', **bucket(test_off))
     if no_reg:
         ctx.add('S-I4', '中', _many(len(no_reg)), None, None, 'Microsoft.Security',
-                finding=f'{len(no_reg)} 个订阅未注册 Microsoft.Security 资源提供程序，Defender for Cloud 对这些订阅没有任何安全评估和安全分数，'
-                        f'这些订阅中共有 {sum(r["workloadCounts"]["cognitive"] for r in no_reg)} 个 AI/认知服务账户。',
+                finding=f'{subs_phrase((r["subscription"] for r in no_reg), "订阅", "未注册")} Microsoft.Security 资源提供程序，Defender for Cloud 对'
+                        f'{"这些订阅" if len(no_reg) > 1 else "该订阅"}没有任何安全评估和安全分数，'
+                        f'其中共有 {sum(r["workloadCounts"]["cognitive"] for r in no_reg)} 个 AI/认知服务账户。',
                 evidence={'subscriptions': [{'subscription': r['subscription'], 'pricingsHttp': r['pricingsHttp'],
                                              'workloadCounts': {k: v for k, v in r['workloadCounts'].items() if v}} for r in no_reg]},
                 recommendation='在这些订阅注册 Microsoft.Security 资源提供程序（免费基础 CSPM 即可获得安全建议）；如承载生产 AI 服务，可评估启用 Defender for AI 服务。' + NO_CHANGE,
@@ -109,7 +112,8 @@ def defender(ctx):
     no_contact = [r for r in matrix if r['securityContactsConfigured'] is False]
     if no_contact:
         ctx.add('S-I4', '低', _many(len(no_contact)), None, None, 'Microsoft.Security/securityContacts',
-                finding=f'{len(no_contact)} 个订阅都没有配置 Defender for Cloud 安全联系人和告警邮件通知，出现高危告警时没有人会收到邮件。',
+                finding=f'{none_have(r["subscription"] for r in no_contact)}配置 Defender for Cloud 安全联系人和告警邮件通知，'
+                        '出现高危告警时没有人会收到邮件。',
                 evidence={'subscriptions': [r['subscription'] for r in no_contact]},
                 recommendation='为所有订阅配置安全联系人（运维/安全值班邮件组）并开启高严重性告警通知，可用 Azure Policy 批量配置。' + NO_CHANGE,
                 key='security-contacts', **bucket(no_contact))
@@ -119,7 +123,7 @@ def defender(ctx):
         [{'recommendation': k, 'subscriptions': len(v['subs']), 'affectedResources': len(v['resources'])} for k, v in top.items()],
         key=lambda x: -x['affectedResources'])[:20]
     if no_reg:
-        ctx.notes['S-I4'].append(f'{len(no_reg)} 个订阅未注册 Microsoft.Security（pricings 返回 {sorted({r["pricingsHttp"] for r in no_reg}, key=str)}），不是权限拒绝。')
+        ctx.notes['S-I4'].append(f'{subs_phrase((r["subscription"] for r in no_reg), "订阅", "未注册")} Microsoft.Security（pricings 返回 {sorted({r["pricingsHttp"] for r in no_reg}, key=str)}），不是权限拒绝。')
     ctx.notes['S-I4'].append('安全评估按订阅用 ARM 列出 assessments。' + (f'已注册但评估数为 0 的订阅：{"、".join(zero)}（可能未完成评估或无适用资源，需确认）。' if zero else ''))
     return assessments
 
@@ -223,10 +227,11 @@ def _root(ctx, root_owner, root_uaa):
     shared = [n for n in shared if n and SHARED_ACCOUNT.search(n)]
     kinds = sorted({(ctx.gobj.get(p) or {}).get('type', '').split('.')[-1] or '未解析' for p in list(root_owner) + list(root_uaa)})
     like = f'（其中有名称像共享账户的 {"、".join(repr(n) for n in shared)}）' if shared else ''
-    ctx.add('S-I5', '高', f'租户根管理组（继承到全部 {len(ctx.enabled)} 个已启用订阅）', None, 'Tenant Root Group', 'Microsoft.Management/managementGroups',
+    ctx.add('S-I5', '高', '租户根管理组（继承到全部订阅）', None, 'Tenant Root Group', 'Microsoft.Management/managementGroups',
             {'value': 'prod', 'label': '生产', 'basis': '根管理组覆盖所有订阅'},
-            finding=f'租户根管理组直接给 {len(root_owner)} 个用户账户分配了 Owner{like}，另有 {len(root_uaa)} 个用户在根范围 \'/\' 持有 User Access Administrator'
-                    '（通常是全局管理员“提升访问”后未撤销），这些账户可以控制全部订阅。',
+            finding='；'.join(([f'租户根管理组直接给 {len(root_owner)} 个用户账户分配了 Owner{like}'] if root_owner else []) +
+                             ([f'{len(root_uaa)} 个用户在根范围 \'/\' 持有 User Access Administrator（通常是全局管理员“提升访问”后未撤销）']
+                              if root_uaa else [])) + '，这些账户可以控制全部订阅。',
             evidence={'rootMgOwnerCount': len(root_owner), 'sharedLikeOwnerNames': shared, 'rootScopeUserAccessAdministratorCount': len(root_uaa),
                       'principalTypes': kinds},
             recommendation='确认这些账户是否多人共用；共用账户应改为个人账户 + Entra 组授权并强制 MFA。根管理组 Owner 收敛到 2-3 个管理员/紧急账户并纳入 PIM；'

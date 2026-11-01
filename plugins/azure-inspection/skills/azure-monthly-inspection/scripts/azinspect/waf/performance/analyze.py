@@ -1114,9 +1114,9 @@ class Analyzer:
             names = sorted({i['resourceName'] for i in items})
             subs = one_or_many(i['subscriptionName'] for i in items)
             if 'Kubernetes version' in problem:
-                notes.append(f"“{problem}” ×{len(items)}（{', '.join(names)}）：与可靠性检查的版本问题重复，不重复列出。")
+                notes.append(f"Advisor 提示 {len(names)} 个 AKS 集群的 Kubernetes 版本不受支持（{'、'.join(names)}）：与可靠性检查的版本问题重复，不重复列出。")
             elif 'SDK version' in problem:
-                notes.append(f"“{problem}” ×{len(items)}：管理工具使用的 SDK/API 版本，不影响运行性能，不列为问题。")
+                notes.append(f"Advisor 提示 {len(items)} 条 SDK/API 版本建议：属于管理工具，不影响运行性能，不列为问题。")
             elif 'table stats reset' in problem:
                 i = items[0]
                 pg = next((r for r in self.data.rows('postgres') if r['name'] == i['resourceName']), None)
@@ -1139,14 +1139,14 @@ class Analyzer:
                          sub=subs, rg=None, members=[member(i['resourceName'], 'Microsoft.Compute/disks', i['subscriptionName']) for i in items],
                          key='advisor-premium-ssd-v2')
             else:
-                notes.append(f"“{problem}” ×{len(items)}：仅供参考。")
+                notes.append(f"Advisor 其他性能建议 {len(items)} 条（英文原文：{problem}），仅供参考。")
 
     # ------------------------------------------------------------------ run
     def annotate_rightsizing(self):
         """P1/P4 machines that 02 advises to downsize: say so in the finding, so 02 (smaller) and 04 (busy) are read together.
         Uses findings/vm/recommendations.json when the VM analysis ran first (`analyze --part all` does)."""
         path = self.ws.month_dir('findings') / 'vm' / 'recommendations.json'
-        if not path.exists():
+        if not path.exists() or '02' not in self.cfg.reports:   # a left-out 02 may have older results in the month folder
             return
         from ...vm.wording import direction_text
         down = {str(r['name']).lower(): r for r in read_json(path) if r.get('status') == '建议试点调整'}

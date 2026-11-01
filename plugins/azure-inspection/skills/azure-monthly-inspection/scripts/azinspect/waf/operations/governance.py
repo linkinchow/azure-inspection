@@ -101,7 +101,8 @@ def check_locks(d, out, aks):
         return total
     labels = dict(TYPE_LABEL, **{'microsoft.storage/storageaccounts': '存储账户（费用前 10 + tfstate）'})
     bytype = collections.Counter(labels.get(t['type'], t['type']) for t in no_lock)
-    out.add('O8', '中', (f"{readable} 个可读订阅中没有任何资源锁" if total == 0 else f"{readable} 个订阅中一共只有 {total} 个资源锁")
+    where = '所查订阅' if readable == 1 else f'{readable} 个可读订阅'
+    out.add('O8', '中', (f"{where}中没有任何资源锁" if total == 0 else f"{where}中一共只有 {total} 个资源锁")
             + f"，{len(no_lock)} 个关键生产资源（{'、'.join(f'{k} {v} 个' for k, v in bytype.most_common())}）都没有删除锁，"
             "误操作或脚本错误可能直接删除集群、数据库或存储（备份情况见可靠性检查 R6、R7）。",
             '对生产数据库、存放业务数据的存储账户、Key Vault、核心 VNet 和状态存储账户加 CanNotDelete 锁（不影响日常读写与扩缩容）；AKS 集群锁会阻止节点资源组的部分操作，'
@@ -199,7 +200,8 @@ def check_budgets(d, out, inventory):
         return
     tail = (f"，另 {len(with_budget)} 个（{'、'.join(with_budget)}）只有年度预算" if with_budget and len(annual_only) == len(with_budget)
             else f"，另 {len(with_budget)} 个（{'、'.join(with_budget)}）已有预算" if with_budget else '')
-    out.add('O9', '低', f"有费用的 {len(queried)} 个订阅中 {len(without)} 个没有任何预算或费用告警{tail}，"
+    head = f"订阅 {without[0]} 没有任何预算或费用告警" if len(queried) == 1 else f"有费用的 {len(queried)} 个订阅中 {len(without)} 个没有任何预算或费用告警"
+    out.add('O9', '低', f"{head}{tail}，"
             "月内费用突增（如日志量暴涨、误开大规格资源）要到月底看账单才发现。",
             '为每个生产订阅设置月度预算（按近 3 个月平均值的 110%）并配置 80%/100% 实际值和 100% 预测值通知到运维和财务；同时启用成本异常检测通知；' + NO_CHANGE,
             subscription=f"{len(without)} 个订阅", resource_type='Microsoft.Consumption/budgets', environment=mixed_env([d.sub_env(n) for n in without]),
@@ -240,8 +242,9 @@ def check_advisor(d, out, inventory):
     misc = [a for a in summary if a['recommendation'] in ADVISOR_MISC]
     if redis or misc:
         subs = sorted({s for a in redis + misc for s in a['bySubscription'] if s})
-        out.add('O10', '低', f"Advisor 其余卓越运营建议：{redis[0]['count'] if redis else 0} 个 Azure Cache for Redis 实例被标为高影响“迁移到 Azure Managed Redis”，"
-                f"另有 {sum(a['count'] for a in misc)} 条中低影响建议（虚拟机默认出站、AKS 临时 OS 盘/自动扩缩容/新一代机型、Redis VNet 注入）。",
+        parts = ([f"{redis[0]['count']} 个 Azure Cache for Redis 实例被标为高影响“迁移到 Azure Managed Redis”"] if redis else []) + \
+                ([f"{sum(a['count'] for a in misc)} 条中低影响建议（虚拟机默认出站、AKS 临时 OS 盘/自动扩缩容/新一代机型、Redis VNet 注入）"] if misc else [])
+        out.add('O10', '低', f"Advisor 其余卓越运营建议：{'，另有 '.join(parts)}。",
                 '把 Redis 迁移纳入明年计划（VNet 注入的实例先评估改为私有终结点）；虚拟机显式配置出站方式（NAT 网关）以免默认出站退役后断网；'
                 '其余 AKS 建议在下次节点池轮换时一并处理；' + NO_CHANGE,
                 subscription='、'.join(subs[:4]) + (' 等' if len(subs) > 4 else ''), resource_name='Advisor 卓越运营建议（其余）', resource_type='多种',

@@ -121,7 +121,8 @@ def audit(ws, period, log=print):
     wb.close()
     md = (out / f'{stem(period)}.md').read_text(encoding='utf-8')
     assert f'{comparison["cur"]:,.2f}' in md and f'{comparison["prev"]:,.2f}' in md, 'Markdown 总额与模型不一致'
-    for rel in (f'charts/{v}' for v in cost_charts.files(labels, cost_charts.group_label(model)).values()):
+    data = cost_charts.chart_data(model, {'forecast': forecast, 'region': region}, period)
+    for rel in (f'charts/{v}' for v in cost_charts.expected_charts(labels, cost_charts.group_label(model), data).values()):
         assert (out / rel).exists() and f']({rel})' in md, rel
     compact = ''.join(md.split())
     assert '预测代替历史费用' in compact and f'不是{Lc}实际费用减少' in compact

@@ -86,6 +86,10 @@ def _writes(permissions) -> bool:
     return any(a == '*' or a.endswith(('/write', '/delete')) or a.endswith('/*') and a != 'microsoft.support/*' for a in actions)
 
 
+# roles that can write only quota or support requests: named apart from roles that change resources
+LOW_RISK_ROLES = {'Quota Request Operator', 'Support Request Contributor'}
+
+
 def _roles(client, object_id, sub_ids, names):
     """Roles the account holds (directly, through groups or inherited) on each subscription in scope; flags roles that can write."""
     if not object_id:
@@ -104,16 +108,19 @@ def _roles(client, object_id, sub_ids, names):
                 props = (d or {}).get('properties') or {}
                 defs[rid] = {'role': props.get('roleName') or rid.rsplit('/', 1)[-1], 'writes': _writes(props.get('permissions')) if d else None}
             rows.append({'subscription': names.get(sid, sid), 'scope': a['properties'].get('scope'), **defs[rid]})
-    write = sorted({r['role'] for r in rows if r['writes']})
-    subs = sorted({r['subscription'] for r in rows if r['writes']})
+    low = sorted({r['role'] for r in rows if r['writes'] and r['role'] in LOW_RISK_ROLES})
+    write = sorted({r['role'] for r in rows if r['writes'] and r['role'] not in LOW_RISK_ROLES})
+    subs = sorted({r['subscription'] for r in rows if r['writes'] and r['role'] not in LOW_RISK_ROLES})
+    if low:
+        print(f'提示：该账号有只能提交配额申请或支持工单的角色（{"、".join(low)}），不能修改资源，风险较低。')
     if write:
         print(f'注意：该账号在 {len(subs)} 个订阅有可写角色（{"、".join(write)}）。巡检脚本只发读请求，'
               '但建议改用读者等只读角色；由 AI agent 执行巡检时，可写角色的风险更高。')
-    elif rows:
+    elif rows and not low:
         print('角色核对：只有只读角色。')
     if denied:
         print(f'  {len(denied)} 个订阅的角色分配读取失败，未能核对是否有可写角色')
-    return {'read': not denied, 'assignments': rows, 'writeRoles': write, 'writeSubscriptions': subs, 'denied': denied}
+    return {'read': not denied, 'assignments': rows, 'writeRoles': write, 'lowRiskRoles': low, 'writeSubscriptions': subs, 'denied': denied}
 
 
 def cmd_access_check(args) -> int:
@@ -145,7 +152,11 @@ def cmd_access_check(args) -> int:
         status, _data, error = client.request('POST', f'https://management.azure.com/subscriptions/{probe}/providers/Microsoft.CostManagement/query?api-version=2023-11-01',
                                               'access', 'cost-management', body=body)
         result['costManagement'] = {'probeSubscription': probe, 'status': status, 'error': error}
-        print('费用读取（Cost Management）：' + ('通过' if status == 200 else f'失败（{status} {error}），月度成本巡检需要“成本管理读者”或“读者”权限'))
+        needed = bool({'01', '02'} & set(cfg.reports))   # 01 costs, 02 RI/SP coverage; 04 only narrows a few checks without it
+        result['costManagement']['neededByChosenReports'] = needed
+        print('费用读取（Cost Management）：' + ('通过' if status == 200 else
+              f'失败（{status} {error}），01 月度成本和 02 虚拟机规格需要“成本管理读者”或“读者”权限' if needed else
+              f'失败（{status} {error}）；所选报告不含 01、02，不影响本次巡检'))
         result['roles'] = _roles(client, identity.get('objectId'), in_scope, {r['subscriptionId']: r['displayName'] for r in rows})
     write_json(ws.access_dir / 'access-check.json', result)
     ws.save_calls('access-check', client.calls)
@@ -171,28 +182,38 @@ def _narrative(ws, report):
     return read_json(path) if path.exists() else {}
 
 
-COLLECT_ORDER = ('vm', 'cost', 'waf', 'peer')
-
-
 def cmd_collect(args) -> int:
-    """Exit code 1 when a WAF pillar failed. An interrupted `--part all` lists the parts still to collect, peer included:
-    users tend to rerun only cost and waf, and 05 then lacks resource creation times."""
+    """Collects what the reports chosen in customer.yaml (report.include) need. Exit code 1 when a WAF pillar failed.
+    An interrupted `--part all` lists the parts still to collect: users tend to rerun only cost and waf, and 05 then
+    lacks resource creation times."""
+    from .core.reuse import Reuse
+    from .selection import collect_plan
+    from .waf.pipeline import parse
     ws, period = _month_workspace(args)
     cfg, _tokens, client = _client(ws)
+    plan = collect_plan(cfg.reports, args.part, parse(args.pillars), cfg.groups)
+    if not plan:
+        print(f'所选报告（{"、".join(cfg.reports)}）不需要 --part {args.part} 的数据，跳过（见 customer.yaml 的 report.include）')
+        return 0
     command = f'collect --workspace "{ws.root}" --month {period.current.key}'
-    parts = COLLECT_ORDER if args.part == 'all' else tuple(p for p in COLLECT_ORDER if p == args.part)
+    parts = [part for part, _mode in plan]
     done, failed = [], []
     try:
-        for part in parts:
+        for part, mode in plan:
             if part == 'vm':
                 from .vm.collect import collect
-                collect(ws, cfg, client, period)
-            elif part == 'cost':
+                collect(ws, cfg, client, period, inventory_only=mode == 'inventory')
+            elif part == 'cost' and mode == 'full':
                 from .cost.pipeline import collect
                 collect(ws, cfg, client, period, resume=args.resume)
+            elif part == 'cost':
+                from .cost.commitments import collect_vm_coverage
+                if not ws.raw('vm/inventory/subscriptions.json').exists():
+                    raise SystemExit(f'02 要用的 RI/SP 覆盖按虚拟机清单读取，先运行：{command} --part vm')
+                collect_vm_coverage(ws, client, period, reuse=Reuse(args.resume))
             elif part == 'waf':
-                from .waf.pipeline import collect, parse
-                failed = collect(ws, cfg, client, pillars=parse(args.pillars)) or []
+                from .waf.pipeline import collect
+                failed = collect(ws, cfg, client, pillars=mode) or []
             else:
                 from .peer import collect
                 from .waf.common import window
@@ -206,7 +227,8 @@ def cmd_collect(args) -> int:
                 print(f'  {command} --part {p}' + (' --resume' if p == 'cost' else ''))
             if 'cost' in left:
                 print('  费用部分加 --resume：已成功读取的查询（7 天内）会直接复用，只读取缺少或失败的部分。')
-            print('  同类对比（peer）也要补采，否则 05 没有资源创建时间。')
+            if 'peer' in left:
+                print('  同类对比（peer）也要补采，否则 05 没有资源创建时间。')
         elif left == ['cost']:
             print(f'费用采集中断。重跑时加 --resume，已成功读取的查询会直接复用：\n  {command} --part cost --resume')
         raise
@@ -219,55 +241,79 @@ def cmd_collect(args) -> int:
     return 0
 
 
+def _chosen(ws, part, step):
+    """customer.yaml and whether `step` runs `part` for the chosen reports (prints why not)."""
+    from .core import config as config_mod
+    from .selection import runs, skipped
+    cfg = config_mod.load(ws.config_path)
+    ok = runs(cfg.reports, part, step)
+    if not ok and part != 'summary':
+        print(skipped(cfg.reports, part))
+    return cfg, ok
+
+
 def cmd_analyze(args) -> int:
     ws, period = _month_workspace(args)
     client = None
     if not args.offline:
         _cfg, _tokens, client = _client(ws)
-    if args.part in ('vm', 'all'):
-        from .vm.pipeline import analyze
-        analyze(ws, client, args.price_date, fetch_prices=not args.offline)
-    if args.part in ('cost', 'all'):
-        from .cost.pipeline import analyze
-        analyze(ws, period)
-    if args.part in ('waf', 'all'):
-        from .core import config as config_mod
-        from .waf.pipeline import analyze, parse
-        analyze(ws, config_mod.load(ws.config_path), pillars=parse(args.pillars))
-    if args.part in ('peer', 'all'):
-        from .core import config as config_mod
-        from .peer import analyze
-        analyze(ws, config_mod.load(ws.config_path))
+    parts = PARTS[:4] if args.part == 'all' else (args.part,)
+    for part in ('vm', 'cost', 'waf', 'peer'):
+        if part not in parts:
+            continue
+        cfg, ok = _chosen(ws, part, 'analyze')
+        if not ok:
+            continue
+        if part == 'vm':
+            from .vm.pipeline import analyze
+            analyze(ws, client, args.price_date, fetch_prices=not args.offline)
+        elif part == 'cost':
+            from .cost.pipeline import analyze
+            analyze(ws, period)
+        elif part == 'waf':
+            from .selection import waf_pillars
+            from .waf.pipeline import analyze, parse
+            analyze(ws, cfg, pillars=waf_pillars(cfg.reports, parse(args.pillars), groups=cfg.groups))
+        else:
+            from .peer import analyze
+            analyze(ws, cfg)
     return 0
 
 
 def cmd_build(args) -> int:
-    from .core import config as config_mod
-    from .package import record_build
+    from .package import record_build, snapshot
+    from .selection import save as save_selection
     ws, period = _month_workspace(args)
-    cfg = config_mod.load(ws.config_path)
-    started = time.time()
-    if args.part in ('vm', 'all'):
-        from .vm.audit import audit
-        from .vm.report import build
-        build(ws, cfg, _narrative(ws, '02'))
-        audit(ws)
-    if args.part in ('cost', 'all'):
-        from .cost.audit import audit
-        from .cost.report import build
-        build(ws, cfg, period, _narrative(ws, '01'))
-        audit(ws, period)
-    if args.part in ('peer', 'all'):   # before 03/04: their issue lists take the peer columns from findings/peer/links.json
-        from .peer import report as peer_report
-        if peer_report.build(ws, cfg, _narrative(ws, '05')):
-            peer_report.audit(ws)
-    if args.part in ('waf', 'all'):
-        from .waf.pipeline import build
-        build(ws, cfg, {'03': _narrative(ws, '03'), '04': _narrative(ws, '04')})
-    if args.part in ('summary', 'all'):   # last: 00 reads every other report's numbers
-        from .summary import build as build_summary
-        build_summary(ws, cfg, period, _narrative(ws, '00'))
-    record_build(ws, started)
+    started, before, built = time.time(), snapshot(ws), []
+    parts = ('vm', 'cost', 'peer', 'waf', 'summary') if args.part == 'all' else (args.part,)
+    for part in parts:   # peer before 03/04: their issue lists take the peer columns; summary last: 00 reads the others
+        cfg, ok = _chosen(ws, part, 'build')
+        save_selection(ws, cfg.reports, cfg.groups)
+        if not ok:
+            continue
+        built += {'vm': ['02'], 'cost': ['01'], 'peer': ['05'], 'summary': ['00'],
+                  'waf': [c for c in ('03', '04') if c in cfg.reports]}[part]
+        if part == 'vm':
+            from .vm.audit import audit
+            from .vm.report import build
+            build(ws, cfg, _narrative(ws, '02'))
+            audit(ws)
+        elif part == 'cost':
+            from .cost.audit import audit
+            from .cost.report import build
+            build(ws, cfg, period, _narrative(ws, '01'))
+            audit(ws, period)
+        elif part == 'peer':
+            from .peer import report as peer_report
+            if peer_report.build(ws, cfg, _narrative(ws, '05')):
+                peer_report.audit(ws)
+        elif part == 'waf':
+            from .waf.pipeline import build
+            build(ws, cfg, {'03': _narrative(ws, '03'), '04': _narrative(ws, '04')}, codes=[c for c in ('03', '04') if c in cfg.reports])
+        else:
+            from .summary import build as build_summary
+            build_summary(ws, cfg, period, _narrative(ws, '00'))
+    record_build(ws, started, before, built)
     return 0
 
 
@@ -275,7 +321,7 @@ def cmd_crosscheck(args) -> int:
     from .crosscheck import run
     ws, _period = _month_workspace(args)
     out = run(ws)
-    return 0 if all(r['status'] in ('通过', '已处理', '需人工确认', '未检查') for r in out['rules']) else 2
+    return 0 if all(r['status'] in ('通过', '已处理', '需人工确认', '未检查', '不适用') for r in out['rules']) else 2
 
 
 def cmd_package(args) -> int:
@@ -287,8 +333,11 @@ def cmd_package(args) -> int:
 
 
 def cmd_quality_check(args) -> int:
-    from .core.quality import check_markdown, check_tree
+    from .core.quality import check_markdown, check_tree, left_out
     target = Path(args.path)
+    skipped = left_out(target) if target.is_dir() else []
+    if skipped:
+        print(f'本月未选择这些报告，不检查（package 也不打包）：{"、".join(skipped)}')
     results = check_tree(target) if target.is_dir() else ({target.name: check_markdown(target)} if check_markdown(target) else {})
     for name, issues in results.items():
         print(name)

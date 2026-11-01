@@ -256,7 +256,7 @@ def r1(run):
                     {'podSubnet': info, 'worstCaseAtMax': worst_max}, '实际 Pod IP 按需分配，短期风险低；扩容前在 Azure 门户核对 Pod 子网实际分配量。',
                     '确认 Pod 子网实际已分配 IP 数。')
     run.inventory['R1'] = {'nodeSubnets': inv, 'podSubnets': pod_inv}
-    run.coverage['R1']['notes'].append('Node-subnet usage from VNet usages API (matches subnet ipConfigurations). Pod-subnet usage for dynamic Azure CNI is not exposed via ARM; worst-case estimated.')
+    run.coverage['R1']['notes'].append('节点子网用量来自虚拟网络用量接口（与子网的 IP 配置一致）；动态 Azure CNI 的 Pod 子网用量无法通过资源管理接口读取，按最坏情况估算。')
 
 
 # ====================================================================== R2 system node pools
@@ -301,7 +301,7 @@ def r3(run):
     types = ('aks', 'vms', 'mysql', 'postgres', 'redis', 'redisenterprise', 'mongoclusters', 'appgw', 'lbs', 'pips', 'natgw', 'vnetgw')
     ok = len([x for x in types if (run.raw.load(f'arg/{x}.json') or {}).get('status') == 200])
     run.coverage['R3'].update(attempted=len(types), succeeded=ok)
-    run.coverage['R3']['notes'].append('Resource Graph queries (one per resource type) + ARM AKS agentPools; counted per query.')
+    run.coverage['R3']['notes'].append('按资源类型逐一用 Resource Graph 查询，并读取 AKS 节点池；按查询次数统计。')
     inv = {'aksPools': [], 'vms': [], 'appgw': [], 'natgw': [], 'publicIpsNoZone': {}, 'gateways': []}
     for e in run.clusters:
         cl = e['cluster']
@@ -396,7 +396,7 @@ def r4(run):
 # ====================================================================== R5 databases and caches
 def r5(run):
     run.cover(['R5'], 'R5')
-    run.coverage['R5']['notes'].append('MySQL/PG HA/backup from Resource Graph + ARM GET; AMR clusters/databases and Mongo vCore via ARM GET.')
+    run.coverage['R5']['notes'].append('MySQL、PostgreSQL 的高可用和备份来自 Resource Graph 和资源详情接口；Azure Managed Redis 集群和数据库、Mongo vCore 通过资源详情接口读取。')
     inv = {'mysql': [], 'postgres': [], 'redis': [], 'amr': [], 'mongo': []}
     geo_off = []
     for kind in ('mysql', 'postgres'):
@@ -536,8 +536,8 @@ def r6(run):
             run.add('R6', '低', r['id'], 'Microsoft.Storage/storageAccounts', r['name'], se, f"存储账户 {r['name']}（{gib:,.0f} GiB，LRS）没有开启 Blob 软删除。",
                     row, '开启 Blob 软删除和容器软删除；如为迁移遗留的临时账户，确认后清理。', '确认该账户是否仍在使用。')
     run.inventory['R6'] = inv
-    run.coverage['R6']['notes'].append(f"UsedCapacity from Azure Monitor (last hourly value in the 2 days before {run.window.get('snapshot')}); "
-                                       'FileStorage accounts do not support blobServices (HTTP 400 expected).')
+    run.coverage['R6']['notes'].append(f"存储用量来自 Azure Monitor（{run.window.get('snapshot')} 前 2 天内最后一个小时值）；"
+                                       'FileStorage 类型的存储账户不支持读取 Blob 服务设置，返回 400 属正常。')
 
 
 # ====================================================================== R7 VM backup
@@ -577,7 +577,7 @@ def r7(run):
                 members=[member(x['name'], VM, s) for x, _ in lst], key='vm-backup')
     run.inventory['R7'] = {'recoveryServicesVaults': rs_count, 'backupVaults': bv_count, 'protectedItems': len(protected), 'nonAksVms': len(inv), 'vms': inv,
                            'note': f'{len(run.enabled)} 个可读订阅中发现 {rs_count} 个恢复服务保管库、{bv_count} 个备份保管库；AKS 节点（MC_ 资源组）不在此统计。'}
-    run.coverage['R7']['notes'].append(f'Vault lists: {rs_count} Recovery Services vaults, {bv_count} Backup vaults, {len(protected)} protected items.')
+    run.coverage['R7']['notes'].append(f'备份保管库清单：{rs_count} 个恢复服务保管库、{bv_count} 个备份保管库、{len(protected)} 个受保护项。')
 
 
 # ====================================================================== R8 outbound connectivity
@@ -709,18 +709,20 @@ def r9(run):
         inv['clusters'].append(row)
         if vinfo is None or 'KubernetesOfficial' not in plans:
             lts_note = f'该小版本只剩 LTS 长期支持，而 LTS 需要 Premium 层，集群当前为 {tier} 层' if 'AKSLongTermSupport' in plans else '该小版本已不在区域可用版本列表中'
-            run.add('R9', '低' if nonprod(ce) else '中', cl['id'], CLUSTER, cl['name'], ce,
+            item = run.add('R9', '低' if nonprod(ce) else '中', cl['id'], CLUSTER, cl['name'], ce,
                     f"集群 {cl['name']} 运行 Kubernetes {ver}，已超出社区支持范围（{lts_note}；当前区域正式支持 {', '.join(official)}），出现问题时 Azure 支持有限，且下次升级需要连续跨多个小版本。",
                     row, f"按小版本逐级升级到 {official[0] if official else '受支持版本'} 或更高（先在测试集群验证；升级前用 AKS 门户“诊断和解决问题”中的弃用 API 检测，或集群内的工具检查是否仍在使用将被移除的 API）；升级前先确认节点子网有足够 IP 容纳升级缓冲节点（见 R1）。",
                     '确认该集群是否为生产集群。' if ce['value'] == 'unknown' else None, key=f"{cl['id']}|k8s-version")
+            item['acceptance'] = '集群版本在标准支持期内，并开启自动升级'
         old = [p for p in pools if (p['imageAgeDays'] or 0) > 120]
         if old:
             oldest = max(old, key=lambda p: p['imageAgeDays'])
-            run.add('R9', '中' if (oldest['imageAgeDays'] > 180 and not nonprod(ce)) else '低', cl['id'], CLUSTER, cl['name'], ce,
+            item = run.add('R9', '中' if (oldest['imageAgeDays'] > 180 and not nonprod(ce)) else '低', cl['id'], CLUSTER, cl['name'], ce,
                     f"集群 {cl['name']} 节点操作系统自动更新通道为 {aup.get('nodeOSUpgradeChannel')}，{len(old)} 个节点池的节点镜像超过 120 天未更新（最旧 {oldest['pool']} 为 {oldest['nodeImageVersion']}，约 {oldest['imageAgeDays']} 天），缺少内核和安全修复，且越久不升级、一次升级的变化越大。",
                     {'nodeOSUpgradeChannel': aup.get('nodeOSUpgradeChannel'), 'upgradeChannel': aup.get('upgradeChannel'), 'pools': old, 'envBasis': ce['basis']},
                     '把节点操作系统升级通道设为 NodeImage（或 SecurityPatch）并配置维护窗口，先在测试集群执行；同时规划 Ubuntu 22.04 到 24.04 的迁移（Kubernetes 1.35 起节点不再支持 22.04）。',
                     key=f"{cl['id']}|node-image")
+            item['acceptance'] = '节点镜像 30 天内更新过，节点操作系统升级通道设为 NodeImage 或 SecurityPatch'
     _advisor(run, inv)
     lifecycle.check(run, inv, member)
     basic_pip = [r['name'] for r in run.rows('pips') if (r.get('sku') or {}).get('name') == 'Basic']
@@ -733,7 +735,7 @@ def r9(run):
 def _advisor(run, inv):
     adv = run.raw.load('advisor-all.json') or {'recommendations': [], 'subscriptions': []}
     recs = adv['recommendations']
-    run.coverage['R9']['notes'].append(f"Advisor: {len(recs)} recommendations across {len(adv['subscriptions'])} subscriptions (all categories saved to advisor-all.json).")
+    run.coverage['R9']['notes'].append(f"读取了 {len(adv['subscriptions'])} 个订阅的 Azure Advisor 建议共 {len(recs)} 条（各类别），从中找出退役和升级类建议。")
     ha = [r for r in recs if r['properties']['category'] == 'HighAvailability']
     inv['advisor'] = {'total': len(recs), 'byCategory': dict(Counter(r['properties']['category'] for r in recs)),
                       'highAvailabilityByProblem': dict(Counter(advisor_problem(r, ADVISOR_NO_TEXT) for r in ha).most_common()),
@@ -843,8 +845,8 @@ def r11(run):
                             'perResource': dict(Counter(kind(x['id']) + '|' + (x['availabilityState'] or f"HTTP {x['status']}") for x in per))}
     run.coverage['R11']['attempted'] += 1
     run.coverage['R11']['succeeded'] += 1
-    run.coverage['R11']['notes'].append(f'Resource Graph healthresources returned {len(h)} VM/VMSS statuses; other types queried per resource. '
-                                        'Mongo vCore returns HTTP 422 (resource type not supported by Resource Health).')
+    run.coverage['R11']['notes'].append(f'Resource Graph 的资源健康记录返回 {len(h)} 条虚拟机和规模集状态，其他类型逐个资源查询；'
+                                        'Mongo vCore 不支持资源健康，返回 422 属正常。')
     # healthresources keeps statuses of deleted resources (e.g. recycled autoscale nodes): those are counted, not reported
     existing, tags = _inventory(run)
     current, stale = [], Counter()
