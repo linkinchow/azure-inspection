@@ -204,8 +204,16 @@ class CheckTests(unittest.TestCase):
         found, run, inv = self.run_check(rows)
         notice = next(f for f in found if 'AB-1' in f['finding'])
         self.assertEqual((notice['severity'], notice['members']), ('中', ['stlegacy']))
+        self.assertEqual(notice['rule'], 'retirement-notice')
+        self.assertIn('retirement-unlinked', run.coverage['R9']['rules'])
         unlinked = next(f for f in found if '未能关联到具体资源' in f['finding'])
         self.assertIn('feature X', unlinked['finding'])
+        self.assertEqual(unlinked['severity'], '中')    # backlog U: graded by the nearest date (feature X within 180 days)
+        # a notice not tied to a resource may not concern the tenant: at most 中, even when its date has passed
+        rows['retirements'].append({'subscriptionId': 'a', 'trackingId': 'GH-4', 'title': 'Retirement notice: past', 'status': 'Active',
+                                    'retirementDate': '2026-09-01T00:00:00Z'})
+        found, _run, _inv = self.run_check(rows)
+        self.assertEqual(next(f for f in found if '未能关联到具体资源' in f['finding'])['severity'], '中')
         self.assertNotIn('far away', unlinked['finding'])
         self.assertEqual(len(inv['lifecycle']['retirements']), 3)
         self.assertTrue(any('受影响资源只覆盖部分服务' in x for x in run.coverage['R9']['limits']))

@@ -92,6 +92,15 @@ def analyze(ws, cfg, log=print):
             c['notes'].append(f'APRL {guid[:8]} 查询失败：{result.get("error")}')
             continue
         rows = result['rows']
+        c.setdefault('rules', []).append(guid[:8])
+        confirm = None
+        if rows and rule.get('overReport') and cfg and (cfg.include or cfg.exclude):
+            confirm = f'本次只检查了所选订阅：{rule["overReport"]}如果建在其他订阅中就读不到，请确认这一项是否确实存在。'
+            c.setdefault('overReport', []).append(guid[:8])
+            text = (f'本次只检查了所选订阅：{rule["overReport"]}如果建在其他订阅中就读不到，“{rule["finding"].split("，")[0]}”这一项'
+                    f'（APRL {guid[:8]}）可能多报，请核对。')
+            c.setdefault('limits', []).append(text)
+            c['notes'].append(text)
         if rule.get('related') and cfg and (cfg.include or cfg.exclude) and _has_gateway(rel, rule.get('relatedGateway')):
             text = (f'本次只检查了所选订阅：{rule["related"]}如果在其他订阅中就读不到，“{rule["finding"].split("，")[0]}”这一项'
                     f'（APRL {guid[:8]}）可能漏报。')
@@ -124,7 +133,8 @@ def analyze(ws, cfg, log=print):
                          resource_id=rows[0].get('id') if len(rows) == 1 else None, environment=environment,
                          evidence={'aprlGuid': guid, 'learnMoreLink': links.get(guid), 'aprlCommit': data.get('aprlCommit'),
                                    'rows': [{k: v for k, v in r.items() if k != 'tags'} for r in rows]},
-                         members=[{'name': n, 'type': rule['type'], 'subscription': sub} for n in names], key=guid)
+                         members=[{'name': n, 'type': rule['type'], 'subscription': sub} for n in names], key=guid, rule=guid[:8],
+                         needs_confirmation=confirm)
     for c in coverage.values():
         c['notes'].insert(0, f'按微软 APRL 规则库（{meta["commitDate"]} 版）查询；测试和开发资源降一级。')
     out = findings.write(ws, window=manifest.get('window'), coverage=coverage,

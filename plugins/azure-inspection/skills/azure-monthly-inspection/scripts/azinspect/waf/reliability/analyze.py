@@ -679,6 +679,7 @@ def _version_key(s):
 
 def r9(run):
     run.cover(['R9', 'R1-R9'], 'R9')
+    run.coverage['R9'].setdefault('rules', []).extend(['aks-version', 'aks-node-image', 'afd-certificate', 'advisor-retirement'])
     versions = run.raw.load('aks/k8s-versions.json') or {}
     inv = {'clusters': [], 'advisor': {}}
     for e in run.clusters:
@@ -714,6 +715,7 @@ def r9(run):
                     row, f"按小版本逐级升级到 {official[0] if official else '受支持版本'} 或更高（先在测试集群验证；升级前用 AKS 门户“诊断和解决问题”中的弃用 API 检测，或集群内的工具检查是否仍在使用将被移除的 API）；升级前先确认节点子网有足够 IP 容纳升级缓冲节点（见 R1）。",
                     '确认该集群是否为生产集群。' if ce['value'] == 'unknown' else None, key=f"{cl['id']}|k8s-version")
             item['acceptance'] = '集群版本在标准支持期内，并开启自动升级'
+            item['rule'] = 'aks-version'
         old = [p for p in pools if (p['imageAgeDays'] or 0) > 120]
         if old:
             oldest = max(old, key=lambda p: p['imageAgeDays'])
@@ -723,6 +725,7 @@ def r9(run):
                     '把节点操作系统升级通道设为 NodeImage（或 SecurityPatch）并配置维护窗口，先在测试集群执行；同时规划 Ubuntu 22.04 到 24.04 的迁移（Kubernetes 1.35 起节点不再支持 22.04）。',
                     key=f"{cl['id']}|node-image")
             item['acceptance'] = '节点镜像 30 天内更新过，节点操作系统升级通道设为 NodeImage 或 SecurityPatch'
+            item['rule'] = 'aks-node-image'
     _advisor(run, inv)
     lifecycle.check(run, inv, member)
     basic_pip = [r['name'] for r in run.rows('pips') if (r.get('sku') or {}).get('name') == 'Basic']
@@ -761,16 +764,18 @@ def _advisor(run, inv):
             days = (datetime.fromisoformat(exp.replace('Z', '+00:00')) - run.now).days
             name = f"{pname}/{d['hostName']}"
             if days < 0:
-                run.add('R9', '高', prof['profileId'], 'Microsoft.Cdn/profiles/customDomains', name, run.env(run.subname(prof['profileId']), pname),
+                cert = run.add('R9', '高', prof['profileId'], 'Microsoft.Cdn/profiles/customDomains', name, run.env(run.subname(prof['profileId']), pname),
                         f"Front Door {pname} 上的自定义域名 {d['hostName']} 使用的客户证书（{cm.get('subject')}）已于 {exp[:10]} 过期（已过期 {-days} 天），如果该域名仍解析到此 Front Door，访问者会看到证书错误。",
                         {'hostName': d['hostName'], 'certificateType': d['tlsSettings'].get('certificateType'), 'expirationDate': exp,
                          'subject': cm.get('subject'), 'useLatestVersion': cm.get('useLatestVersion'), 'issuer': cm.get('certificateAuthority'),
                          'domainValidationState': d.get('domainValidationState'), 'advisor': 'Renew the expired Azure Front Door customer certificate'},
                         '在 Key Vault 中导入续期后的证书新版本（该域名已设置为自动使用最新版本），或改用 Front Door 托管证书；如该域名已不再使用此 Front Door，删除这个自定义域名配置。',
                         f"确认 {d['hostName']} 当前 DNS 是否指向这个 Front Door。", key=name)
+                cert['rule'] = 'afd-certificate'
             elif days < 30:
-                run.add('R9', '中', prof['profileId'], 'Microsoft.Cdn/profiles/customDomains', name, run.env(run.subname(prof['profileId']), pname),
+                cert = run.add('R9', '中', prof['profileId'], 'Microsoft.Cdn/profiles/customDomains', name, run.env(run.subname(prof['profileId']), pname),
                         f"Front Door {pname} 自定义域名 {d['hostName']} 的证书将在 {days} 天后（{exp[:10]}）过期。", {'expirationDate': exp}, '提前续期证书。', key=name)
+                cert['rule'] = 'afd-certificate'
     groups = defaultdict(list)
     for x in retire:
         if not x['problem'].startswith(('Upgrade your AKS cluster', 'Unsupported Kubernetes', 'Renew the expired')):
@@ -780,10 +785,11 @@ def _advisor(run, inv):
         if not text:
             continue
         dates = sorted({x['retirementDate'] for x in lst if x['retirementDate']})
-        run.add('R9', '低', None, lst[0]['type'], ', '.join(sorted({x['resource'] for x in lst})), None,
+        item = run.add('R9', '低', None, lst[0]['type'], ', '.join(sorted({x['resource'] for x in lst})), None,
                 f"Azure Advisor 提示 {len(lst)} 个资源受影响：{text[0]}{'（退役日期 ' + ', '.join(dates) + '）' if dates else ''}。",
                 {'advisorProblem': problem, 'resources': lst}, text[1], sub=', '.join(sorted({x['sub'] for x in lst})), rg=None,
                 members=[member(x['resource'], x['type'], x['sub']) for x in lst], key=f'advisor|{problem}')
+        item['rule'] = 'advisor-retirement'
 
 
 # ====================================================================== R10 quota

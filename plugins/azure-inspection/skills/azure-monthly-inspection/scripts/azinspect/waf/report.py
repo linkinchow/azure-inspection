@@ -100,8 +100,10 @@ def check_note(fs, cov, note=None):
     """The check table's 主要发现: a check with failed reads never reads as 未发现问题."""
     base = note or (default_check_note(fs) if fs else None)
     if not _failed(cov):
-        if cov.get('incomplete'):   # rules that cannot see resources in subscriptions left out (customer.yaml scope)
-            return f'{base or "所选订阅中未发现问题"}；涉及其他订阅的部分可能漏报（见“检查范围与限制”）'
+        # rules that cannot see resources in subscriptions left out (customer.yaml scope): they may miss or over-report
+        if cov.get('incomplete') or cov.get('overReport'):
+            what = '可能漏报或多报' if cov.get('incomplete') and cov.get('overReport') else '可能漏报' if cov.get('incomplete') else '可能多报，请核对'
+            return f'{base or "所选订阅中未发现问题"}；涉及其他订阅的部分{what}（见“检查范围与限制”）'
         return base or '未发现问题'
     if base:
         return f'{base}；部分读取失败，结果可能不完整'
@@ -343,9 +345,17 @@ def _cut(text, limit, more):
         word = lambda c: c.isascii() and (c.isalnum() or c in '._-')  # noqa: E731
         while cut and word(cut[-1]) and word(text[len(cut)]):
             cut = cut[:-1]
-    unit = re.match(r' ?[A-Za-z%]{1,3}(?![A-Za-z])|[台个条项块天%]', text[len(cut):]) if cut[-1:].isdigit() else None
+    number = re.search(r'[\d][\d,.]*$', cut)
+    if number and re.match(r'[\d,.]*\d', text[len(cut):]):   # inside a number: not '1,8'
+        cut = cut[:number.start()]
+    stem = cut.rstrip()
+    unit = re.match(r' ?[A-Za-z%]{1,3}(?![A-Za-z])|[台个条项块天%]', text[len(stem):]) if stem[-1:].isdigit() else None
     if unit:   # '2,460 GB', not '2,460'
-        cut += unit.group()
+        cut = stem + unit.group()
+    if cut.rstrip().endswith(('：', ':')):   # say what the colon introduces: its first item
+        item = re.match(r'[^、，,（(；]{1,40}', text[len(cut.rstrip()):])
+        if item:
+            cut = cut.rstrip() + item.group()
     for opening, close in (('（', '）'), ('(', ')')):
         if cut.count(opening) > cut.count(close) and len(cut) - cut.rfind(opening) <= 4:   # '（目' says nothing
             cut = cut[:cut.rfind(opening)]
@@ -741,8 +751,9 @@ def build(ws, cfg, report, narrative=None, log=print):
             mine = coverage.setdefault(k, {})
             for f in ('attempted', 'succeeded', 'denied', 'otherErrors'):
                 mine[f] = (mine.get(f) or 0) + (c.get(f) or 0)
-            if c.get('incomplete'):
-                mine.setdefault('incomplete', []).extend(c['incomplete'])
+            for key in ('incomplete', 'overReport'):
+                if c.get(key):
+                    mine.setdefault(key, []).extend(c[key])
     limits += [x for x in [failure_limit(coverage)] if x]
     md = markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows, tracked,
                   arch, limits, chosen_scope=subscription_scope(ws, cfg, report), groups=groups, coverage=coverage)

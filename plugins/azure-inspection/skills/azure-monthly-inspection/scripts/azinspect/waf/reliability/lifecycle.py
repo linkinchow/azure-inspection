@@ -208,6 +208,8 @@ def check(run, inv, member, calendar_path: Path = CALENDAR):
     if reviewed is None or (run.now - reviewed).days > REVIEW_DAYS:
         limits.append(f"版本支持日历最后核对于 {data.get('reviewedAt')}，已超过 {REVIEW_DAYS} 天，部分到期日期可能已调整，请更新后重新分析。")
     limits.append('Key Vault 中证书的到期日期只能通过数据面读取，本次未检查；Azure Functions 运行时版本只保存在应用设置中，本次未读取。')
+    run.coverage['R9'].setdefault('rules', []).extend(sorted({f'version-{p}' for p, _v in cal}) +
+                                                      ['appgw-certificate', 'retirement-notice', 'retirement-unlinked'])
     _versions(run, cal, out, member)
     _app_gateway(run, out, member)
     _retirements(run, out, member, limits)
@@ -293,13 +295,14 @@ def _versions(run, cal, out, member):
                 confirm = '确认这些机器是否已启用延长安全更新（如 Windows Server ESU 或 Ubuntu Pro）。'
         text += '。'
         envs = [run.env(sub, r['name'], r.get('tags'), r.get('resourceGroup')) for r in rows]
-        run.add('R9', sev, rows[0]['id'] if n == 1 else None, rows[0]['type'], rows[0]['name'] if n == 1 else f'{n} 个资源',
+        item = run.add('R9', sev, rows[0]['id'] if n == 1 else None, rows[0]['type'], rows[0]['name'] if n == 1 else f'{n} 个资源',
                 envs[0] if n == 1 else _mixed(envs), text,
                 {'calendar': {k: entry.get(k) for k in ('label', 'end', 'extendedEnd', 'source', 'checkedAt')},
                  'resources': [{k: r[k] for k in ('name', 'type', 'resourceGroup', 'setting')} for r in rows]},
                 FAMILY_REC['os' if family == 'os' else 'runtime' if family == 'runtime' else family], confirm, sub=sub,
                 rg=rows[0]['resourceGroup'] if n == 1 else None, members=[member(r['name'], r['type'], sub) for r in rows],
                 key=f'lifecycle|{product}|{version}|{sub}' + ('|vmss' if rows[0]['type'] == VMSS_TYPE else ''))
+        item['rule'] = f'version-{product}'
     unjudged = Counter((x['reason'], x['type']) for x in out['notJudged'])
     if unjudged:
         phrase = {'未识别操作系统版本': '未识别操作系统版本', '未取得运行时版本': '未取得运行时版本',
@@ -333,11 +336,12 @@ def _app_gateway(run, out, member):
                 continue
             sev = '高' if days < 0 else '中'
             when = f'已于 {exp.date()} 过期（已过期 {-days} 天）' if days < 0 else f'将于 {exp.date()} 过期（还有 {days} 天）'
-            run.add('R9', sev, gw['id'], APPGW_TYPE, name, run.env(sub, gw['name'], gw.get('tags'), gw.get('resourceGroup')),
+            cert = run.add('R9', sev, gw['id'], APPGW_TYPE, name, run.env(sub, gw['name'], gw.get('tags'), gw.get('resourceGroup')),
                     f"应用网关 {gw['name']} 上的证书 {c.get('name')}（{subject}）{when}，到期后使用该证书的监听器会出现证书错误。",
                     {'certificate': c.get('name'), 'subject': subject, 'notAfter': exp.isoformat(), 'keyVaultReference': bool(p.get('keyVaultSecretId'))},
                     '续期证书并更新到应用网关（建议改为引用 Key Vault 中的证书并开启自动轮换）；确认没有监听器仍在使用旧证书。', None,
                     key=f"appgw-cert|{gw['id']}|{c.get('name')}")
+            cert['rule'] = 'appgw-certificate'
     if unread:
         run.coverage['R9']['notes'].append(f'{unread} 个应用网关证书未取得到期日期（接口没有返回公钥证书数据，常见于引用 Key Vault 的证书）。')
 
@@ -380,7 +384,7 @@ def _retirements(run, out, member, limits):
             impacted[r['trackingId']][rid.lower()] = r.get('targetResourceType') or '/'.join(rid.split('/providers/')[-1].split('/')[:2])
     advisor_names = {m['name'].lower() for f in run.findings.items if f['check'] == 'R9' and 'advisorProblem' in (f.get('evidence') or {})
                      for m in f.get('members') or [] if m.get('name')}
-    unlinked = []
+    unlinked, unlinked_sev = [], []
     for tid, ev in sorted(events.items(), key=lambda kv: (parse_date(kv[1].get('retirementDate')) or run.now, kv[0])):
         date = parse_date(ev.get('retirementDate'))
         res = impacted.get(tid) or {}
@@ -392,6 +396,7 @@ def _retirements(run, out, member, limits):
             continue
         if not res:
             unlinked.append(record)
+            unlinked_sev.append(sev)
             continue
         names = {rid.rsplit('/', 1)[-1] for rid in res}
         if names <= advisor_names:
@@ -409,13 +414,18 @@ def _retirements(run, out, member, limits):
                 sub='、'.join(subs[:3]) + (' 等' if len(subs) > 3 else ''), rg=None,
                 members=[member(rid.rsplit('/', 1)[-1], t, run.subname(rid)) for rid, t in sorted(res.items())], key=f'retirement|{tid}')
         item['acceptance'] = '在退役日期前按公告完成迁移，Service Health 不再列出受影响的资源'
+        item['rule'] = 'retirement-notice'
     if unlinked:
         lines = '；'.join(f"{x['title']}（{(x['retirementDate'] or '')[:10] or '日期未取得'}）" for x in unlinked[:5])
-        item = run.add('R9', '低', None, '多种', f'{len(unlinked)} 条退役公告', None,
+        # graded by the nearest retirement date among them, at most 中: a notice not tied to a resource may not concern
+        # the tenant (Service Health also files some price notices as retirements)
+        item = run.add('R9', '中' if '高' in unlinked_sev else min(unlinked_sev, key='高中低'.index), None, '多种',
+                       f'{len(unlinked)} 条退役公告', None,
                 f"另有 {len(unlinked)} 条涉及本租户订阅的微软退役公告未能关联到具体资源，例如：{lines}{' 等' if len(unlinked) > 5 else ''}。",
                 {'notices': unlinked}, '在 Azure 门户“服务运行状况 > 健康公告”中按跟踪 ID 查看公告，确认是否在使用相关服务或功能。',
                 '确认这些服务或功能是否在使用。', sub='多个订阅', rg=None, members=[], key='retirement|unlinked')
         item['acceptance'] = '已确认这些服务或功能是否在使用；在用的已在退役日期前完成迁移'
+        item['rule'] = 'retirement-unlinked'
     if events:
         limits.append('微软退役公告的受影响资源只覆盖部分服务，且公告发布后最长约两周才会出现；未关联到资源的公告单独列出。')
         run.coverage['R9']['notes'].append(_retirement_note(run, events, impacted))

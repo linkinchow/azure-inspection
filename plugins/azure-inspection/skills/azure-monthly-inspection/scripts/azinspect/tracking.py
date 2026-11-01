@@ -3,7 +3,8 @@
 Each build stores this month's findings (stable ids) in state/months/<YYYY-MM>.json, overwriting a rerun of the same
 month, and compares with the latest earlier month:
 - 新增问题: id not seen last month and its check already ran last month (the problem is new);
-- 新增检查项发现: the check did not exist or did not run last month (new coverage, not a new problem);
+- 新增检查项发现: the check did not exist or did not run last month, or the rule that found it (coverage 'rules', e.g. R9
+  retirement notices, APRL rules) was added to the check this month (new coverage, not a new problem);
 - 仍未处理: id in both months (severity changes are listed);
 - 已解决: id last month, absent now, and its check ran this month without a failed read;
 - 本月未检查: id last month, absent now, but its check failed (any read: what it did not see may still be there) or was
@@ -31,7 +32,7 @@ def current(ws):
     a pillar left out never counts as run, so its problems from last month are 本月未检查."""
     from .selection import load_groups
     groups = load_groups(ws)
-    findings, ran, failed, partial = {}, set(), set(), {}
+    findings, ran, failed, partial, rules = {}, set(), set(), {}, set()
     base = ws.month_dir('findings') / 'waf'
     for pillar in PILLARS:
         path = base / f'{pillar}.json'
@@ -42,6 +43,7 @@ def current(ws):
         for check, c in (data.get('coverage') or {}).items():
             if (c.get('succeeded') or 0) > 0 and group_of(check) in groups:
                 ran.add(f'{pillar}:{check}')
+                rules.update(f'{pillar}:{check}:{r}' for r in c.get('rules') or [])
             if (c.get('denied') or 0) + (c.get('otherErrors') or 0) > 0:
                 failed.add(f'{pillar}:{check}')
             if c.get('incomplete'):   # rules that could not see resources in subscriptions left out (APRL ids)
@@ -50,9 +52,10 @@ def current(ws):
             if group_of(f['check']) not in groups:
                 continue
             findings[f['id']] = {'check': f['check'], 'source': pillar, 'severity': f['severity'], 'subscription': f.get('subscriptionName'),
-                                 'resource': f.get('resourceName'), 'finding': f['finding'][:200], 'members': _members(f)}
+                                 'resource': f.get('resourceName'), 'finding': f['finding'][:200], 'members': _members(f),
+                                 **({'rule': f['rule']} if f.get('rule') else {})}
             ran.add(f'{pillar}:{f["check"]}')
-    return findings, ran, failed, partial
+    return findings, ran, failed, partial, rules
 
 
 def _key(f):
@@ -97,9 +100,10 @@ def previous_month(ws):
 
 
 def update(ws, log=print):
-    findings, ran, failed, partial = current(ws)
+    findings, ran, failed, partial, rules = current(ws)
     subs = inspected(ws)
-    write_json(ws.state_dir / 'months' / f'{ws.month}.json', {'month': ws.month, 'findings': findings, 'checksRun': sorted(ran), 'subscriptions': subs})
+    write_json(ws.state_dir / 'months' / f'{ws.month}.json', {'month': ws.month, 'findings': findings, 'checksRun': sorted(ran),
+                                                             'rulesRun': sorted(rules), 'subscriptions': subs})
     prev_month = previous_month(ws)
     if not prev_month:
         out = {'month': ws.month, 'previous': None, 'first': True}
@@ -107,7 +111,7 @@ def update(ws, log=print):
         log('跨月跟踪：这是第一次记录，下个月起与本月对比')
         return out
     prev = read_json(ws.state_dir / 'months' / f'{prev_month}.json')
-    before, ran_before = prev['findings'], set(prev.get('checksRun') or [])
+    before, ran_before, rules_before = prev['findings'], set(prev.get('checksRun') or []), set(prev.get('rulesRun') or [])
     _fill_members(ws, prev_month, before)
     subs_before = prev.get('subscriptions')
     # this month reads fewer subscriptions than last month covered (also when last month did not record its scope)
@@ -157,6 +161,9 @@ def update(ws, log=print):
                          **({'previousIds': regrouped[fid]} if fid in regrouped else {})})
         else:
             new_problem = _key(f) in ran_before and not left_out(f, subs_before)
+            known = {r for r in rules_before if r.startswith(_key(f) + ':')}   # none in months recorded before rules were kept
+            if new_problem and f.get('rule') and known and f'{_key(f)}:{f["rule"]}' not in known:
+                new_problem = False     # a rule added to the check this month: new coverage
             rows.append({**plain(f), 'id': fid, 'status': '新增问题' if new_problem else '新增检查项发现'})
     from .selection import load_groups
     groups = load_groups(ws)

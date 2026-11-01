@@ -3,7 +3,7 @@ name: azure-monthly-inspection
 description: Read-only monthly Azure inspection for a customer tenant, producing Chinese customer reports (cost review, VM rightsizing, reliability, security, operational excellence, performance, peer comparison, summary). Use when the user asks to run or prepare an Azure 月度巡检/成本巡检/WAF 巡检/健康检查 for a customer, set up a new customer for inspection, check read-only access, or quality-check inspection reports before delivery.
 license: MIT
 metadata:
-  version: 0.9.1
+  version: 0.10.0
 ---
 
 # Azure 月度巡检（只读）
@@ -21,7 +21,7 @@ metadata:
 
 ## 当前版本能做什么
 
-版本 0.9.1 可以：
+版本 0.10.0 可以：
 
 - 准备：环境检查、建客户工作目录、核对只读访问
 - 生成全部 6 份报告：**00 汇总**、**01 月度成本**、**02 虚拟机规格**、**03 可靠性与安全**、**04 卓越运营与性能效率**、**05 同类资源配置对比**（采集、分析、生成、核对）
@@ -139,7 +139,7 @@ python "<skill>/scripts/azinspect_cli.py" <命令> [参数]
   | 降配、虚拟机规格、RI、SP、预留 | 02 虚拟机规格 |
   | 标准做法、配置不一致、同类对比 | 05 同类资源配置对比 |
 
-- **只做部分订阅**：改 `scope.includeSubscriptions`（名称、`*` 通配或订阅 ID）或 `excludeSubscriptions`。先列出将检查的订阅名称请用户确认（可用 access-check 的输出核对名称）。告诉用户：Entra ID 账号与凭据、管理组（Landing Zone 对照）、预留和节省计划订单不按订阅划分，仍按全租户检查；报告会写明“按贵司选择，本次只检查 N 个订阅”；依赖其他订阅资源的检查（如专线网关连接的专线线路）会写明可能漏报，不算作已解决。
+- **只做部分订阅**：改 `scope.includeSubscriptions`（名称、`*` 通配或订阅 ID）或 `excludeSubscriptions`。先列出将检查的订阅名称请用户确认（可用 access-check 的输出核对名称）。告诉用户：Entra ID 账号与凭据、管理组（Landing Zone 对照）、预留和节省计划订单不按订阅划分，仍按全租户检查；报告会写明“按贵司选择，本次只检查 N 个订阅”；依赖其他订阅资源的检查（如专线网关连接的专线线路）会写明可能漏报，不算作已解决；维护配置、备份、活动日志告警建在其他订阅时可能多报，也会写明。
 - **说明这是长期设置**：改后每个月都按它执行。用户说“这个月”“这次”时，做完（打包后）改回原来的值，并告诉用户已改回。已生成月份的报告选择记在 `findings/selection.json`，改回不影响它。
 
 1. **采集**（只读，访问客户环境，约 10–30 分钟）：

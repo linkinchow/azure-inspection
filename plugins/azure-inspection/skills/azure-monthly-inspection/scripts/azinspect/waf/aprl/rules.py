@@ -37,7 +37,8 @@ RULES = {
     '3e115044-a3aa-433e-be01-ce17d67e50da': {
         'check': 'R16', 'severity': '低', 'type': 'Microsoft.Network/virtualNetworkGateways',
         'finding': '专线网关未设置客户控制的维护窗口',
-        'recommendation': '设置在业务低峰的网关维护窗口'},
+        'recommendation': '设置在业务低峰的网关维护窗口',
+        'overReport': '维护配置'},   # a maintenance configuration kept in another subscription is not seen
     'f8c2e6d9-4b3a-45d6-b9e2-8e7f3a1c2d04': {
         'check': 'R16', 'severity': '低', 'type': 'Microsoft.Network/virtualNetworkGateways',
         'finding': 'VPN 网关未设置客户控制的维护窗口',
@@ -73,11 +74,13 @@ RULES = {
     '269a9f1a-6675-460a-831e-b05a887a8c4b': {
         'check': 'R20', 'severity': '低', 'type': 'Microsoft.ContainerService/managedClusters',
         'finding': 'AKS 集群没有配置备份，集群配置和持久卷误删后难以恢复',
-        'recommendation': '为有状态工作负载的集群配置 AKS 备份，或确认已有其他备份方式'},
+        'recommendation': '为有状态工作负载的集群配置 AKS 备份，或确认已有其他备份方式',
+        'overReport': '备份保管库和备份实例'},
     '23b2dfc7-7e5d-9443-9f62-980ca621b561': {
         'check': 'O11', 'severity': '低', 'type': 'Microsoft.Network/routeTables',
         'finding': '路由表变更没有配置活动日志告警，路由被误改时无人知道',
-        'recommendation': '为路由表的写入和删除操作配置活动日志告警，发送到值班组'},
+        'recommendation': '为路由表的写入和删除操作配置活动日志告警，发送到值班组',
+        'overReport': '活动日志告警'},
     '41a22a5e-5e08-9647-92d0-2ffe9ef1bdad': {
         'check': 'S-N9', 'severity': '低', 'type': 'Microsoft.Compute/virtualMachines', 'excludeAppliances': True,
         'finding': '虚拟机网卡开启了 IP 转发（只有防火墙、路由器等网络设备需要）',

@@ -212,6 +212,20 @@ class LongNameTests(unittest.TestCase):
         text = '丙' * 60 + '跨洲出站 2,460 GB（约 USD 205），费用较高'
         self.assertIn('2,460 GB', first_clause(text))
 
+    def test_unit_kept_when_the_cut_falls_inside_it(self):
+        from azinspect.waf.report import first_clause
+        for pad in range(55, 66):   # the limit falls anywhere in '2,460 GB'
+            text = '丙' * pad + '跨洲出站 2,460 GB（约 USD 205），费用较高'
+            cut = first_clause(text)
+            self.assertNotRegex(cut, r'[\d,]……$', cut)
+            self.assertFalse(cut.endswith('2,460……') or cut.endswith('1,……'), cut)
+
+    def test_a_colon_is_followed_by_its_first_item(self):
+        from azinspect.waf.report import first_clause
+        text = '戊' * 62 + '目标资源已删除：pe-storage-blob-01（目标：存储账户 st01）、pe-kv-01'
+        cut = first_clause(text)
+        self.assertIn('：pe-storage-blob-01', cut)
+
     def test_no_tiny_bracket_left(self):
         from azinspect.waf.report import first_clause
         text = '丁' * 66 + '（目标：存储账户 stdata01）未开启专用 DNS'

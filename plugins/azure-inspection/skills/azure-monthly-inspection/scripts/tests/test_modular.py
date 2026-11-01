@@ -429,6 +429,54 @@ class SubscriptionScopeTests(unittest.TestCase):
         self.assertEqual(rows['R1-y']['status'], '新增问题')          # a recommendation not there last month is new
         self.assertNotIn('previousIds', rows['R1-y'])
 
+    def test_tracking_new_rule_is_new_coverage(self):
+        # backlog J: a problem found by a rule added to a check this month is new coverage, not a new problem; a problem of
+        # a rule that already ran last month is a new problem. Months recorded before rules were kept stay as they were.
+        from azinspect import tracking
+
+        def month(d, m, findings, rules):
+            ws = self.month(d, m, [], ['core'])
+            io.write_json(ws.month_dir('findings') / 'waf' / 'reliability.json', {
+                'pillar': 'reliability', 'findings': findings,
+                'coverage': {'R9': {'attempted': 1, 'succeeded': 1, **({'rules': rules} if rules is not None else {})}}})
+            return ws
+
+        def row(fid, rule):
+            return {'id': fid, 'check': 'R9', 'severity': '中', 'finding': fid, 'resourceName': fid, 'subscriptionName': 'core', 'rule': rule}
+        with tempfile.TemporaryDirectory() as d:
+            tracking.update(month(d, '2026-08', [], ['aks-version']), log=lambda *_: None)
+            out = tracking.update(month(d, '2026-09', [row('R9-old-rule', 'aks-version'), row('R9-new-rule', 'retirement-notice')],
+                                        ['aks-version', 'retirement-notice']), log=lambda *_: None)
+        rows = {r['id']: r for r in out['rows']}
+        self.assertEqual(rows['R9-old-rule']['status'], '新增问题')
+        self.assertEqual(rows['R9-new-rule']['status'], '新增检查项发现')
+        with tempfile.TemporaryDirectory() as d:
+            tracking.update(month(d, '2026-08', [], None), log=lambda *_: None)
+            out = tracking.update(month(d, '2026-09', [row('R9-new-rule', 'retirement-notice')], ['retirement-notice']), log=lambda *_: None)
+        self.assertEqual(out['rows'][0]['status'], '新增问题')
+
+    def test_narrowed_scope_may_over_report(self):
+        # backlog N: rules that miss settings kept in other subscriptions may report a problem that is not there
+        import dataclasses
+        import importlib
+        aprl = importlib.import_module('azinspect.waf.aprl')
+        rid = '/subscriptions/core/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks-1'
+        for include, expected in (([], False), (['core'], True)):
+            with tempfile.TemporaryDirectory() as d:
+                ws = io.Workspace(d, '2026-09')
+                ws.create()
+                io.write_json(ws.raw('waf/scope.json'), {'subscriptions': [{'id': 'core', 'name': 'core', 'state': 'Enabled'}]})
+                io.write_json(ws.raw('waf/aprl/results.json'), {'results': [{'aprlGuid': '269a9f1a-6675-460a-831e-b05a887a8c4b', 'status': 200,
+                                                                             'rows': [{'id': rid, 'name': 'aks-1'}]}]})
+                out = aprl.analyze(ws, dataclasses.replace(config.load(TEMPLATE), include=include), log=lambda *_: None)
+            c = out['coverage']['R20']
+            self.assertEqual(any('可能多报' in x for x in c.get('limits') or []), expected)
+            self.assertNotIn('incomplete', c)                  # a possible extra finding never holds back 已解决
+            self.assertEqual(bool(out['findings'][0].get('needsConfirmation')), expected)   # the issue list says so too
+            self.assertEqual(c.get('overReport'), ['269a9f1a'] if expected else None)
+            self.assertEqual(out['findings'][0]['rule'], '269a9f1a')
+            self.assertIn('269a9f1a', c['rules'])
+
     def test_tracking_read_failure_never_resolves(self):
         # a check that ran but had a failed read (e.g. its VM query got 400): what it did not see is not resolved
         from azinspect import tracking
@@ -866,6 +914,10 @@ class CheckTableTests(unittest.TestCase):
         from azinspect.waf.report import check_note
         cov = {'attempted': 3, 'succeeded': 3, 'incomplete': ['d37db635']}
         self.assertEqual(check_note([], cov), '所选订阅中未发现问题；涉及其他订阅的部分可能漏报（见“检查范围与限制”）')
+        over = {'attempted': 3, 'succeeded': 3, 'overReport': ['3e115044']}
+        self.assertEqual(check_note([], over, '专线网关未设置维护窗口'), '专线网关未设置维护窗口；涉及其他订阅的部分可能多报，请核对（见“检查范围与限制”）')
+        both = {**over, 'incomplete': ['d37db635']}
+        self.assertIn('可能漏报或多报', check_note([], both, '专线网关未设置维护窗口'))
 
     def test_tracking_reasons(self):
         from azinspect.waf.report import TRACKING_HELP, gone_row, month_sentence
