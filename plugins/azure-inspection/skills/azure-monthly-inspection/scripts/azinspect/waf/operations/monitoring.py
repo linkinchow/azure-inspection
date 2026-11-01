@@ -172,17 +172,28 @@ def check_edge(d, out, key_rows):
     hybrid = n('microsoft.network/virtualnetworkgateways', 'microsoft.network/expressroutecircuits')
     kinds = ([f"应用网关 {n('microsoft.network/applicationgateways')} 个（{gw_text}）"] if n('microsoft.network/applicationgateways') else []) + \
             ([f"Front Door {n('microsoft.cdn/profiles')} 个（{f'仅 {fd_logs} 个开了日志' if fd_logs else '未开日志'}）"] if n('microsoft.cdn/profiles') else []) + \
-            ([f"ExpressRoute/VPN 网关和线路 {hybrid} 个" + (f"（Advisor 另提示 {er} 处未配置 Connection Monitor）" if er else '')] if hybrid else [])
+            ([('、'.join(x for x in (f"ExpressRoute/VPN 网关 {n('microsoft.network/virtualnetworkgateways')} 个"
+                                     if n('microsoft.network/virtualnetworkgateways') else '',
+                                     f"ExpressRoute 线路 {n('microsoft.network/expressroutecircuits')} 条"
+                                     if n('microsoft.network/expressroutecircuits') else '') if x))
+              + (f"（Advisor 另提示 {er} 处未配置 Connection Monitor）" if er else '')] if hybrid else [])
     present = [label for label, count in (('appgw', n('microsoft.network/applicationgateways')), ('fd', n('microsoft.cdn/profiles')),
                                            ('hybrid', hybrid)) if count]
     effects = {'appgw': '后端不健康', 'fd': '5xx 激增', 'hybrid': '专线或 VPN 中断'}
     advice = {'appgw': '应用网关：为“不健康后端主机数>0”“失败请求/5xx 比例”“容量单位”配置指标告警并开启访问/防火墙日志；',
               'fd': 'Front Door：为源站健康百分比、5xx 比例、总延迟配置告警；',
               'hybrid': 'ExpressRoute/VPN：为 BGP 可用性、ARP 可用性、隧道状态配置告警并启用 Connection Monitor；'}
-    out.add('O2', '中', f"{len(gap)} 个生产入口和混合网络资源没有任何告警：{'、'.join(kinds)}，"
+    entry, network = bool(set(present) & {'appgw', 'fd'}), 'hybrid' in present
+    what = '入口和混合网络资源' if entry and network else '入口资源' if entry else '混合网络资源'
+    criteria = {'appgw': '应用网关已配置不健康后端、5xx 比例和容量告警，并开启访问/防火墙日志',
+                'fd': 'Front Door 已配置源站健康、5xx 比例和延迟告警',
+                'hybrid': '专线和 VPN 网关已配置 BGP/ARP 可用性、隧道状态告警，并启用 Connection Monitor'}
+    out.add('O2', '中', f"{len(gap)} 个生产{what}没有任何告警：{'、'.join(kinds)}，"
             f"{'、'.join(effects[k] for k in present)}时不会主动告警。",
             ''.join(advice[k] for k in present) + NO_CHANGE,
-            subscription=subs_text(gap), resource_name=f"{len(gap)} 个入口/混合网络资源", resource_type='应用网关 / Front Door / ExpressRoute / VPN',
+            subscription=subs_text(gap), resource_name=f"{len(gap)} 个{what}",
+            resource_type=' / '.join({'appgw': '应用网关', 'fd': 'Front Door', 'hybrid': 'ExpressRoute / VPN'}[k] for k in present),
+            acceptance='；'.join(criteria[k] for k in present),
             environment=mixed_env([k['environment'] for k in gap]),
             evidence={'items': [{'resourceName': k['resourceName'], 'type': k['typeLabel'], 'subscriptionName': k['subscriptionName'],
                                  'diagnosticLogs': k['diagnosticSettings'], 'sku': k.get('sku'), 'gatewayType': k.get('gatewayType')} for k in gap],

@@ -190,7 +190,8 @@ class Findings:
 
     def add(self, check, severity, finding, recommendation, *, subscription=None, resource_group=None, resource_name=None,
             resource_type=None, resource_id=None, environment=None, evidence=None, needs_confirmation=None, members=None,
-            key=None, legacy_id=None) -> dict:
+            key=None, legacy_id=None, acceptance=None) -> dict:
+        """acceptance: this finding's own criterion, when the check's default (checks.ACCEPTANCE) does not fit it."""
         assert severity in SEVERITIES, severity
         # a row merged across subscriptions keeps its id when the subscription list or the count changes
         multi = bool(key) and (self.pillar in TENANT_WIDE or any(x in str(subscription or '') for x in ('、', ',', '多个订阅')))
@@ -214,6 +215,8 @@ class Findings:
             item['legacyId'] = legacy_id
         if previous != fid:
             item['previousId'], item['_previousBase'] = previous, before
+        if acceptance:
+            item['acceptance'] = acceptance
         self.items.append(item)
         return item
 

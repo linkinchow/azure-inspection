@@ -110,8 +110,12 @@ class EdgeAlertTests(unittest.TestCase):
     def test_zero_kinds_left_out(self):
         from unittest import mock
         from azinspect.waf.operations import monitoring
-        added = []
-        out = SimpleNamespace(add=lambda *a, **k: added.append(a))
+        added, recorded = [], []
+
+        def add(*a, **k):
+            added.append(a)
+            recorded.append(k)
+        out = SimpleNamespace(add=add)
         gw = {'type': 'microsoft.network/virtualnetworkgateways', 'environment': {'value': 'prod'}, 'alerts': 0, 'resourceName': 'gw-1',
               'typeLabel': 'VPN', 'subscriptionName': 'core', 'diagnosticSettings': None, 'hasDiagnosticLogs': False}
         with mock.patch.object(monitoring, 'advisor_count', return_value=0), mock.patch.object(monitoring, 'is_prod', return_value=True):
@@ -122,13 +126,122 @@ class EdgeAlertTests(unittest.TestCase):
         self.assertNotIn('Front Door', recommendation + text)
         self.assertIn('ExpressRoute/VPN', recommendation)
         self.assertIn('专线或 VPN 中断', text)
-        self.assertIn('ExpressRoute/VPN 网关和线路 1 个', text)
+        self.assertIn('1 个生产混合网络资源没有任何告警', text)        # backlog Z: the title names only the kinds present
+        item = recorded[0]
+        self.assertIn('BGP', item['acceptance'])
+        self.assertNotIn('应用网关', item['acceptance'])
+        self.assertIn('ExpressRoute/VPN 网关 1 个', text)              # only gateways here: no 线路
         self.assertNotIn('Connection Monitor', text)
         fd = {**gw, 'type': 'microsoft.cdn/profiles', 'resourceName': 'fd-1'}
         added.clear()
+        recorded.clear()
         with mock.patch.object(monitoring, 'advisor_count', return_value=0), mock.patch.object(monitoring, 'is_prod', return_value=True):
             monitoring.check_edge(SimpleNamespace(), out, [fd])
         self.assertIn('Front Door 1 个（未开日志）', added[0][2])
+        self.assertIn('1 个生产入口资源没有任何告警', added[0][2])
+        self.assertIn('Front Door 已配置', recorded[0]['acceptance'])
+
+
+class LongNameTests(unittest.TestCase):
+    """A very long resource name in a shortened finding must not push out the figure and the conclusion (backlog Y)."""
+
+    def test_long_name_shortened_first(self):
+        from azinspect.waf.report import first_clause
+        name = 'app-service-backend-worker-node-pool-20260101-instance-0042'
+        text = f'虚拟机 {name} 过去 30 天平均内存使用 91.7%，长期接近上限，业务高峰时可能触发内存不足'
+        cut = first_clause(text, names=[name])
+        self.assertIn('91.7%', cut)
+        self.assertIn('长期接近上限', cut)
+        self.assertIn('app-service-', cut)               # the name stays recognisable: its start and its end
+        self.assertIn('0042', cut)
+        self.assertNotIn(name, cut)
+        self.assertEqual(first_clause(f'虚拟机 {name} 内存高', names=[name]), f'虚拟机 {name} 内存高')   # short enough: unchanged
+        self.assertIn(name[:24], first_clause(text))   # only the finding's own resource names are shortened
+
+    def test_shortened_names_stay_apart(self):
+        # names that would look alike shortened keep more of their start and end, or stay whole
+        from azinspect.waf.report import first_clause
+        a, b = 'nsg-shared-east-prod-app-subnet-0001-default', 'nsg-shared-east-prod-web-subnet-0001-default'
+        cut = first_clause(f'网络安全组 {a} 和 {b} 的入站规则对 Internet 开放了 22 端口，任何地址都能尝试登录，风险很高需要尽快收紧', names=[a, b])
+        self.assertIn(a, cut)              # they would look alike shortened: telling them apart comes first
+        c = 'nsg-shared-east-prod-app-subnet-0001-zz-a1'
+        cut = first_clause(f'网络安全组 {c} 的入站规则对 Internet 开放了 22 端口，任何地址都能尝试登录，风险很高需要尽快收紧，请检查', names=[c, a])
+        self.assertIn('22 端口', cut)       # alone in its sentence and distinct from the others: shortened
+
+    def test_parent_child_name_keeps_the_child(self):
+        # 'vnet/subnet': the start is the shared parent, the end is a common word; the child part tells it apart
+        from azinspect.waf.report import first_clause
+        name = 'shared-hub-vnet/frontend-subnet'
+        text = f'子网 {name} 未关联 NSG，子网内有 VM 网卡 8 个、私有终结点 2 个，入站流量只靠 VM 自身的规则控制，风险较高需要尽快处理'
+        cut = first_clause(text, names=[name])
+        self.assertNotIn('shared-hub-v…subnet', cut)
+
+    def test_names_kept_whole_when_shortening_keeps_nothing_more(self):
+        # the cut stops at the same place either way: the name stays whole
+        from azinspect.waf.report import first_clause
+        name = 'service-backend-pool-alpha-0001'
+        text = f'负载均衡 {name} 的后端只有 1 台虚拟机，' + '没有冗余任何一台维护都会中断服务' * 4
+        self.assertIn(name, first_clause(text, 50, [name]))
+
+    def test_listed_names_are_separate_names(self):
+        # a resource column listing several names ('a, b, c') is not one long name (04 P8 read as one VM)
+        from azinspect.waf.report import first_clause, member_names
+        names = ['vm-sg-app-0001', 'vm-sg-app-0002', 'vm-sg-app-0003']
+        f = {'resourceName': ', '.join(names), 'members': [{'name': n} for n in names]}
+        text = f"虚拟机 {', '.join(names)}（法国中部）9 月跨洲出站 2,460 GB（约 USD 205），按区域间流量计费，建议把服务和数据放在同一区域"
+        cut = first_clause(text, names=member_names(f))
+        self.assertIn(', '.join(names), cut)
+        self.assertNotIn(', '.join(names), member_names(f))
+
+    def test_names_followed_only_by_names_or_brackets_stay(self):
+        from azinspect.waf.report import first_clause, member_names
+        a, b = 'eventhubs-namespace-shared-prod-a01', 'eventhubs-namespace-shared-prod-b01'
+        f = {'resourceName': f'{a}、{b}', 'members': [{'name': a}, {'name': b}]}
+        text = f'Event Hubs 标准层未开启自动扩容，吞吐单元用满后会被限流：{a}、{b}（APRL 建议 fbfef3df（规则库））'
+        cut = first_clause(text, names=member_names(f))
+        self.assertIn(a, cut)
+        self.assertNotIn('…', cut.replace('……', ''))
+
+    def test_settings_and_addresses_are_not_names(self):
+        from azinspect.waf.report import first_clause
+        text = 'MySQL 服务器 db-1 的参数 require_secure_transport=OFF，客户端可以不加密连接，数据在传输中可能被窃听，建议尽快打开强制加密并检查客户端'
+        self.assertIn('require_secure_transport=OFF', first_clause(text, names=['db-1']))
+
+    def test_unit_kept_with_its_number(self):
+        from azinspect.waf.report import first_clause
+        text = '丙' * 60 + '跨洲出站 2,460 GB（约 USD 205），费用较高'
+        self.assertIn('2,460 GB', first_clause(text))
+
+    def test_no_tiny_bracket_left(self):
+        from azinspect.waf.report import first_clause
+        text = '丁' * 66 + '（目标：存储账户 stdata01）未开启专用 DNS'
+        self.assertNotIn('（目', first_clause(text, 68))
+
+    def test_names_only_sentence_keeps_names(self):
+        # a sentence that only lists names: nothing follows them to keep, so the first name stays whole
+        from azinspect.waf.report import first_clause
+        a, b = 'lb-group-east-prod-frontend-external-a', 'lb-group-east-prod-frontend-internal-b'
+        cut = first_clause(f'生产负载均衡的前端未跨可用区：{a}、{b}')
+        self.assertIn(a, cut)
+        self.assertNotIn('………', cut)
+        self.assertTrue(cut.endswith('……'), cut)
+
+
+class KeyRowTests(unittest.TestCase):
+    """A virtual network gateway read both with the key resources and with the gateway query is one resource."""
+
+    def test_gateway_counted_once(self):
+        from azinspect.waf.operations.data import build_key_rows
+        gid = '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/virtualNetworkGateways/gw-1'
+        target = {'id': gid, 'name': 'gw-1', 'type': 'microsoft.network/virtualnetworkgateways', 'subscriptionId': 's', 'resourceGroup': 'rg'}
+        vnetgw = {**target, 'gwType': 'ExpressRoute', 'sku': 'ErGw1AZ'}
+        circuit = {'id': '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/expressRouteCircuits/er-1', 'name': 'er-1',
+                   'type': 'microsoft.network/expressroutecircuits', 'subscriptionId': 's', 'resourceGroup': 'rg'}
+        d = SimpleNamespace(targets=[target], diag_idx={}, storage_cost={}, rows=lambda name: [vnetgw, circuit] if name == 'vnetgw' else [],
+                            subname=lambda s: 'core', env_of=lambda *a: {'value': 'prod'}, sub_env=lambda s: {'value': 'prod'})
+        rows = build_key_rows(d, [])
+        self.assertEqual(sorted(r['resourceName'] for r in rows), ['er-1', 'gw-1'])
+        self.assertEqual(next(r for r in rows if r['resourceName'] == 'gw-1')['gatewayType'], 'ExpressRoute')
 
 
 class DefenderMemberTests(unittest.TestCase):

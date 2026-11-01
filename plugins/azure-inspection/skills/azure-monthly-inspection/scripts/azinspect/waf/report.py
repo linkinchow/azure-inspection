@@ -251,6 +251,7 @@ def cn_date(iso):
 # ---------------------------------------------------------------- defaults
 
 BRACKETED = re.compile(r'（[^（）]*）|\([^()]*\)')
+LONG_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._/-]{23,}')   # a resource name long enough to push the point out
 
 
 def _first(text):
@@ -280,15 +281,58 @@ def _drop_details(text):
         text = text[:m.start()] + text[m.end():]
 
 
-def first_clause(text, limit=70):
+def _shorten_names(text, names):
+    """The finding's own very long resource names keep their start and end when a figure or conclusion follows them, so
+    the point stays; names that would then look alike keep more, or stay whole."""
+    found = [n for n in sorted(set(names), key=len, reverse=True) if len(n) >= 24 and n in text]
+    if not found:
+        return text, {}
+    tail = text[max(text.rfind(n) + len(n) for n in found):]
+    while BRACKETED.search(tail):
+        tail = BRACKETED.sub('', tail)
+    for n in names:
+        tail = tail.replace(n, '')
+    if len(re.sub(r'[\s，、；…。,]', '', tail)) < 6:   # only names (or brackets) listed: nothing after them to keep
+        return text, {}
+    long_names = sorted({n for n in names if len(n) >= 24})
+
+    def shorten(n, head, end):   # 'vnet/subnet': the child tells it apart, the parent is shared
+        child = n.rsplit('/', 1)[-1]
+        return '…/' + child if '/' in n and len(child) <= 20 else n[:head] + '…' + n[-end:]
+    for head, end in ((12, 6), (18, 10)):
+        short = {n: shorten(n, head, end) for n in long_names}
+        if len(set(short.values())) == len(short):
+            for n in found:
+                text = text.replace(n, short[n])
+            return text, {n: short[n] for n in found}
+    return text, {}
+
+
+def _after(cut, tokens):
+    """Characters a cut keeps after the last of `tokens` (0 when none is left)."""
+    ends = [cut.rfind(t) + len(t) for t in tokens if t in cut]
+    return len(cut.rstrip('…）)”')) - max(ends) if ends else 0
+
+
+def first_clause(text, limit=70, names=()):
     """The first sentence, up to its first '；' ('……' when items after it are left out), shortened to `limit`: details
-    in brackets go first (the point often follows them); then the cut is at a comma near the end, else never inside a
-    number or English word; a bracket or quote cut into is closed."""
+    in brackets go first (the point often follows them), then very long resource names (`names`, the finding's own);
+    then the cut is at a comma near the end, else never inside a number or English word, keeping a unit after a number
+    and no bracket opened just before the cut; a bracket or quote cut into is closed."""
     text, rest = _first(str(text or ''))
     more = '……' if rest.strip() else ''
     if len(text) <= limit:
         return text + more
     text = _drop_details(text)
+    if len(text) > limit:
+        short, mapping = _shorten_names(text, names)
+        # shortened only when that keeps more of what follows the names
+        if mapping and _after(_cut(short, limit, more), mapping.values()) > _after(_cut(text, limit, more), mapping):
+            text = short
+    return _cut(text, limit, more)
+
+
+def _cut(text, limit, more):
     if len(text) <= limit:
         return text + more
     cut = text[:limit]
@@ -299,7 +343,13 @@ def first_clause(text, limit=70):
         word = lambda c: c.isascii() and (c.isalnum() or c in '._-')  # noqa: E731
         while cut and word(cut[-1]) and word(text[len(cut)]):
             cut = cut[:-1]
-    cut, closing = cut.rstrip('，、 ') + '……', ''
+    unit = re.match(r' ?[A-Za-z%]{1,3}(?![A-Za-z])|[台个条项块天%]', text[len(cut):]) if cut[-1:].isdigit() else None
+    if unit:   # '2,460 GB', not '2,460'
+        cut += unit.group()
+    for opening, close in (('（', '）'), ('(', ')')):
+        if cut.count(opening) > cut.count(close) and len(cut) - cut.rfind(opening) <= 4:   # '（目' says nothing
+            cut = cut[:cut.rfind(opening)]
+    cut, closing = cut.rstrip('，、 …') + '……', ''
     for opening, close in (('（', '）'), ('(', ')'), ('“', '”')):
         if cut.count(opening) > cut.count(close):   # cut inside: say so inside, then close
             closing = close + closing
@@ -309,13 +359,19 @@ def first_clause(text, limit=70):
 def default_top_issues(findings):
     picked = [f for f in findings if f['severity'] == '高']
     picked += [f for f in findings if f['severity'] == '中' and f['environment'].get('value') == 'prod']
-    return [{'title': f'{f["checkName"]}：{f.get("resourceName") or f.get("subscriptionName") or ""}', 'detail': first_clause(f['finding'], 160),
+    return [{'title': f'{f["checkName"]}：{f.get("resourceName") or f.get("subscriptionName") or ""}', 'detail': first_clause(f['finding'], 160, member_names(f)),
              'recommendation': first_clause(f['recommendation'], 160), 'findingIds': [f['id']]} for f in picked[:10]]
+
+
+def member_names(f):
+    """The finding's resource names; a resource column that lists several ('a, b' or 'a、b') or counts them is not a name."""
+    one = f.get('resourceName') if f.get('resourceName') and not re.search(r'[,，、\s]', f['resourceName']) else None
+    return [m['name'] for m in f.get('members') or [] if m.get('name')] + ([one] if one else [])
 
 
 def default_check_note(fs):
     top = sorted(fs, key=sort_key)[0]
-    return first_clause(top['finding'])
+    return first_clause(top['finding'], names=member_names(top))
 
 
 PLAN_PERIODS = (('week', '本周内'), ('month', '一个月内'), ('quarter', '一个季度内'))

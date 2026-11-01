@@ -362,8 +362,11 @@ def build_key_rows(d: Data, rules):
                      'hasDiagnosticLogs': None if diag_val is None else any(x['logs'] for x in diag_val),
                      'alerts': alerts_for(rules, t['id'], t['type']), 'monthCostUSD': d.storage_cost.get(t['id'].lower()),
                      'sku': sku.get('name') if isinstance(sku, dict) else sku, 'id': t['id'], 'tags': t.get('tags')})
+    seen = {r['id'].lower(): r for r in rows}
     for t in d.rows('vnetgw'):
-        if t['type'] in ('microsoft.network/virtualnetworkgateways', 'microsoft.network/expressroutecircuits'):
+        if t['id'].lower() in seen:   # a gateway is also a key resource above: one row, with its gateway type
+            seen[t['id'].lower()].update(gatewayType=t.get('gwType'), sku=t.get('sku') or seen[t['id'].lower()].get('sku'))
+        elif t['type'] in ('microsoft.network/virtualnetworkgateways', 'microsoft.network/expressroutecircuits'):
             rows.append({'resourceName': t['name'], 'type': t['type'], 'typeLabel': TYPE_LABEL.get(t['type']),
                          'subscriptionName': d.subname(t['subscriptionId']), 'resourceGroup': t['resourceGroup'],
                          'environment': d.sub_env(d.subname(t['subscriptionId'])), 'diagnosticSettingsHttp': None, 'diagnosticSettings': None,

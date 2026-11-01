@@ -985,6 +985,14 @@ class ChartRecordTests(unittest.TestCase):
             self.assertEqual([x['resource'] for x in crosscheck.x9(ws)['items']], [other.name])
 
 
+class AcceptanceFieldTests(unittest.TestCase):
+    def test_finding_carries_its_own_criterion(self):
+        from azinspect.waf.common import Findings
+        f = Findings('operations').add('O2', '中', 'x', 'y', key='k', acceptance='专线已配置告警')
+        self.assertEqual(f['acceptance'], '专线已配置告警')
+        self.assertNotIn('acceptance', Findings('operations').add('O2', '中', 'x', 'y', key='k2'))
+
+
 class CrosscheckTests(unittest.TestCase):
     def test_rules_for_reports_left_out(self):
         with tempfile.TemporaryDirectory() as d:
