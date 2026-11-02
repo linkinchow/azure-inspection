@@ -627,7 +627,19 @@ def month_sentence(tracked, report):
         text += f'另有 {len(s["severityChanged"])} 项严重程度有变化，见 Excel“与上月相比”列。'
     if report == '03' and coverage_growth(tracked):
         text += coverage_growth(tracked) + '。'
+    if older_record(tracked, report):
+        text += older_record(tracked, report) + '。'
     return text
+
+
+def older_record(tracked, report=None):
+    """Last month recorded by a version that kept no rule list (before 0.10.0): problems found by rules added or changed
+    since then read as new although they were there."""
+    from ..tracking import summary
+    if not (tracked or {}).get('previousWithoutRules') or not summary(tracked, report)['all'].get('新增问题'):
+        return ''
+    return ('上月记录由旧版本生成，没有检查规则清单，所以本月“新增问题”里有一部分来自之后新增或调整的检查规则，'
+            '问题本身可能早已存在，不一定是本月才出现的变化')
 
 
 def coverage_growth(tracked):

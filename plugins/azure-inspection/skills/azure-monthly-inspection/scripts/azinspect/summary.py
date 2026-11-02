@@ -140,9 +140,12 @@ def month_row(tracked, waf_reports):
     others = sum(tracking_summary(tracked)['all'].values()) - sum(c.values())
     if others:
         text += f'（另有 {others} 项上月问题属于本月没有选择的报告，未列入）'
-    from .waf.report import coverage_growth
+    from .waf.report import coverage_growth, older_record
     if '03' in waf_reports and coverage_growth(tracked):
         text += f'；{coverage_growth(tracked)}'
+    older = older_record(tracked, None if len(waf_reports) == 2 else waf_reports[0])
+    if older:
+        text += f'；{older}'
     return [f'与 {tracked["previous"]} 相比', text]
 
 
@@ -183,9 +186,11 @@ def markdown(cfg, period, d, n, pngs, scope):
         t = model['comparableTotals']
         rows.append([f'{cur.short_label}费用', f'USD {money(t["cur"])}，比{prev.short_label}{"增加" if t["delta"] >= 0 else "减少"} {abs(t["changeRate"] or 0):.2%}'
                      + (f'；日均费用{"上升" if t["dailyChangeRate"] >= 0 else "下降"} {abs(t["dailyChangeRate"]):.2%}' if cur.days != prev.days and t['dailyChangeRate'] is not None else '')])
-    fc = ((d['forecast'] or {}).get('overall') or {}).get('next') or {}
-    if fc.get('fullMonthEstimate'):
-        rows.append([f'{nxt.short_label}预计费用', f'约 USD {money(fc["fullMonthEstimate"])}（Azure 预测）'])
+    if model and d['forecast']:
+        from .cost import forecast_scope
+        row = forecast_scope.row_00(forecast_scope.coverage(d['forecast'], model, nxt.days, cur.days), nxt.short_label, cur.short_label)
+        if row:
+            rows.append(row)
     if vm:
         rows.append(['VM 规格调整', f'{vm["recommendedVMCount"]} 台建议降配，**每月约节省 USD {money(vm["monthlyPotentialSavingsUSD"])}**（官网列表价）'])
     plan_by = {p['key']: p for p in (prices or {}).get('plans', [])}

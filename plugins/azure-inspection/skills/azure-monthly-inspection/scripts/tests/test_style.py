@@ -78,6 +78,35 @@ class StyleTests(unittest.TestCase):
             io.write_json(ws.month_dir('narrative') / '00.json', {'conclusion': ['pg-order-prod 关闭了自动增长；9 月费用增加 USD 100。']})
             self.assertNotIn('00 结论', ' / '.join(check_narratives(ws.month_dir())))
 
+    def test_names_to_point_at_from_chosen_pillars_only(self):
+        # only 可靠性 chosen, but security findings from an earlier full analysis were still in findings/waf
+        with tempfile.TemporaryDirectory() as d:
+            ws = io.Workspace(d, '2026-09')
+            ws.create()
+            io.write_json(ws.month_dir('findings') / 'selection.json', {'reports': ['03'], 'groups': ['可靠性']})
+            io.write_json(ws.month_dir('findings') / 'waf' / 'reliability.json', {'findings': [
+                {'id': 'R13-aaaaaa', 'check': 'R13', 'severity': '高', 'resourceName': 'pg-order-prod', 'subscriptionName': 'app-prod'}]})
+            io.write_json(ws.month_dir('findings') / 'waf' / 'security_identity.json', {'findings': [
+                {'id': 'S-I5-bbbbbb', 'check': 'S-I5', 'severity': '高', 'resourceName': 'Tenant Root Group', 'subscriptionName': '租户'}]})
+            io.write_json(ws.month_dir('narrative') / '00.json', {'conclusion': ['先处理一般问题。']})
+            text = ' / '.join(check_narratives(ws.month_dir()))
+            self.assertIn('pg-order-prod', text)
+            self.assertNotIn('Tenant Root Group', text)
+
+    def test_summary_amount_only_with_cost_reports(self):
+        # only 03 chosen: agents wrote "实施预算待确认（USD）" to pass a check that wanted an amount anyway
+        with tempfile.TemporaryDirectory() as d:
+            ws = io.Workspace(d, '2026-09')
+            ws.create()
+            io.write_json(ws.month_dir('findings') / 'selection.json', {'reports': ['03'], 'groups': ['可靠性']})
+            io.write_json(ws.month_dir('narrative') / '00.json', {'conclusion': ['优先保障数据库可写。']})
+            self.assertEqual(check_narratives(ws.month_dir()), [])
+            io.write_json(ws.month_dir('narrative') / '00.json', {'conclusion': ['优先保障数据库可写，实施预算待确认（USD）。']})
+            self.assertIn('没有选择 01、02', ' / '.join(check_narratives(ws.month_dir())))
+            io.write_json(ws.month_dir('findings') / 'selection.json', {'reports': ['02', '03']})
+            io.write_json(ws.month_dir('narrative') / '00.json', {'conclusion': ['优先保障数据库可写。']})
+            self.assertIn('00 结论没有写金额', ' / '.join(check_narratives(ws.month_dir())))
+
 
 class HandEditTests(unittest.TestCase):
     def test_package_refuses_edited_report(self):

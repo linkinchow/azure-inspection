@@ -3,7 +3,7 @@ name: azure-monthly-inspection
 description: Read-only monthly Azure inspection for a customer tenant, producing Chinese customer reports (cost review, VM rightsizing, reliability, security, operational excellence, performance, peer comparison, summary). Use when the user asks to run or prepare an Azure 月度巡检/成本巡检/WAF 巡检/健康检查 for a customer, set up a new customer for inspection, check read-only access, or quality-check inspection reports before delivery.
 license: MIT
 metadata:
-  version: 0.10.2
+  version: 0.10.3
 ---
 
 # Azure 月度巡检（只读）
@@ -21,13 +21,13 @@ metadata:
 
 ## 当前版本能做什么
 
-版本 0.10.2 可以：
+版本 0.10.3 可以：
 
 - 准备：环境检查、建客户工作目录、核对只读访问
 - 生成全部 6 份报告：**00 汇总**、**01 月度成本**、**02 虚拟机规格**、**03 可靠性与安全**、**04 卓越运营与性能效率**、**05 同类资源配置对比**（采集、分析、生成、核对）
 - 按客户选择只做一部分：01–05 在 `customer.yaml` 的 `report.include` 中选择，03/04 还可以只做其中的支柱（可靠性、安全、卓越运营、性能效率）；00 只汇总所选内容；采集只补所选内容要用的数据
 - 只查客户指定的订阅（`scope.includeSubscriptions`）：报告写明所选订阅，跨月跟踪不把没检查的订阅算作已解决
-- 跨报告交叉核对（X1–X10）和打包
+- 跨报告交叉核对（X1–X11）和打包
 - RI/SP：分摊费用中的覆盖比例、现有预留和节省计划的使用率与到期、Azure 购买建议；02 标出已被 RI/SP 覆盖、降配节省不能直接实现的机器
 - 跨月跟踪：03/04 自动与上月比，分出新增问题、新增检查项发现、仍未处理、已解决、本月未检查
 - 大租户：费用采集中断后用 `--resume` 续采；资源组很多的订阅按批读取逐资源费用；逐资源明细单独存放，成本模型文件更小，00 生成更快
@@ -141,6 +141,7 @@ python "<skill>/scripts/azinspect_cli.py" <命令> [参数]
 
 - **只做部分订阅**：改 `scope.includeSubscriptions`（名称、`*` 通配或订阅 ID）或 `excludeSubscriptions`。先列出将检查的订阅名称请用户确认（可用 access-check 的输出核对名称）。告诉用户：Entra ID 账号与凭据、管理组（Landing Zone 对照）、预留和节省计划订单不按订阅划分，仍按全租户检查；报告会写明“按贵司选择，本次只检查 N 个订阅”；依赖其他订阅资源的检查（如专线网关连接的专线线路）会写明可能漏报，不算作已解决；维护配置、备份、活动日志告警建在其他订阅时可能多报，也会写明。
 - **说明这是长期设置**：改后每个月都按它执行。用户说“这个月”“这次”时，做完（打包后）改回原来的值，并告诉用户已改回。已生成月份的报告选择记在 `findings/selection.json`，改回不影响它。
+- **说明文件要跟着选择改**：脚本不会过滤 `narrative/` 里没选的报告或支柱的内容。只做一部分时，先按本次选择改写 00、03、04 的说明文件；同一个月改回全部再生成时，也要按全部改写。换了选择而说明文件没有改过时，build 会停下并列出这些文件；确认内容仍然适用才加 `--narrative-checked`。
 
 1. **采集**（只读，访问客户环境，约 10–30 分钟）：
 
@@ -195,7 +196,7 @@ python "<skill>/scripts/azinspect_cli.py" <命令> [参数]
    - “需客户确认后执行”每份报告最多 2 次
    - 否定和保留说法（“不等于”“不能据此”等）每万字最多约 6 处
    - 00 的立即处理问题、03/04 的前十大问题，标题或描述里必须点名具体资源或订阅；“影响”每条都写或都不写
-   - 00 结论要有金额（照抄第 1 节表格里的数字），并点名最需要处理的资源
+   - 选了 01 或 02 时，00 结论要有金额（照抄第 1 节表格里的数字）；没选时不要写费用或金额；结论都要点名最需要处理的资源
    - 连续 3 个以上列表项都只有一个字（说明文件里的文字被逐字拆开）
    - 单个 Markdown 超过 500 KB（明细放 Excel，Markdown 只保留汇总）
    - 报告生成后不能手工修改

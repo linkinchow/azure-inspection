@@ -19,6 +19,7 @@ from ..core.excel import MONEY, verify
 from ..core.fmt_md import format_and_check
 from ..core.io import read_json, write_json
 from . import charts as cost_charts
+from . import forecast_scope
 from .orphan import label as orphan_label
 from . import commitments as cm
 from . import views as sr
@@ -283,6 +284,9 @@ def build(ws, cfg, period, narrative=None, log=print):
     cover = (f'费用来自Azure Cost Management实际费用，不是官网列表价；优化建议公开报价另行注明为列表价。{Lc}{dc}天，{Lp}{dp}天，日均变化另列。'
              f'两月对比仅使用两个月均读取成功的{n_comp}个订阅；读取失败的订阅不记为0。')
     fc = sup['forecast']['overall']['next']
+    fcov = forecast_scope.coverage(sup['forecast'], model, labels['nextDays'], dc)
+    fc_note = ('' if fcov['complete'] or fcov['estimate'] is None else
+               f'预测不完整：只含读到预测的{fcov["subscriptions"]}个订阅（占{Lc}费用的{fcov["share"]:.1%}），不是全部订阅的预计；')
     overview = sheet('月度总览', f'{cfg.name}：{labels["curLabel"]}成本巡检（对比{Lp}）', cover, ['项目', '结果', '说明'])
     for r_ in [['订阅数', n_comp, f'{cfg.name}纳入巡检且两个月费用都能读取的订阅' + (f'；{unreadable_text(model)}' if unreadable(model) else '')],
                [f'{Lc}实际费用USD', None, f'完整{Lc}查询结果；未核对最终发票税费/信用及后续调整'], [f'{Lp}实际费用USD', None, f'完整{Lp}查询结果'],
@@ -290,7 +294,7 @@ def build(ws, cfg, period, narrative=None, log=print):
                [f'{Lp}日均USD', None, f'{Lp}总费用/{dp}'], ['日均变化率', None, '排除两个月天数差异后比较'],
                [f'{Lc}分摊费用USD', tot['amortizedCur'], 'RI/SP预付费用分配到使用期间；不与实际费用相加'],
                ['数据查询时间', model['scope'].get('queriedAt') or '见原始查询记录', '完整月份费用按查询时结果列示'],
-               [f'{Ln}全月预计USD', fc['fullMonthEstimate'], f'Azure Cost Management预测：已发生日期为实际，其余为预测，不是账单；见“{Ln}费用预测”']]:
+               [f'{Ln}全月预计USD', fc['fullMonthEstimate'], fc_note + f'Azure Cost Management预测：已发生日期为实际，其余为预测，不是账单；见“{Ln}费用预测”']]:
         overview.append(r_)
     sw = sheet('订阅对比', f'各订阅{Lc}与{Lp}实际费用', cover,
                ['业务组', '订阅', f'{Lp}USD', f'{Lc}USD', '增减USD', '变化率', f'{Lp}日均USD', f'{Lc}日均USD', '日均变化率', f'{Lc}分摊费用USD',
@@ -529,6 +533,12 @@ def forecast_note(sup, Lc):
             + (f'；{empty}个订阅没有返回预测结果（多为{Lc}无费用的订阅）' if empty else ''))
 
 
+def _forecast_chart_scope(sup, m, dn, dc, Lc):
+    fcov = forecast_scope.coverage(sup['forecast'], m, dn, dc)
+    return (f'图中只含读到预测的 {fcov["subscriptions"]} 个订阅（占{Lc}费用的 {fcov["share"]:.1%}）。'
+            if fcov['missed'] and fcov['share'] is not None else '')
+
+
 def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, chosen_scope=''):
     Lp, Lc, Ln = labels['prev'], labels['cur'], labels['next']
     dp, dc, dn = labels['prevDays'], labels['curDays'], labels['nextDays']
@@ -554,17 +564,19 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, cho
              + (f'；{unread}，没有按0处理' if unread else '') + '。']
     if narrative.get('forecastSummary'):
         lines.append(f'- {narrative["forecastSummary"]}')
-    elif nx['fullMonthEstimate']:
-        est = nx['fullMonthEstimate']
-        lines.append(f'- **{Ln}预计约USD {amount(est)}**（Azure预测）：截至查询日实际USD {amount(nx["actualToDate"])}，其余日期预测USD {amount(nx["forecastRemainder"])}。'
-                     f'全月日均约USD {amount(est / dn)}，比{Lc}日均{"高" if est / dn > t["curDaily"] else "低"}{abs(est / dn / t["curDaily"] - 1):.2%}；预测需在{Ln}结束后核对。')
+    else:
+        fcov = forecast_scope.coverage(sup['forecast'], m, dn, dc)
+        line = forecast_scope.line_01(fcov, {'Ln': Ln, 'Lc': Lc, 'dn': dn, 'dc': dc})
+        if line:
+            lines.append(line)
     lines += ['- 费用按查询时结果列示；税费、信用额度和最终发票调整需与财务账单核对。', '']
     if 'daily' in pngs:
         lines += [f'![{Lp}与{Lc}每日费用]({pngs["daily"]})', '',
                   notes.get('daily') or f'{Lc}日均 USD {amount(t["curDaily"])}，比{Lp}（USD {amount(t["prevDaily"])}）{"高" if (t["dailyChangeRate"] or 0) >= 0 else "低"} {abs(t["dailyChangeRate"] or 0):.2%}。', '']
     if 'forecast' in pngs:
         lines += [f'![{Ln}每日费用：实际与预测]({pngs["forecast"]})', '',
-                  notes.get('forecast') or f'实线为{Ln}已发生的实际费用，虚线为 Azure 预测；预测基于历史费用模型，节假日和新上线业务可能使实际偏离预测。', '']
+                  notes.get('forecast') or f'实线为{Ln}已发生的实际费用，虚线为 Azure 预测；预测基于历史费用模型，节假日和新上线业务可能使实际偏离预测。'
+                  + _forecast_chart_scope(sup, m, dn, dc, Lc), '']
     lines += ['### 需要优先关注的变化', '']
     highlights = narrative.get('highlights')
     if not highlights:

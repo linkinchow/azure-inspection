@@ -281,40 +281,63 @@ def cmd_analyze(args) -> int:
 
 
 def cmd_build(args) -> int:
+    from .core import config as config_mod
     from .package import record_build, snapshot
-    from .selection import save as save_selection
+    from .selection import save as save_selection, stale_narratives, stamp_narratives
     ws, period = _month_workspace(args)
+    chosen = config_mod.load(ws.config_path)
+    stale = stale_narratives(ws, chosen.reports, chosen.groups)
+    if stale and not args.narrative_checked:
+        print('这些说明文件是按另一次报告选择写的，之后没有改过：' + '；'.join(f'{n}（当时为 {was}）' for n, was in stale))
+        print('请按本次选择改写（只写所选报告和支柱的内容；改回全部时要补上其他报告和支柱），再重新 build。'
+              '确认内容仍然适用时，加 --narrative-checked 重新 build。')
+        return 2
+    from .waf.report import NarrativeError
     started, before, built = time.time(), snapshot(ws), []
     parts = ('vm', 'cost', 'peer', 'waf', 'summary') if args.part == 'all' else (args.part,)
-    for part in parts:   # peer before 03/04: their issue lists take the peer columns; summary last: 00 reads the others
-        cfg, ok = _chosen(ws, part, 'build')
-        save_selection(ws, cfg.reports, cfg.groups)
-        if not ok:
-            continue
-        built += {'vm': ['02'], 'cost': ['01'], 'peer': ['05'], 'summary': ['00'],
-                  'waf': [c for c in ('03', '04') if c in cfg.reports]}[part]
-        if part == 'vm':
-            from .vm.audit import audit
-            from .vm.report import build
-            build(ws, cfg, _narrative(ws, '02'))
-            audit(ws)
-        elif part == 'cost':
-            from .cost.audit import audit
-            from .cost.report import build
-            build(ws, cfg, period, _narrative(ws, '01'))
-            audit(ws, period)
-        elif part == 'peer':
-            from .peer import report as peer_report
-            if peer_report.build(ws, cfg, _narrative(ws, '05')):
-                peer_report.audit(ws)
-        elif part == 'waf':
-            from .waf.pipeline import build
-            build(ws, cfg, {'03': _narrative(ws, '03'), '04': _narrative(ws, '04')}, codes=[c for c in ('03', '04') if c in cfg.reports])
-        else:
-            from .summary import build as build_summary
-            build_summary(ws, cfg, period, _narrative(ws, '00'))
+    try:
+        for part in parts:   # peer before 03/04: their issue lists take the peer columns; summary last: 00 reads the others
+            built += _build_part(ws, period, part, save_selection)
+    except NarrativeError as e:   # e.g. a narrative pointing at problems of a pillar not chosen: say so, keep what was built
+        record_build(ws, started, before, built)
+        print(f'说明文件有误，报告没有生成完：{e}')
+        print('请按本次选择改写说明文件（去掉没选的报告或支柱的问题编号和内容），再重新 build。'
+              + (f'已生成的报告：{"、".join(built)}。' if built else ''))
+        return 2
     record_build(ws, started, before, built)
+    stamp_narratives(ws, chosen.reports, chosen.groups)
     return 0
+
+
+def _build_part(ws, period, part, save_selection):
+    """Builds one part for the chosen reports; returns the report codes built."""
+    cfg, ok = _chosen(ws, part, 'build')
+    save_selection(ws, cfg.reports, cfg.groups)
+    if not ok:
+        return []
+    codes = {'vm': ['02'], 'cost': ['01'], 'peer': ['05'], 'summary': ['00'],
+             'waf': [c for c in ('03', '04') if c in cfg.reports]}[part]
+    if part == 'vm':
+        from .vm.audit import audit
+        from .vm.report import build
+        build(ws, cfg, _narrative(ws, '02'))
+        audit(ws)
+    elif part == 'cost':
+        from .cost.audit import audit
+        from .cost.report import build
+        build(ws, cfg, period, _narrative(ws, '01'))
+        audit(ws, period)
+    elif part == 'peer':
+        from .peer import report as peer_report
+        if peer_report.build(ws, cfg, _narrative(ws, '05')):
+            peer_report.audit(ws)
+    elif part == 'waf':
+        from .waf.pipeline import build
+        build(ws, cfg, {'03': _narrative(ws, '03'), '04': _narrative(ws, '04')}, codes=[c for c in ('03', '04') if c in cfg.reports])
+    else:
+        from .summary import build as build_summary
+        build_summary(ws, cfg, period, _narrative(ws, '00'))
+    return codes
 
 
 def cmd_crosscheck(args) -> int:
@@ -365,6 +388,9 @@ def main(argv=None) -> int:
         p.add_argument('--workspace', required=True)
         p.add_argument('--month', help='巡检的月份 YYYY-MM，默认上一个完整月')
         p.add_argument('--part', choices=PARTS + ('all',), default='all')
+        if name == 'build':
+            p.add_argument('--narrative-checked', action='store_true',
+                           help='说明文件是按另一次报告选择写的、但已确认仍然适用时使用')
         if name != 'build':
             p.add_argument('--pillars', help='只处理部分支柱（逗号分隔），例如 aprl,defender；默认全部')
         if name == 'collect':
@@ -374,7 +400,7 @@ def main(argv=None) -> int:
             p.add_argument('--offline', action='store_true', help='只用已保存的官网价格，不联网查询')
             p.add_argument('--price-date', help='价格日期 YYYY-MM-DD，默认今天；只使用该日期及之前查询的价格')
         p.set_defaults(func=func)
-    p = sub.add_parser('crosscheck', help='跨报告交叉核对（X1–X10），结果写入 findings/crosscheck.json')
+    p = sub.add_parser('crosscheck', help='跨报告交叉核对（X1–X11），结果写入 findings/crosscheck.json')
     p.add_argument('--workspace', required=True)
     p.add_argument('--month', help='巡检的月份 YYYY-MM，默认上一个完整月')
     p.set_defaults(func=cmd_crosscheck)

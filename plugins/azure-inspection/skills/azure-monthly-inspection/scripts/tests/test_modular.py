@@ -1114,6 +1114,36 @@ class DefenderCoverageTests(unittest.TestCase):
             out = tracking.update(month(d, '2026-09', 'abc', True), log=lambda *_: None)
         self.assertEqual(out.get('coverageGrowth'), {})
 
+    def test_first_month_after_an_older_record_is_explained(self):
+        # last month recorded by a version that kept no rule list: problems from rules added since read as new
+        from azinspect import tracking
+        from azinspect.waf.report import month_sentence
+
+        def month(d, m, names, rules):
+            ws = io.Workspace(d, m)
+            ws.create()
+            io.write_json(ws.raw('waf/scope.json'), {'subscriptions': [{'id': 'a', 'name': 'a', 'state': 'Enabled'}]})
+            io.write_json(ws.month_dir('findings') / 'waf' / 'reliability.json', {'pillar': 'reliability', 'coverage': {
+                'R9': {'attempted': 1, 'succeeded': 1, **({'rules': ['version-ubuntu']} if rules else {})}}, 'findings': [
+                {'id': f'R9-{n}', 'check': 'R9', 'severity': '中', 'finding': f'{n} 版本即将停止支持', 'resourceName': n,
+                 'subscriptionName': 'a', 'members': [{'name': n, 'subscription': 'a'}]} for n in names]})
+            return ws
+        with tempfile.TemporaryDirectory() as d:
+            ws = month(d, '2026-08', ['vm-1'], False)
+            tracking.update(ws, log=lambda *_: None)
+            record = io.read_json(ws.state_dir / 'months' / '2026-08.json')
+            record.pop('rulesRun')   # as written before 0.10.0
+            io.write_json(ws.state_dir / 'months' / '2026-08.json', record)
+            out = tracking.update(month(d, '2026-09', ['vm-1', 'vm-2'], True), log=lambda *_: None)
+        self.assertTrue(out['previousWithoutRules'])
+        self.assertIn('上月记录由旧版本生成', month_sentence(out, '03'))
+        self.assertIn('上月记录由旧版本生成', summary.month_row(out, ['03', '04'])[1])
+        with tempfile.TemporaryDirectory() as d:   # last month kept its rules: nothing to explain
+            tracking.update(month(d, '2026-08', ['vm-1'], True), log=lambda *_: None)
+            out = tracking.update(month(d, '2026-09', ['vm-1', 'vm-2'], True), log=lambda *_: None)
+        self.assertFalse(out['previousWithoutRules'])
+        self.assertNotIn('旧版本', month_sentence(out, '03'))
+
     def test_left_out_subscriptions_without_per_subscription_data(self):
         out = self.run_defender({})
         c = out['coverage']['S-I11']

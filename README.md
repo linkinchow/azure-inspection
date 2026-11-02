@@ -13,7 +13,14 @@
 
 全部检查只读。脚本只允许读取，会拦截写操作和取密钥；令牌必须属于客户配置里的只读账号，否则停止。不会切换你的 Azure CLI 默认账号。
 
-> **当前版本 0.10.2**：全部 6 份报告（00 汇总、01 月度成本、02 虚拟机规格、03 可靠性与安全、04 卓越运营与性能效率、05 同类资源配置对比），01–05 可按客户选择只做一部分（`customer.yaml` 的 `report.include`，00 只汇总所选），也可只查客户指定的订阅，并入 APRL、Defender/Policy、孤立资源、AMBA、Landing Zone 清单等微软公开规则库；RI/SP 覆盖、使用率和购买建议；跨报告交叉核对、质量检查和打包。跨月跟踪（自动与上月比：新增、已解决、仍未处理）按资源判断；读取失败、不在本月范围或范围不完整的问题记为“本月未检查”并写明原因，不算作已解决。进度见 SKILL.md 文末。
+> **当前版本 0.10.3**：全部 6 份报告（00 汇总、01 月度成本、02 虚拟机规格、03 可靠性与安全、04 卓越运营与性能效率、05 同类资源配置对比），01–05 可按客户选择只做一部分（`customer.yaml` 的 `report.include`，00 只汇总所选），也可只查客户指定的订阅，并入 APRL、Defender/Policy、孤立资源、AMBA、Landing Zone 清单等微软公开规则库；RI/SP 覆盖、使用率和购买建议；跨报告交叉核对、质量检查和打包。跨月跟踪（自动与上月比：新增、已解决、仍未处理）按资源判断；读取失败、不在本月范围或范围不完整的问题记为“本月未检查”并写明原因，不算作已解决。进度见 SKILL.md 文末。
+>
+> **0.10.3 修复**：
+> - 下个月费用预测只读到部分订阅时，不再当作全部订阅的预测：只和有预测的订阅自己的本月费用比较；有预测的订阅不到本月费用的 95% 时，01 和 00 写“预测不完整”，不给出全部订阅的预计；一个都没读到时不再显示 −100%；Excel“说明”列改为中文。新增交叉核对 X11 检查这一点。
+> - 只做部分报告时，没选 01、02 的 00 结论不再要求写金额，写了金额（包括“金额待确认”）会被质量检查挡住；说明文件是按另一次报告选择写的、之后没改过时，build 会停下并列出这些文件。
+> - 下个月有特别大的单日费用（一次性购买预留，或 Azure 预测里的大额单日）时，01 写出这几天并按去掉它们后的日均比较，预测里的大额单日单独提示核对，00 的预计费用后面也加提示。
+> - README 补充三个 agent 的运行方式和测试情况（Codex 在 Windows 上的前提、任务说明的写法）。
+> - 上月记录由 0.10.0 以前的版本生成时，03 和 00 的“与上月相比”会说明部分“新增问题”来自之后新增或调整的检查规则。
 >
 > **0.10.2 改进**：费用预测被接口限流（429）时，不再每个订阅等 2 分钟后放弃：每个订阅先试一次，被限流的不等待，等其他费用查询做完后轮流补读，补读最多 20 分钟，仍读不到的订阅记为读取失败；用 --resume 续采时，已读到的预测直接复用。不再查询下下个月的预测，01 Excel 预测表去掉“下下月预测USD”一列。新增交叉核对 X10：00 结论里的金额和带小数的百分比，如果第 1 节表格里没有，就列出来请人工确认（不阻止打包）。
 >
@@ -53,6 +60,14 @@ claude plugin install azure-inspection@azure-inspection
 
 在会话里输入 `/azure-inspection:azure-monthly-inspection`，或直接说“给某客户做月度巡检”。仓库更新后执行 `claude plugin marketplace update azure-inspection` 获取新版本。
 
+非交互运行（`claude -p`）时，同样建议限定工具，并停用 MCP 服务器，例如：
+
+```
+claude -p "<任务说明>" --strict-mcp-config --allowedTools "Skill Read Glob Grep Write Edit Bash(python:*)" --disallowedTools "Bash(az:*) Bash(curl:*) WebFetch WebSearch"
+```
+
+从 Claude Desktop 的会话里调用终端版 `claude` 时，先清掉继承的 `CLAUDE*`、`ANTHROPIC*` 环境变量，否则会提示未登录。
+
 ### GitHub Copilot（Copilot CLI、VS Code/Visual Studio/JetBrains 的 agent 模式）
 
 把 skill 文件夹复制或链接到以下任一位置：
@@ -67,7 +82,9 @@ Copilot CLI 中执行 `/skills reload` 后，用 `/azure-monthly-inspection` 调
 copilot -p "<任务说明>" --no-ask-user --allow-tool "shell(python)" --allow-tool "shell(python:*)" --allow-tool write --deny-tool "shell(az)" --deny-tool "shell(az:*)" --deny-tool "shell(curl)" --deny-tool "shell(Invoke-RestMethod)" --deny-tool "shell(Invoke-WebRequest)" --deny-tool "shell(pwsh)" --deny-tool "shell(powershell)" --deny-tool "shell(Remove-Item)"
 ```
 
-如果 Copilot 配置了能操作 Azure 的 MCP 服务器，巡检时先停用它；账号最好只有只读角色（`access-check` 会提示可写角色）。
+如果 Copilot 配置了能操作 Azure 的 MCP 服务器，巡检时先停用它（`--disable-builtin-mcps --disable-mcp-server <名称>`；插件要用 `copilot plugin disable <插件>`，用完再 `enable`）；账号最好只有只读角色（`access-check` 会提示可写角色）。
+
+注意：`shell(python:*)` 放行的是任意 Python 代码，不是沙箱；只读由脚本自身的检查和只读账号保证。
 
 ### OpenAI Codex（CLI、IDE 扩展、Codex 应用）
 
@@ -77,11 +94,23 @@ copilot -p "<任务说明>" --no-ask-user --allow-tool "shell(python)" --allow-t
 
 重启 Codex 后，用 `$azure-monthly-inspection` 调用，或直接描述任务。
 
+在 Windows 上运行 Codex CLI 有两个前提，否则一条命令都执行不了：
+- 沙箱设为 `windows.sandbox="unelevated"`（写在 `~/.codex/config.toml`，或每次用 `-c` 指定）；
+- 使用 python.org 或 uv 安装的 Python，不能用 Microsoft Store 版的 Python 和 PowerShell。
+
+沙箱里不能用 Excel 复算公式，报告会退回结构核对。非交互运行的参考命令：
+
+```
+codex exec -s workspace-write -c windows.sandbox="unelevated" -c mcp_servers.<名称>.enabled=false "<任务说明>"
+```
+
 ## 样例
 
 `examples/sample-output/` 是用虚构的“示例客户”数据生成的全部 6 份报告，数字和问题都是编的，供第一次使用前了解报告的样子。重新生成方法见 `examples/README.md`。
 
-> 本插件主要在 Claude Code 上测试；GitHub Copilot CLI 1.0.104 已在一个真实客户环境中从准备到打包完整跑通 6 份报告，Azure 请求全部为只读。Codex 读取 skill 的方式（`.agents/skills/`）相同，尚未实测。安全规则由脚本强制执行，与 agent 无关；报告文字质量取决于所用模型，建议首次使用时先试跑一次。
+> 本插件主要在 Claude Code 上测试；GitHub Copilot CLI 1.0.104 已在一个真实客户环境中从准备到打包完整跑通 6 份报告，Azure 请求全部为只读。另外，Claude Code 终端版 2.1.201、GitHub Copilot CLI 1.0.105、OpenAI Codex CLI 0.164.0 都已用虚构数据离线跑通全流程和“只做部分报告”的流程（Codex 需满足上面的 Windows 前提）；Codex 尚未在真实客户环境测试。安全规则由脚本强制执行，与 agent 无关；报告文字质量取决于所用模型，建议首次使用时先试跑一次。
+>
+> 让其他 agent 运行时，任务说明里建议写明：“每条命令单独运行，只写 python 命令本身，不要在前后加其他命令或环境变量；命令被拒绝时停下来告诉我，不要自己写脚本代替”。否则命令可能被上面的放行规则拦下，agent 会放弃或自己写包装脚本。
 
 ## 使用流程
 

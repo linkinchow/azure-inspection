@@ -1,4 +1,4 @@
-"""Cross-report checks X1-X10 (references/cross-checks.md). Read-only over the month's findings and reports.
+"""Cross-report checks X1-X11 (references/cross-checks.md). Read-only over the month's findings and reports.
 
 Writes findings/crosscheck.json. Each rule returns status '通过', '需要处理' (items listed with a suggested action),
 '需人工确认', '未检查' (inputs missing) or '不适用' (a report it compares was not chosen this month). Nothing here changes a report: the agent decides, writes notes into the
@@ -295,11 +295,40 @@ def x10(ws, chosen=REPORTS):
     return _result('X10', '汇总结论数字与表格一致', items, manual=True)
 
 
+INCOMPLETE = ('预测不完整', '预测没有读到')
+
+
+def x11(ws, chosen=REPORTS):
+    """A next-month forecast that misses subscriptions with a large share of this month's costs: 01 and 00 must call it
+    incomplete. Their own text does; a narrative forecastSummary or 00 conclusion stating a tenant-wide figure does not."""
+    from .cost import forecast_scope
+    title = '预测覆盖不全时如实说明'
+    model, forecast = _load(ws.month_dir('findings') / 'cost/model.json'), _load(ws.raw('cost/supplement/forecast.json'))
+    if not model or not forecast:
+        return _result('X11', title, [], '缺少 01 费用或预测数据')
+    fc = forecast_scope.coverage(forecast, model, 1, 1)
+    if fc['complete'] or (fc['estimate'] is None and not fc['missed']):
+        return _result('X11', title, [])
+    # the agent's own text only: the generated 01 bullet and 00 table already say 预测不完整
+    nxt = str((forecast.get('months') or {}).get('next') or '')
+    month = int(nxt[5:7]) if len(nxt) >= 7 else None
+    mention = re.compile(rf'(?<!\d){month}\s*月[^。；，]{{0,6}}?(预计|预测)' if month else r'下个?月[^。；，]{0,6}?(预计|预测)')
+    summary = (_load(ws.month_dir('narrative') / '01.json') or {}).get('forecastSummary') or '' if '01' in chosen else ''
+    conclusion = ''.join((_load(ws.month_dir('narrative') / '00.json') or {}).get('conclusion') or [])
+    items = []
+    for code, text, field in (('01', summary, 'forecastSummary'), ('00', conclusion if mention.search(conclusion) else '', 'conclusion')):
+        if text and not any(w in text for w in INCOMPLETE):
+            items.append({'resource': code, 'evidence': f'只读到 {fc["subscriptions"]} 个订阅的预测（占本月费用的 {fc["share"] or 0:.1%}），'
+                                                        f'说明文件的 {field} 写了预计却没有写“预测不完整”',
+                          'suggestion': f'改写 narrative/{code}.json 的 {field}：写明预测不完整，或去掉全部订阅预计的说法，重新生成'})
+    return _result('X11', title, items)
+
+
 # reports a rule compares; a rule is not applicable when a report it needs was not chosen this month
 # (reports or pillars of 03/04): X1-X4 compare the performance pillar of 04 (P1, P2, P4, P5)
 PILLARS_ALL = {'可靠性', '安全', '卓越运营', '性能效率'}
 NEEDS = {'X1': [{'02'}, {'性能效率'}], 'X2': [{'02'}, {'性能效率'}], 'X3': [{'02'}, {'性能效率'}], 'X4': [{'01'}, {'性能效率'}],
-         'X5': [{'01'}, PILLARS_ALL], 'X8': [PILLARS_ALL]}
+         'X5': [{'01'}, PILLARS_ALL], 'X8': [PILLARS_ALL], 'X11': [{'01'}]}
 
 
 def _applicable(rule, chosen):
@@ -317,7 +346,7 @@ def run(ws, log=print):
     chosen, groups = load_selection(ws), load_groups(ws)
     rules = x1_x2_x3(ws) + [x4(ws), x5(ws, chosen, groups)]
     x67, expected = x6_x7(ws, chosen)
-    rules += x67 + [x8(ws, chosen, groups), x9(ws, chosen), x10(ws, chosen)]
+    rules += x67 + [x8(ws, chosen, groups), x9(ws, chosen), x10(ws, chosen), x11(ws, chosen)]
     rules = [_applicable(r, chosen + groups) for r in rules]
     out = {'rules': rules, 'expectedNumbers': expected}
     write_json(ws.month_dir('findings') / 'crosscheck.json', out)

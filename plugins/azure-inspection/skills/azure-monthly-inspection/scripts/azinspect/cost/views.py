@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 
 from ..core.io import read_json
+from . import forecast_scope
 
 # Cost Management ResourceLocation values -> Chinese (Azure-wide, not customer specific)
 REGION_LABELS = {'us east': '美国东部', 'us east 2': '美国东部 2', 'us west': '美国西部', 'us west 2': '美国西部 2', 'us west 3': '美国西部 3',
@@ -128,7 +129,7 @@ def add_sheets(sheet, formula, sup, model, labels, narrative, cfg):
     for i, s in enumerate(subs, 4):
         o = s['next']
         ok = o.get('fullMonthEstimate') is not None
-        note = '' if ok else (f'{L_cur}无费用，预测接口未返回结果' if (cur_by.get(s['subscriptionId']) or 0) == 0 else '预测接口未返回结果：' + str(o.get('reason')))
+        note = '' if ok else forecast_scope.note_cell(o, cur_by.get(s['subscriptionId']) or 0, L_cur)
         fs.append([s['group'], s['name'], o['actualToDate'] if ok else None, o['forecastRemainder'] if ok else None, None, cur_by.get(s['subscriptionId']), None,
                    note])
         if ok:
@@ -139,12 +140,17 @@ def add_sheets(sheet, formula, sup, model, labels, narrative, cfg):
                 formula(fs, i, 7, f'=(E{i}/{dn})/(F{i}/{dc})-1', (full / dn) / (cur / dc) - 1)
     n = len(subs) + 4
     fs.append(['合计', '有预测的订阅', None, None, None, None, None, '只合计有预测结果的订阅'])
-    cur_sum = sum(v for v in cur_by.values() if v)
-    totals = [(3, nx['actualToDate']), (4, nx['forecastRemainder']), (5, nx['fullMonthEstimate']), (6, cur_sum)]
+    # this month's costs of the subscriptions with a forecast only, so the total row compares like with like
+    fcov = forecast_scope.coverage(f, model, dn, dc)
+    totals = [(3, nx['actualToDate']), (4, nx['forecastRemainder']), (5, nx['fullMonthEstimate'])]
     for col, val in totals:
         formula(fs, n, col, f'=SUM({chr(64 + col)}4:{chr(64 + col)}{n - 1})', val)
-    if cur_sum:
-        formula(fs, n, 7, f'=(E{n}/{dn})/(F{n}/{dc})-1', (nx['fullMonthEstimate'] / dn) / (cur_sum / dc) - 1)
+    formula(fs, n, 6, f'=SUMIFS(F4:F{n - 1},E4:E{n - 1},"<>")', fcov['curWith'])
+    if fcov['dailyChange'] is not None:
+        formula(fs, n, 7, f'=(E{n}/{dn})/(F{n}/{dc})-1', fcov['dailyChange'])
+    if fcov.get('adjustedChange') is not None:   # the report compares without large single days; say why this row differs
+        fs.cell(n, 8, f'只合计有预测结果的订阅；日均变化率含特别大的单日费用（{L_next} {len(fcov["bigDays"])} 天、{L_cur} {len(fcov["bigCurDays"])} 天），'
+                      f'不计这些天为 {fcov["adjustedChange"]:.2%}，见报告第 1 节')
     out.append((fs, [7]))
     d = sup['drivers']
     ds = sheet('变化原因拆解', '主要增长和下降：按资源和计量拆解',

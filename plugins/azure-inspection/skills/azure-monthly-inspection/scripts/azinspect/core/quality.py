@@ -84,10 +84,15 @@ def check_markdown(path: Path, banned: list[str] | None = None) -> list[str]:
 def _finding_names(month_dir: Path) -> tuple[dict[str, set[str]], set[str]]:
     """Resource and subscription names per finding id, and the names of the high-severity findings."""
     import json
+    from ..waf.checks import group_of
     names, high = {}, set()
+    sel = month_dir / 'findings' / 'selection.json'
+    groups = json.loads(sel.read_text(encoding='utf-8')).get('groups') if sel.exists() else None   # pillars done this month
     for path in (month_dir / 'findings' / 'waf').glob('*.json'):
         data = json.loads(path.read_text(encoding='utf-8'))
         for f in data.get('findings', []) if isinstance(data, dict) else []:
+            if groups is not None and f.get('check') and group_of(f['check']) not in groups:
+                continue   # a pillar left out this month (its findings may remain from an earlier analysis)
             raw = [m.get('name') or '' for m in f.get('members') or []]
             raw += [f.get('resourceName') or '', f.get('subscriptionName') or f.get('subscription') or '']
             found = {re.sub(r'^(VM|VMSS)\s+', '', n.strip()) for r in raw for n in re.split(r'[、,，/]', r)}
@@ -105,9 +110,13 @@ def check_narratives(month_dir: Path) -> list[str]:
     issues = []
     summary = narrative_dir / '00.json'
     conclusion = ''.join(json.loads(summary.read_text(encoding='utf-8')).get('conclusion') or []) if summary.exists() else ''
+    sel = Path(month_dir) / 'findings' / 'selection.json'
+    costs = not sel.exists() or bool({'01', '02'} & set(json.loads(sel.read_text(encoding='utf-8')).get('reports') or []))
     if conclusion:
-        if 'USD' not in conclusion:
+        if costs and 'USD' not in conclusion:
             issues.append('00 结论没有写金额：要写费用变化和主要原因、预计节省（时间范围和数据来源脚本已写，不要重复）')
+        if not costs and 'USD' in conclusion:
+            issues.append('本月没有选择 01、02，00 结论不要写费用或金额（包括“金额待确认”这类说法）')
         if high and not any(n in conclusion for n in high):
             issues.append(f'00 结论没有点名最需要处理的资源（例如 {"、".join(sorted(high)[:3])}）')
     for report, key in (('00', 'immediate'), ('03', 'topIssues'), ('04', 'topIssues')):

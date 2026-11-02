@@ -190,7 +190,8 @@ def update(ws, log=print):
     covered = lambda fs, key: {s for f in fs.values() if _key(f) == key and _filled_row(f) for s in _subs(f)}  # noqa: E731
     growth = {key: [len(covered(before, key)), len(covered(findings, key))] for key in sorted(filled)
               if len(covered(findings, key)) > len(covered(before, key))}
-    out = {'month': ws.month, 'previous': prev_month, 'first': False, 'rows': rows, 'coverageGrowth': growth}
+    out = {'month': ws.month, 'previous': prev_month, 'first': False, 'rows': rows, 'coverageGrowth': growth,
+           'previousWithoutRules': 'rulesRun' not in prev}   # recorded before 0.10.0: rules added since cannot be told apart
     write_json(ws.month_dir('findings') / 'tracking.json', out)
     counts = summary(out)
     log('跨月跟踪（对比 ' + prev_month + '）：' + '，'.join(f'{k} {v}' for k, v in counts['all'].items()))

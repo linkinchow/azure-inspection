@@ -114,6 +114,49 @@ def save(ws, reports, groups=None):
     write_json(ws.month_dir('findings') / 'selection.json', {'reports': list(reports), 'groups': list(groups_of(reports, groups))})
 
 
+# Narrative files whose content depends on the choice: 00 summarises the chosen reports and pillars, 03/04 their pillars.
+# build stamps each with the choice it was built under; a file left unchanged under another choice was written for that one.
+STAMP = 'narrative-choice.json'
+
+
+def _narrative_choice(code, reports, groups):
+    chosen = groups_of(reports, groups)
+    if code == '00':
+        return {'reports': list(reports), 'groups': list(chosen)}
+    return {'groups': [g for g in chosen if GROUPS[g] == code]}
+
+
+def _describe(choice):
+    return '、'.join(list(choice.get('reports') or []) + list(choice.get('groups') or [])) or '无'
+
+
+def stale_narratives(ws, reports, groups=None):
+    """[(file name, what it was written for)]: 00/03/04 narratives of chosen reports not edited since a build under another choice."""
+    import hashlib
+    stamp_path = ws.month_dir('findings') / STAMP
+    stamp = read_json(stamp_path) if stamp_path.exists() else {}
+    out = []
+    for code in ('00', '03', '04'):
+        path = ws.month_dir('narrative') / f'{code}.json'
+        was = stamp.get(path.name)
+        if code != '00' and code not in reports or not path.exists() or not was:
+            continue
+        if was['sha'] == hashlib.sha256(path.read_bytes()).hexdigest() and was['choice'] != _narrative_choice(code, reports, groups):
+            out.append((path.name, _describe(was['choice'])))
+    return out
+
+
+def stamp_narratives(ws, reports, groups=None):
+    import hashlib
+    stamp_path = ws.month_dir('findings') / STAMP
+    stamp = read_json(stamp_path) if stamp_path.exists() else {}
+    for code in ('00', '03', '04'):
+        path = ws.month_dir('narrative') / f'{code}.json'
+        if (code == '00' or code in reports) and path.exists():
+            stamp[path.name] = {'sha': hashlib.sha256(path.read_bytes()).hexdigest(), 'choice': _narrative_choice(code, reports, groups)}
+    write_json(stamp_path, stamp)
+
+
 def _record(ws):
     path = ws.month_dir('findings') / 'selection.json'
     return read_json(path) if path.exists() else {}
