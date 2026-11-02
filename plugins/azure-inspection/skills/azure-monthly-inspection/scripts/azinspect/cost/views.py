@@ -122,15 +122,15 @@ def add_sheets(sheet, formula, sup, model, labels, narrative, cfg):
     dn = labels['nextDays']
     fs = sheet(f'{L_next}费用预测', f'{L_next}费用预测（Azure Cost Management）',
                f'查询日期{f["queriedOn"]}；已发生的日期为实际费用，其余为Azure预测值，不是账单金额。{L_cur}无费用的订阅预测接口不返回结果。',
-               ['业务组', '订阅', f'{L_next}截至查询日实际USD', f'{L_next}其余日期预测USD', f'{L_next}全月预计USD', f'{L_cur}实际USD', f'日均变化率（较{L_cur}）', '下下月预测USD', '说明'])
+               ['业务组', '订阅', f'{L_next}截至查询日实际USD', f'{L_next}其余日期预测USD', f'{L_next}全月预计USD', f'{L_cur}实际USD', f'日均变化率（较{L_cur}）', '说明'])
     cur_by = {s['id']: s['cur'] for s in model['subscriptions']}
     subs = sorted(f['subscriptions'], key=lambda s: -((s['next'] or {}).get('actualToDate') or 0) - ((s['next'] or {}).get('forecastRemainder') or 0))
     for i, s in enumerate(subs, 4):
-        o, n2 = s['next'], s.get('next2') or {}
+        o = s['next']
         ok = o.get('fullMonthEstimate') is not None
         note = '' if ok else (f'{L_cur}无费用，预测接口未返回结果' if (cur_by.get(s['subscriptionId']) or 0) == 0 else '预测接口未返回结果：' + str(o.get('reason')))
         fs.append([s['group'], s['name'], o['actualToDate'] if ok else None, o['forecastRemainder'] if ok else None, None, cur_by.get(s['subscriptionId']), None,
-                   n2.get('fullMonthEstimate'), note])
+                   note])
         if ok:
             full = o['actualToDate'] + o['forecastRemainder']
             formula(fs, i, 5, f'=C{i}+D{i}', full)
@@ -138,11 +138,9 @@ def add_sheets(sheet, formula, sup, model, labels, narrative, cfg):
             if cur:
                 formula(fs, i, 7, f'=(E{i}/{dn})/(F{i}/{dc})-1', (full / dn) / (cur / dc) - 1)
     n = len(subs) + 4
-    fs.append(['合计', '有预测的订阅', None, None, None, None, None, None, '只合计有预测结果的订阅'])
+    fs.append(['合计', '有预测的订阅', None, None, None, None, None, '只合计有预测结果的订阅'])
     cur_sum = sum(v for v in cur_by.values() if v)
     totals = [(3, nx['actualToDate']), (4, nx['forecastRemainder']), (5, nx['fullMonthEstimate']), (6, cur_sum)]
-    if 'next2' in f['overall']:
-        totals.append((8, f['overall']['next2']['fullMonthEstimate']))
     for col, val in totals:
         formula(fs, n, col, f'=SUM({chr(64 + col)}4:{chr(64 + col)}{n - 1})', val)
     if cur_sum:

@@ -374,7 +374,7 @@ def main(argv=None) -> int:
             p.add_argument('--offline', action='store_true', help='只用已保存的官网价格，不联网查询')
             p.add_argument('--price-date', help='价格日期 YYYY-MM-DD，默认今天；只使用该日期及之前查询的价格')
         p.set_defaults(func=func)
-    p = sub.add_parser('crosscheck', help='跨报告交叉核对（X1–X9），结果写入 findings/crosscheck.json')
+    p = sub.add_parser('crosscheck', help='跨报告交叉核对（X1–X10），结果写入 findings/crosscheck.json')
     p.add_argument('--workspace', required=True)
     p.add_argument('--month', help='巡检的月份 YYYY-MM，默认上一个完整月')
     p.set_defaults(func=cmd_crosscheck)

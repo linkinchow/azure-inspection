@@ -1,4 +1,4 @@
-"""Cross-report checks X1-X9 (references/cross-checks.md). Read-only over the month's findings and reports.
+"""Cross-report checks X1-X10 (references/cross-checks.md). Read-only over the month's findings and reports.
 
 Writes findings/crosscheck.json. Each rule returns status '通过', '需要处理' (items listed with a suggested action),
 '需人工确认', '未检查' (inputs missing) or '不适用' (a report it compares was not chosen this month). Nothing here changes a report: the agent decides, writes notes into the
@@ -270,6 +270,31 @@ def x9(ws, chosen=REPORTS):
     return _result('X9', '图表与数据一致', stale)
 
 
+FIGURE = re.compile(r'USD\s*[\d,]+\.\d{2}|\d+\.\d+%')   # exact amounts and percentages; rounded ones (约 44%) are left alone
+
+
+def x10(ws, chosen=REPORTS):
+    """Amounts and percentages in 00's conclusion (agent text) that 00's own table, drawn from 01-05, does not show. X6 cannot see these:
+    the table always has the right numbers. A conclusion may quote other figures from a detailed report, so a person confirms."""
+    reports = ws.month_dir('reports')
+    summary = sorted(reports.glob('00_*.md'))
+    if not summary:
+        return _result('X10', '汇总结论数字与表格一致', [], '还没有 00 汇总报告')
+    section = summary[0].read_text(encoding='utf-8').split('\n## 1. ', 1)[-1].split('\n## ', 1)[0]   # 1. 总体结论: table, then conclusion
+    lines = section.splitlines()
+    table = re.sub(r'\s+', '', ''.join(x for x in lines if x.startswith('|')))
+    details = {p.name[:2]: re.sub(r'\s+', '', p.read_text(encoding='utf-8')) for p in sorted(reports.glob('0[1-5]_*.md')) if p.name[:2] in chosen}
+    items = []
+    for figure in dict.fromkeys(FIGURE.findall('\n'.join(x for x in lines if not x.startswith('|')))):
+        key = re.sub(r'\s+', '', figure)
+        if key in table:
+            continue
+        found = [code for code, text in details.items() if key in text]
+        items.append({'resource': figure, 'evidence': '00 结论写了此数字，第 1 节表格中没有' + (f'；{"、".join(found)} 报告中有' if found else '；01–05 报告中也没有'),
+                      'suggestion': '金额以表格为准改写 narrative/00.json 的 conclusion 并重新生成 00；引用的是明细报告里的其他数字的，核对无误即可'})
+    return _result('X10', '汇总结论数字与表格一致', items, manual=True)
+
+
 # reports a rule compares; a rule is not applicable when a report it needs was not chosen this month
 # (reports or pillars of 03/04): X1-X4 compare the performance pillar of 04 (P1, P2, P4, P5)
 PILLARS_ALL = {'可靠性', '安全', '卓越运营', '性能效率'}
@@ -292,7 +317,7 @@ def run(ws, log=print):
     chosen, groups = load_selection(ws), load_groups(ws)
     rules = x1_x2_x3(ws) + [x4(ws), x5(ws, chosen, groups)]
     x67, expected = x6_x7(ws, chosen)
-    rules += x67 + [x8(ws, chosen, groups), x9(ws, chosen)]
+    rules += x67 + [x8(ws, chosen, groups), x9(ws, chosen), x10(ws, chosen)]
     rules = [_applicable(r, chosen + groups) for r in rules]
     out = {'rules': rules, 'expectedNumbers': expected}
     write_json(ws.month_dir('findings') / 'crosscheck.json', out)

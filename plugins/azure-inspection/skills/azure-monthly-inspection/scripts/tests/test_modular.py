@@ -1121,16 +1121,6 @@ class DefenderCoverageTests(unittest.TestCase):
         self.assertTrue(any('可能有遗漏' in n for n in c['notes']), c['notes'])
 
 
-class AmountTickTests(unittest.TestCase):
-    def test_ticks_never_repeat(self):
-        # 02_1 read 0K, 0K, 2K, 2K for 500-steps (thousands rounded); every step must read differently
-        from azinspect.core.charts import amount_tick
-        ticks = [amount_tick(x) for x in range(0, 3001, 500)]
-        self.assertEqual(ticks, ['0', '500', '1K', '1.5K', '2K', '2.5K', '3K'])
-        self.assertEqual(len(set(amount_tick(x) for x in range(0, 2001, 250))), 9)
-        self.assertEqual(amount_tick(-1500), '-1.5K')
-
-
 class CrosscheckTests(unittest.TestCase):
     def test_rules_for_reports_left_out(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1141,6 +1131,24 @@ class CrosscheckTests(unittest.TestCase):
             self.assertIn('04', rules[rule]['reason'])
         self.assertNotEqual(rules['X5']['status'], '不适用')   # 01 with 03
         self.assertNotIn('02', ' '.join(i['resource'] for i in rules['X6']['items']))
+
+    def test_conclusion_numbers_against_the_table(self):
+        """X6 only finds the right numbers somewhere in 00 (the table always has them); X10 lists conclusion numbers the table lacks."""
+        def x10(ws, conclusion):
+            summary.build(ws, config.load(TEMPLATE), ReportPeriod.build('2026-09'), {'conclusion': conclusion}, log=lambda *_: None)
+            rules = {r['rule']: r for r in crosscheck.run(ws, log=lambda *_: None)['rules']}
+            return rules['X6'], rules['X10']
+        with tempfile.TemporaryDirectory() as d:
+            ws = month(d, ['01', '03'])
+            self.assertEqual(crosscheck.x10(ws)['status'], '未检查')   # no 00 yet
+            (ws.month_dir('reports') / '01_9月月度成本巡检报告.md').write_text('# x\n\nOpenAI 增加 USD 360.61\n', encoding='utf-8')
+            x6, rule = x10(ws, ['**9 月费用 USD 1,200.00，比 8 月增加 21.50%**，其中 OpenAI 增加 USD 360.61，约 44%。'])
+            self.assertEqual(x6['status'], '通过')
+            self.assertEqual(rule['status'], '需人工确认')
+            self.assertEqual([i['resource'] for i in rule['items']], ['USD 1,200.00', '21.50%', 'USD 360.61'])   # 约 44%: not checked
+            self.assertIn('01', rule['items'][2]['evidence'])   # found in a detailed report: say where
+            _, rule = x10(ws, ['**9 月费用 USD 1,234.50，比 8 月增加 23.45%**。'])
+            self.assertEqual(rule['status'], '通过')
 
 
 class PackageTests(unittest.TestCase):

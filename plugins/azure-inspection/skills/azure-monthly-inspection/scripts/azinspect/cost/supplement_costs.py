@@ -1,7 +1,8 @@
 """Cost supplements (read-only Cost Management queries), run after the base model:
 
   region    ActualCost prev/cur grouped by ResourceLocation + ServiceName (comparable subscriptions)
-  forecast  forecast for the following month (actual to date + Azure forecast), optionally the month after
+  forecast  forecast for the following month (actual to date + Azure forecast); forecasts the API throttles (429) are
+            read again in one round after the other queries, within FORECAST_RETRY_SECONDS
   drivers   top-10 increases / top-5 decreases (subscription, service) split by resource and meter with
             Cost + UsageQuantity: new, removed, daily-rate quantity, calendar (day-count) and unit-cost effects
 
@@ -12,6 +13,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import time
 
 from ..core.io import write_json
 from ..core.reuse import Reuse, signature
@@ -19,6 +21,12 @@ from .collect import COLLECTOR_VERSION
 
 API = '2025-03-01'
 ARM = 'https://management.azure.com'
+# The forecast API throttles for minutes at a time, often one subscription while others read at once (seen on a large
+# tenant: more than half the forecasts throttled, each giving up after two minutes of retries; one subscription throttled
+# for many minutes while others read at once). Each forecast is tried once; throttled ones are read again in turn after
+# the other queries.
+FORECAST_RETRY_SECONDS = 20 * 60   # time limit of the retry round
+FORECAST_WAIT_SECONDS = 60         # pause after a turn in which every forecast was still throttled
 DRIVER_GROUPINGS = [
     ['ResourceId', 'MeterCategory', 'MeterSubcategory', 'Meter', 'UnitOfMeasure'],
     ['ResourceId', 'MeterCategory', 'MeterSubcategory', 'Meter'],
@@ -68,7 +76,7 @@ class Runner:
         self.reuse = reuse or Reuse(False)
         self.index = {}
 
-    def run(self, qid, sid, kind, endpoint, body, extra=None):
+    def run(self, qid, sid, kind, endpoint, body, extra=None, max_attempts=None):
         url = f'{ARM}/subscriptions/{sid}/providers/Microsoft.CostManagement/{endpoint}?api-version={API}'
         rel = f'cost/supplement/queries/{qid}.json'
         sig = signature('cost-supplement', COLLECTOR_VERSION, qid, kind, url, body)
@@ -81,7 +89,8 @@ class Runner:
                 error = {'message': 'Duplicate nextLink or pagination limit reached'}
                 break
             seen.add(url)
-            status, data, err = self.client.request('POST', url, 'cost-supplement', qid, body=body)
+            status, data, err = self.client.request('POST', url, 'cost-supplement', qid, body=body,
+                                                    **({'max_attempts': max_attempts} if max_attempts else {}))
             if status != 200:
                 error = {'httpStatus': status, 'message': err}
                 break
@@ -232,13 +241,39 @@ def summarize_forecast(run, qid, window):
     return out
 
 
-def task_forecast(run, comparable, period, include_second=True):
-    months = {'next': period.following, 'next2': period.following.shift(1)}
-    if not include_second:
-        months.pop('next2')
-    for key, month in months.items():
-        for sid in comparable:
-            run.run(f'forecast.{sid}.{key}', sid, f'forecast-{key}', 'forecast', forecast_body(month.cost_range()))
+def _forecast(run, sid, period, attempts):
+    return run.run(f'forecast.{sid}.next', sid, 'forecast-next', 'forecast', forecast_body(period.following.cost_range()),
+                   max_attempts=attempts)
+
+
+def forecast_first_pass(run, comparable, period):
+    """Each subscription's forecast read once, without waiting when throttled (a saved read is reused under --resume).
+    Returns the throttled subscriptions, for the retry round."""
+    return [sid for sid in comparable if _forecast(run, sid, period, 1)['httpStatus'] == 429]
+
+
+def forecast_retry(run, left, period, log=print, clock=time.monotonic, sleep=time.sleep):
+    """Throttled forecasts read again in turn, each once per turn, pausing after a turn in which all were still
+    throttled, until the time limit; what is left stays a failed read (HTTP 429)."""
+    if not left:
+        return
+    total, left = len(left), list(left)
+    log(f'费用预测：{total} 个订阅被限流（429），现在轮流补读，最多 {FORECAST_RETRY_SECONDS // 60} 分钟')
+    end = clock() + FORECAST_RETRY_SECONDS
+    while left and clock() < end:
+        still = []
+        for sid in left:
+            if clock() >= end or _forecast(run, sid, period, 1)['httpStatus'] == 429:
+                still.append(sid)
+        if len(still) == len(left):
+            sleep(max(0.0, min(FORECAST_WAIT_SECONDS, end - clock())))
+        left = still
+    log(f'费用预测补读：读到 {total - len(left)}/{total} 个订阅' + (f'，{len(left)} 个仍被限流，记为读取失败' if left else ''))
+
+
+def task_forecast(run, comparable, period):
+    """Forecast summary from the reads of forecast_first_pass and forecast_retry."""
+    months = {'next': period.following}
     subs = []
     for sid in comparable:
         s = run.subs[sid]
@@ -380,10 +415,12 @@ def collect(ws, cfg, client, period, model, log=print, reuse=None):
     run = Runner(ws, client, cd['subscriptions'], cfg.currency, reuse)
     region = task_region(run, comparable, ref, period)
     write_json(ws.raw('cost/supplement/region.json'), region)
-    forecast = task_forecast(run, comparable, period)
-    write_json(ws.raw('cost/supplement/forecast.json'), forecast)
+    left = forecast_first_pass(run, comparable, period)
     drivers = task_drivers(run, model, period)
     write_json(ws.raw('cost/supplement/drivers.json'), drivers)
+    forecast_retry(run, left, period, log)
+    forecast = task_forecast(run, comparable, period)
+    write_json(ws.raw('cost/supplement/forecast.json'), forecast)
     log(f'区域、预测、变化原因：区域合计{"一致" if region["reconciliation"]["allOk"] else "有差异"}；'
         f'{forecast["overall"]["next"]["subscriptionsWithEstimate"]} 个订阅有预测；变化原因拆解 {drivers["coverage"]["reconciled"]}/{drivers["coverage"]["pairs"]} 项对上')
     return region, forecast, drivers

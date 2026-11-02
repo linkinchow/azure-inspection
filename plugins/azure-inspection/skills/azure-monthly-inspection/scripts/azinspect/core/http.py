@@ -130,7 +130,8 @@ class ReadOnlyClient:
                 status, raw = e.code, e.read()
                 if status == 429 or status >= 500:
                     error = f'HTTP {status}'
-                    time.sleep(_retry_wait(e.headers, attempt))
+                    if attempt < max_attempts:   # no wait after the last attempt
+                        time.sleep(_retry_wait(e.headers, attempt))
                     continue
                 try:
                     err = (json.loads(raw) or {}).get('error') or {}
@@ -140,7 +141,8 @@ class ReadOnlyClient:
                 break
             except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
                 status, error = None, type(e).__name__
-                time.sleep(min(30, 2 ** attempt))
+                if attempt < max_attempts:
+                    time.sleep(min(30, 2 ** attempt))
         record = {'check': check, 'target': target, 'method': method.upper(), 'url': _REDACT_URL.sub(r'\1REDACTED', url)[:600],
                   'status': status, 'error': error, 'elapsed': round(time.time() - started, 2),
                   'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}

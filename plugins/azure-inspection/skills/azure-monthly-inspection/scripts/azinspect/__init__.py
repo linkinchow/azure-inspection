@@ -1,2 +1,2 @@
 """Azure monthly inspection (read-only) for the azure-monthly-inspection skill."""
-__version__ = '0.10.1'
+__version__ = '0.10.2'
