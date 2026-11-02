@@ -140,19 +140,31 @@ def check_management_groups(d, out, inventory, total_locks):
         return
     names = list(assignments) + mg_assignments
     missing = [area for area, rx in POLICY_AREAS.items() if not any(re.search(rx, n or '', re.I) for n in names)]
-    prod_direct = [n for n in direct if is_prod(d.sub_env(n))]
+    # the structure is the whole tenant's; with the subscriptions narrowed, only the chosen ones are named
+    narrowed = bool(getattr(d.cfg, 'include', None) or getattr(d.cfg, 'exclude', None))
+    chosen = {s['name'] for s in d.enabled}
+    shown = [n for n in direct if n in chosen] if narrowed else direct
+    prod_direct = [n for n in shown if is_prod(d.sub_env(n))]
     existing = '、'.join(f'“{n}”{f"（{c} 个订阅）" if c > 1 else ""}' for n, c in assignments.most_common(3)) or '无'
-    structure = (f"管理组结构只有一层：{len(direct)} 个订阅直接挂在根管理组下（含生产订阅 {', '.join(prod_direct) or '无'}）" if direct else '订阅都已归入下级管理组')
+    if not direct:
+        structure = '订阅都已归入下级管理组'
+    elif narrowed:
+        structure = (f"管理组结构只有一层：{len(direct)} 个订阅直接挂在根管理组下（管理组按全租户检查；"
+                     + (f"本次所选订阅中有 {len(shown)} 个" + (f"，含生产订阅 {', '.join(prod_direct)}" if prod_direct else '')
+                        if shown else '本次所选的订阅都不在其中') + '）')
+    else:
+        structure = f"管理组结构只有一层：{len(direct)} 个订阅直接挂在根管理组下（含生产订阅 {', '.join(prod_direct) or '无'}）"
     out.add('O8', '低', structure + (f"，{'、'.join(empty)} 管理组为空" if empty else '') + f"；订阅级 Azure Policy 分配主要是 {existing}"
             + (f"，没有针对{'、'.join(missing)}的治理策略，上面这些缺口无法自动发现和纠正。" if missing else '。'),
             '按“平台/生产/非生产/试验”整理管理组，把直挂根下的订阅移入对应管理组；在生产管理组分配 Azure Monitor 基线告警（AMBA）、诊断设置、继承标签、'
             'Azure Monitor 代理自动部署等内置策略（先 Audit 再 DeployIfNotExists）；' + NO_CHANGE,
             subscription='租户', resource_name='管理组与 Azure Policy', resource_type='Microsoft.Management/managementGroups',
-            environment=mixed_env([d.sub_env(n) for n in direct]) if direct else None,
-            evidence={'items': [{'resourceName': n, 'environment': d.sub_env(n)['label']} for n in direct], 'emptyManagementGroups': empty,
+            environment=mixed_env([d.sub_env(n) for n in shown]) if shown else None,
+            evidence={'items': [{'resourceName': n, 'environment': d.sub_env(n)['label']} for n in shown], 'emptyManagementGroups': empty,
+                      'directlyUnderRoot': len(direct),
                       'policyAssignments': dict(assignments), 'missingPolicyAreas': missing,
                       'policyNonCompliantTop': sorted([c for c in compliance if c['nonCompliantResources']], key=lambda c: -c['nonCompliantResources'])[:8]},
-            members=[{'name': n, 'type': 'Microsoft.Resources/subscriptions', 'subscription': n} for n in direct], key='management-groups')
+            members=[{'name': n, 'type': 'Microsoft.Resources/subscriptions', 'subscription': n} for n in shown], key='management-groups')
 
 
 def check_read_access(d, out, inventory):

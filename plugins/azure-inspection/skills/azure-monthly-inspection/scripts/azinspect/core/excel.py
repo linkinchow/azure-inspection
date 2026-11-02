@@ -60,10 +60,21 @@ def _recalculate_with_excel(path: Path) -> tuple[bool, str | None]:
     except ImportError:
         return False, '未安装 pywin32，无法调用 Excel'
     timeout = recalculation_timeout(path.stat().st_size)
+    reason = None
+    for attempt in range(2):   # one retry: a large workbook or a busy Excel fails now and then
+        ok, reason = _excel_once(pythoncom, win32com.client, path, timeout)
+        if ok:
+            return True, None
+        time.sleep(5)
+    return False, reason
+
+
+def _excel_once(pythoncom, client, path, timeout):
     pythoncom.CoInitialize()
     excel = book = None
+    saved = False
     try:
-        excel = win32com.client.DispatchEx('Excel.Application')
+        excel = client.DispatchEx('Excel.Application')
         excel.Visible = False
         excel.DisplayAlerts = False
         excel.AutomationSecurity = 3  # disable macros
@@ -75,10 +86,14 @@ def _recalculate_with_excel(path: Path) -> tuple[bool, str | None]:
                 raise TimeoutError(f'Excel 在 {timeout} 秒内没有完成复算')
             time.sleep(.2)
         book.Save()
+        saved = True   # the file now holds Excel's values; a failing Close (seen on large workbooks) does not undo that
         book.Close(SaveChanges=False)
         book = None
         return True, None
     except Exception as e:  # Excel missing, file not opened or COM failure: fall back to the structural check and keep the reason
+        if saved:
+            book = None
+            return True, None
         return False, f'Excel 复算失败：{type(e).__name__}: {e}'[:500]
     finally:
         # after a disconnect even looking up Close or Quit fails; that must not turn the fallback into a failed build

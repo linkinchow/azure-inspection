@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import platform
 import shutil
 import sys
@@ -277,7 +278,8 @@ def cmd_analyze(args) -> int:
         else:
             from .peer import analyze
             analyze(ws, cfg)
-    return 0
+    from .package import analysis_problems
+    return 1 if analysis_problems(ws) else 0
 
 
 def cmd_build(args) -> int:
@@ -413,4 +415,48 @@ def main(argv=None) -> int:
     p.add_argument('--path', required=True)
     p.set_defaults(func=cmd_quality_check)
     args = parser.parse_args(argv)
+    _matplotlib_cache(getattr(args, 'workspace', None))
     return args.func(args)
+
+
+def _mpl_default_dir() -> Path:
+    """Where matplotlib keeps its cache when MPLCONFIGDIR is not set: an existing ~/.matplotlib, else the platform's
+    place (%LOCALAPPDATA%\\matplotlib on Windows)."""
+    home = Path.home() / '.matplotlib'
+    if home.is_dir() or platform.system() == 'Darwin':
+        return home
+    if platform.system() == 'Windows' and os.environ.get('LOCALAPPDATA'):
+        return Path(os.environ['LOCALAPPDATA']) / 'matplotlib'
+    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'matplotlib'
+
+
+def _writable(directory) -> bool:
+    """Can a file be written in `directory`? A directory made for the test is removed again: matplotlib chooses its place
+    by what exists."""
+    d = Path(directory)
+    created = not d.exists()
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / f'.write-test-{os.getpid()}'
+        probe.write_text('x', encoding='utf-8')
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+    finally:
+        if created:
+            try:
+                d.rmdir()
+            except OSError:
+                pass
+
+
+def _matplotlib_cache(workspace, default_ok=None):
+    """Charts need a writable matplotlib cache. In a sandbox (Codex on Windows) matplotlib's own place is not writable and
+    its fallback, a new directory under TEMP, cannot be written into either, and the agent may not set environment
+    variables: use <workspace>/.cache/matplotlib then (outside raw/, never packaged)."""
+    if not workspace or os.environ.get('MPLCONFIGDIR'):
+        return
+    if default_ok if default_ok is not None else _writable(_mpl_default_dir()):
+        return
+    os.environ['MPLCONFIGDIR'] = str(Path(workspace) / '.cache' / 'matplotlib')

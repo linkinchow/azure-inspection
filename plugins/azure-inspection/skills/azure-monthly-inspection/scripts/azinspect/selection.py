@@ -99,8 +99,11 @@ def subscription_scope(ws, cfg, report=None):
             subs = data['subscriptions'] if isinstance(data, dict) else data
             break
     reports = [report] if report else load(ws)
-    tenant = (['Entra ID 账号与凭据'] if '03' in reports and '安全' in load_groups(ws) else []) + \
-             (['管理组（Landing Zone 对照）'] if '03' in reports else []) + \
+    # management groups: 03's Landing Zone comparison and 04's governance check (O8, 卓越运营) read the whole tenant's
+    groups_done = load_groups(ws)
+    mg = (['Landing Zone 对照'] if '03' in reports else []) + (['治理检查'] if '04' in reports and '卓越运营' in groups_done else [])
+    tenant = (['Entra ID 账号与凭据'] if '03' in reports and '安全' in groups_done else []) + \
+             ([f'管理组（{"和".join(mg)}）'] if mg else []) + \
              (['预留和节省计划订单'] if {'01', '02'} & set(reports) else [])
     tail = f'；{"、".join(tenant)}不按订阅划分，仍按全租户检查' if tenant else ''
     if subs is None:

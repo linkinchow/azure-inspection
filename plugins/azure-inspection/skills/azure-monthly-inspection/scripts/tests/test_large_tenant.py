@@ -367,11 +367,12 @@ class ExcelRecalculationTests(unittest.TestCase):
         fake_client = SimpleNamespace(DispatchEx=lambda name: Excel())
         with (tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {'AZINSPECT_NO_EXCEL': ''}),
               mock.patch.object(excel.platform, 'system', return_value='Windows'),
-              mock.patch.dict(sys.modules, {'pythoncom': fake_com, 'win32com': SimpleNamespace(client=fake_client), 'win32com.client': fake_client})):
+              mock.patch.dict(sys.modules, {'pythoncom': fake_com, 'win32com': SimpleNamespace(client=fake_client), 'win32com.client': fake_client}),
+              mock.patch.object(excel.time, 'sleep')):
             result = excel.verify(self.workbook(d), {'Sheet!A1': 2})
         self.assertFalse(result['recalculatedInExcel'])
         self.assertIn('recalculation interrupted', result['recalculationError'])
-        self.assertEqual(released, [True])
+        self.assertEqual(released, [True, True])   # tried twice (0.10.4), COM released each time
 
     def test_skipped_recalculation_says_why(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {'AZINSPECT_NO_EXCEL': '1'}):

@@ -65,6 +65,14 @@ def record_build(ws, started: float, before: dict | None = None, codes=()) -> No
     write_json(path, hashes)
 
 
+def analysis_problems(ws):
+    """WAF pillars whose last analysis failed (their findings are last run's)."""
+    from .waf.pipeline import FAILURES
+    path = ws.month_dir('findings') / FAILURES
+    return [f'{p} 分析失败（{err}），报告用的是上次的分析结果；问题解决后重新运行 analyze 和 build'
+            for p, err in (read_json(path) if path.exists() else {}).items()]
+
+
 def build(ws, cfg, period, allow_open=False, log=print):
     reports = ws.month_dir('reports')
     files = sorted(p for p in reports.iterdir() if p.is_file() and REPORT.match(p.name) and not p.name.startswith('~$'))
@@ -84,6 +92,7 @@ def build(ws, cfg, period, allow_open=False, log=print):
                 problems.append(f'{md.name}：图片不存在 {rel}')
             charts.add(rel)
     problems += [f'说明文件：{x}' for x in check_narratives(ws.month_dir())]
+    problems += analysis_problems(ws)
     hashes_path = ws.month_dir('findings') / 'build-hashes.json'
     hashes = read_json(hashes_path) if hashes_path.exists() else None
     for f in files if hashes is not None else []:

@@ -168,24 +168,45 @@ def resolve(findings, fid):
     if earlier:
         raise NarrativeError(f'说明文件引用的问题编号 {fid} 是上月编号，本月对应 {len(earlier)} 条问题（'
                              + '、'.join(f['id'] for f in earlier) + '），请改用本月编号')
-    raise NarrativeError(f'说明文件引用的问题编号不存在：{fid}')
+    raise MissingFinding(f'说明文件引用的问题编号不存在：{fid}')
+
+
+class MissingFinding(NarrativeError):
+    """A narrative id this month's findings do not have (gone after an upgrade, or of a pillar left out)."""
 
 
 def apply_narrative(findings, narrative):
+    """Applies overrides; returns (narrative with ids that no longer exist left out, warnings). A top issue left with
+    none of its ids is dropped. An old id now split into several rows still stops the build: the agent has to choose."""
+    warnings = []
+
+    def find(fid, where):
+        try:
+            return resolve(findings, fid)
+        except MissingFinding as e:
+            warnings.append(f'{e}（{where}），已跳过；请按本月问题清单改写说明文件')
+            return None
     for o in narrative.get('severityOverrides') or []:
         if o.get('severity') not in ORDER or not str(o.get('reason') or '').strip():
             raise NarrativeError(f'severityOverrides 需要有效的 severity 和 reason：{o}')
-        f = resolve(findings, o['findingId'])
-        f['originalSeverity'], f['severity'] = f['severity'], o['severity']
-        f['severityReason'] = o['reason']
+        f = find(o['findingId'], 'severityOverrides')
+        if f:
+            f['originalSeverity'], f['severity'] = f['severity'], o['severity']
+            f['severityReason'] = o['reason']
     for o in narrative.get('findingTextOverrides') or []:
-        f = resolve(findings, o['findingId'])
+        f = find(o['findingId'], 'findingTextOverrides')
         for key in ('finding', 'recommendation', 'needsConfirmation', 'acceptance'):
-            if o.get(key):
+            if f and o.get(key):
                 f[key] = o[key]
+    top = []
     for issue in narrative.get('topIssues') or []:
-        for fid in issue.get('findingIds') or []:
-            resolve(findings, fid)
+        ids = issue.get('findingIds') or []
+        kept = [fid for fid in ids if find(fid, f'topIssues“{issue.get("title", "")}”')]
+        if ids and not kept:
+            warnings.append(f'topIssues“{issue.get("title", "")}”引用的问题本月都不存在，这一条没有列入')
+            continue
+        top.append({**issue, 'findingIds': kept} if ids else issue)
+    return ({**narrative, 'topIssues': top} if 'topIssues' in narrative else narrative), warnings
 
 
 def sort_key(f):
@@ -741,7 +762,9 @@ def build(ws, cfg, report, narrative=None, log=print):
     for f in findings:   # last month's ids of the same problem regrouped, so narratives written last month still apply
         if f['id'] in earlier:
             f['previousIds'] = earlier[f['id']]
-    apply_narrative(findings, narrative)
+    narrative, warnings = apply_narrative(findings, narrative)
+    for w in warnings:
+        log(f'{report} 说明文件：{w}')
     findings.sort(key=sort_key)
     by_check = Counter((f['check'], f['severity']) for f in findings)
     pillars_present = set(datasets)

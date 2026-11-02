@@ -84,8 +84,9 @@ class ReportTests(unittest.TestCase):
             md = (ws.month_dir('reports') / '03_可靠性与安全巡检报告.md').read_text(encoding='utf-8')
             self.assertIn('**根本原因**：a', md)
             self.assertNotIn('## 3. 安全', md)
-            with self.assertRaises(report.NarrativeError):
-                report.build(ws, cfg, '03', {'topIssues': [{'title': 'x', 'findingIds': ['R9-000000']}]}, log=lambda *_: None)
+            said = []   # an id that does not exist is left out with a warning (0.10.4), not a stop
+            report.build(ws, cfg, '03', {'topIssues': [{'title': 'x', 'findingIds': ['R9-000000']}]}, log=said.append)
+            self.assertTrue(any('R9-000000' in s for s in said))
             with self.assertRaises(report.NarrativeError):
                 report.build(ws, cfg, '03', {'severityOverrides': [{'findingId': 'REL-001', 'severity': '低'}]}, log=lambda *_: None)
 

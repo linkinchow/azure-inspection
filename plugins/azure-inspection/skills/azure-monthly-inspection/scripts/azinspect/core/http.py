@@ -86,6 +86,24 @@ def classify(method: str, url: str) -> str | None:
     raise BlockedRequest(f'host not allowed: {host}')
 
 
+def _error_text(status, raw) -> str:
+    """'code: message' from an error answer, whatever the key case ({"error": {...}}, {"Code": ..., "Message": ...});
+    the plain text otherwise, never 'None: None'."""
+    try:
+        body = json.loads(raw) if raw else None
+    except ValueError:
+        text = raw.decode('utf-8', 'replace').strip() if isinstance(raw, bytes) else str(raw or '').strip()
+        return f'HTTP {status}: {text[:300]}' if text else f'HTTP {status}'
+    if isinstance(body, dict):
+        err = body['error'] if isinstance(body.get('error'), dict) else body
+        low = {str(k).lower(): v for k, v in err.items()}
+        if low.get('code') or low.get('message'):
+            return f"{low.get('code') or f'HTTP {status}'}: {str(low.get('message') or '')[:300]}"
+        if isinstance(body.get('error'), str):
+            return f"HTTP {status}: {body['error'][:300]}"
+    return f'HTTP {status}'
+
+
 def _retry_wait(headers, attempt: int) -> float:
     waits = []
     for key, value in (headers or {}).items():
@@ -116,6 +134,7 @@ class ReadOnlyClient:
         audience = classify(method, url)
         headers = {'User-Agent': self.user_agent, 'Content-Type': 'application/json'}
         started, status, data, error = time.time(), None, None, None
+        waited, throttled, attempt = 0.0, 0, 0
         for attempt in range(1, max_attempts + 1):
             if audience:
                 headers['Authorization'] = 'Bearer ' + self.tokens.get(audience)
@@ -130,21 +149,22 @@ class ReadOnlyClient:
                 status, raw = e.code, e.read()
                 if status == 429 or status >= 500:
                     error = f'HTTP {status}'
+                    throttled += status == 429
                     if attempt < max_attempts:   # no wait after the last attempt
-                        time.sleep(_retry_wait(e.headers, attempt))
+                        pause = _retry_wait(e.headers, attempt)
+                        waited += pause
+                        time.sleep(pause)
                     continue
-                try:
-                    err = (json.loads(raw) or {}).get('error') or {}
-                    error = f"{err.get('code')}: {str(err.get('message'))[:300]}" if isinstance(err, dict) else f'HTTP {status}'
-                except ValueError:
-                    error = f'HTTP {status}'
+                error = _error_text(status, raw)
                 break
             except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
                 status, error = None, type(e).__name__
                 if attempt < max_attempts:
+                    waited += min(30, 2 ** attempt)
                     time.sleep(min(30, 2 ** attempt))
         record = {'check': check, 'target': target, 'method': method.upper(), 'url': _REDACT_URL.sub(r'\1REDACTED', url)[:600],
                   'status': status, 'error': error, 'elapsed': round(time.time() - started, 2),
+                  'attempts': attempt, 'waited': round(waited, 2), 'throttled': throttled,   # retries hidden by the final status
                   'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
         with self._lock:
             self.calls.append(record)

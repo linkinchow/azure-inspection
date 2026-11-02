@@ -34,20 +34,47 @@ def collect(ws, cfg, client, log=print, pillars=None):
     return failed
 
 
+FAILURES = 'analyze-failures.json'   # findings/: pillars whose last analysis failed; package refuses while any is listed
+
+
 def analyze(ws, cfg, log=print, pillars=None):
-    done = []
+    """Analyses each pillar with raw data. A pillar that fails keeps its last findings file (written only at the end of
+    its analysis), is recorded in findings/analyze-failures.json and stops packaging until it is analysed again;
+    the other pillars still run."""
+    done, failed = [], {}
     for pillar in pillars or PILLARS:
-        if not Raw(ws, pillar).exists('manifest.json'):
+        raw = Raw(ws, pillar)
+        if not raw.exists('manifest.json'):
             log(f'{pillar}：没有原始数据，跳过分析')
             continue
-        if (Raw(ws, pillar).load('manifest.json') or {}).get('phases'):
+        if (raw.load('manifest.json') or {}).get('phases'):
             log(f'{pillar}：只采了资源清单（供 03 的架构总览），不能分析；要做这个支柱，先补采 collect --part waf --pillars {pillar}')
             continue
-        data = _module(pillar).analyze(ws, cfg, log)
+        if pillar == 'aprl' and not raw.exists('results.json'):
+            log('aprl：没有采集结果（results.json），跳过分析；要做这一项，先补采 collect --part waf --pillars aprl')
+            continue
+        try:
+            data = _module(pillar).analyze(ws, cfg, log)
+        except Exception as e:   # noqa: BLE001 - recorded and reported; the other pillars still run
+            failed[pillar] = f'{type(e).__name__}: {e}'
+            log(f'{pillar}：分析失败（{failed[pillar]}），保留这个支柱上次的分析结果；问题解决后重新运行 analyze，否则不能打包')
+            continue
         done.append(pillar)
         log(f'{pillar}：{len(data["findings"])} 项问题')
+    _record_failures(ws, pillars or PILLARS, failed)
     resolve_ssh_exposure(ws, log)
     return done
+
+
+def _record_failures(ws, ran, failed):
+    from ..core.io import read_json, write_json
+    path = ws.month_dir('findings') / FAILURES
+    record = {k: v for k, v in (read_json(path) if path.exists() else {}).items() if k not in ran}
+    record.update(failed)
+    if record:
+        write_json(path, record)
+    elif path.exists():
+        path.unlink()
 
 
 SSH_PENDING = '（NSG 是否放行 22 端口以网络检查结果为准）。'

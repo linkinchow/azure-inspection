@@ -146,6 +146,13 @@ def slim_dep(x):
             'errorCode': err.get('code'), 'errorDetailCodes': [d.get('code') for d in (err.get('details') or [])][:5]}
 
 
+def activity_since(end, now=None):
+    """Start of the AKS activity query: ACTIVITY_DAYS before the window end, but inside the 90 days the activity log keeps
+    counted from when the request runs (a start just past them is answered 400), with an hour to spare."""
+    now = now or datetime.utcnow()
+    return max(end - timedelta(days=ACTIVITY_DAYS), now - timedelta(days=90) + timedelta(hours=1))
+
+
 class _Collector:
     def __init__(self, ws, cfg, client, window, log):
         self.ws, self.cfg, self.client, self.window, self.log = ws, cfg, client, window, log
@@ -263,7 +270,7 @@ class _Collector:
     def aks_activity(self):
         """Successful/failed AKS operations in the last 90 days per subscription, without caller identities."""
         end = datetime.strptime(self.window['end'], '%Y-%m-%dT%H:%M:%SZ')
-        since = (end - timedelta(days=ACTIVITY_DAYS)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        since = activity_since(end).strftime('%Y-%m-%dT%H:%M:%SZ')
         out = []
         for sid in sorted({a['subscriptionId'] for a in self.rows('aks')}):
             flt = f"eventTimestamp ge '{since}' and eventTimestamp le '{self.window['end']}' and resourceProvider eq 'Microsoft.ContainerService'"

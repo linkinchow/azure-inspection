@@ -3,7 +3,7 @@ name: azure-monthly-inspection
 description: Read-only monthly Azure inspection for a customer tenant, producing Chinese customer reports (cost review, VM rightsizing, reliability, security, operational excellence, performance, peer comparison, summary). Use when the user asks to run or prepare an Azure 月度巡检/成本巡检/WAF 巡检/健康检查 for a customer, set up a new customer for inspection, check read-only access, or quality-check inspection reports before delivery.
 license: MIT
 metadata:
-  version: 0.10.3
+  version: 0.10.4
 ---
 
 # Azure 月度巡检（只读）
@@ -21,7 +21,7 @@ metadata:
 
 ## 当前版本能做什么
 
-版本 0.10.3 可以：
+版本 0.10.4 可以：
 
 - 准备：环境检查、建客户工作目录、核对只读访问
 - 生成全部 6 份报告：**00 汇总**、**01 月度成本**、**02 虚拟机规格**、**03 可靠性与安全**、**04 卓越运营与性能效率**、**05 同类资源配置对比**（采集、分析、生成、核对）
@@ -53,6 +53,10 @@ metadata:
 6. **只通过说明文件改报告**：不要直接编辑 `reports/` 或 `package/` 里的文件。重新生成会覆盖手改的内容，也绕过了核对。
    - 要改文字，就改 `narrative/*.json` 后重新 build。
    - 发现脚本自动生成的文字有错、说明文件改不了时，告诉用户这是插件问题，不要手改报告。
+7. **只运行本 skill 规定的命令**：
+   - 命令被拒绝或运行环境不允许时，停下来告诉用户，不要自己写脚本包装或代替 skill 的命令。
+   - 不要设置 `AZINSPECT_NO_EXCEL`，它只供单元测试使用。Excel 复算失败或跳过时，如实告诉用户，并在交付说明里写明。
+   - 不要结束不是自己启动的进程（例如卡住的 Excel），停下来告诉用户。
 
 ## 运行脚本
 
