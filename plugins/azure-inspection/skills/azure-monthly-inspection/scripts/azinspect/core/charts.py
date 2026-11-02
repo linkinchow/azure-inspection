@@ -38,6 +38,16 @@ def figure(width: float = 10, height: float = 4):
     return fig, ax
 
 
+def _trim(x: float) -> str:
+    text = f'{x:,.2f}'.rstrip('0').rstrip('.')
+    return '0' if text == '-0' else text
+
+
+def amount_tick(x, _=None) -> str:
+    """Amount axis tick: thousands as K, with only the decimals the step needs, so 500-steps read 1K, 1.5K, 2K (not 2K, 2K)."""
+    return f'{_trim(x / 1000)}K' if abs(x) >= 1000 else _trim(x)
+
+
 def clear(chart_dir: Path, report: str) -> None:
     """Remove this report's charts from an earlier build, so a chart that is no longer drawn does not linger in the package."""
     for old in Path(chart_dir).glob(f'{report}_*.png'):

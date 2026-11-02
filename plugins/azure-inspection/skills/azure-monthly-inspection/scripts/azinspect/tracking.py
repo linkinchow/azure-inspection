@@ -32,7 +32,7 @@ def current(ws):
     a pillar left out never counts as run, so its problems from last month are 本月未检查."""
     from .selection import load_groups
     groups = load_groups(ws)
-    findings, ran, failed, partial, rules = {}, set(), set(), {}, set()
+    findings, ran, failed, partial, rules, filled = {}, set(), set(), {}, set(), set()
     base = ws.month_dir('findings') / 'waf'
     for pillar in PILLARS:
         path = base / f'{pillar}.json'
@@ -46,6 +46,8 @@ def current(ws):
                 rules.update(f'{pillar}:{check}:{r}' for r in c.get('rules') or [])
             if (c.get('denied') or 0) + (c.get('otherErrors') or 0) > 0:
                 failed.add(f'{pillar}:{check}')
+            if c.get('filled'):   # subscriptions Resource Graph left out were read one by one (S-I11)
+                filled.add(f'{pillar}:{check}')
             if c.get('incomplete'):   # rules that could not see resources in subscriptions left out (APRL ids)
                 partial.setdefault(f'{pillar}:{check}', set()).update(c['incomplete'])
         for f in data['findings']:
@@ -55,7 +57,7 @@ def current(ws):
                                  'resource': f.get('resourceName'), 'finding': f['finding'][:200], 'members': _members(f),
                                  **({'rule': f['rule']} if f.get('rule') else {})}
             ran.add(f'{pillar}:{f["check"]}')
-    return findings, ran, failed, partial, rules
+    return findings, ran, failed, partial, rules, filled
 
 
 def _key(f):
@@ -73,6 +75,11 @@ def _subs(f):
     single = lambda s: bool(s) and not is_aggregate_subscription(s) and not is_tenant_label(s)  # noqa: E731
     subs = {s for s, _ in f.get('members') or [] if single(s)}
     return subs or ({f['subscription']} if single(f.get('subscription')) else set())
+
+
+def _filled_row(f):
+    """A row from the reading that fills left-out subscriptions (S-I11: Defender recommendations, not Policy)."""
+    return not (f.get('finding') or '').startswith('Azure Policy')
 
 
 def _fill_members(ws, month, before):
@@ -100,7 +107,7 @@ def previous_month(ws):
 
 
 def update(ws, log=print):
-    findings, ran, failed, partial, rules = current(ws)
+    findings, ran, failed, partial, rules, filled = current(ws)
     subs = inspected(ws)
     write_json(ws.state_dir / 'months' / f'{ws.month}.json', {'month': ws.month, 'findings': findings, 'checksRun': sorted(ran),
                                                              'rulesRun': sorted(rules), 'subscriptions': subs})
@@ -177,7 +184,13 @@ def update(ws, log=print):
         else:
             why = '不在本月范围' if outside else '读取失败' if _key(f) in failed or _key(f) not in ran else '范围不完整'
             rows.append({**plain(f), 'id': fid, 'status': '本月未检查', 'notChecked': why})
-    out = {'month': ws.month, 'previous': prev_month, 'first': False, 'rows': rows}
+    # checks whose reading now covers more subscriptions than last month (left-out subscriptions filled): problems that
+    # were always there read as new or wider, so 03 and 00 say so. Only the rows of the filled reading count: S-I11's
+    # Policy rows come from another query and may span every subscription in both months
+    covered = lambda fs, key: {s for f in fs.values() if _key(f) == key and _filled_row(f) for s in _subs(f)}  # noqa: E731
+    growth = {key: [len(covered(before, key)), len(covered(findings, key))] for key in sorted(filled)
+              if len(covered(findings, key)) > len(covered(before, key))}
+    out = {'month': ws.month, 'previous': prev_month, 'first': False, 'rows': rows, 'coverageGrowth': growth}
     write_json(ws.month_dir('findings') / 'tracking.json', out)
     counts = summary(out)
     log('跨月跟踪（对比 ' + prev_month + '）：' + '，'.join(f'{k} {v}' for k, v in counts['all'].items()))

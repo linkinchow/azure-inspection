@@ -140,6 +140,9 @@ def month_row(tracked, waf_reports):
     others = sum(tracking_summary(tracked)['all'].values()) - sum(c.values())
     if others:
         text += f'（另有 {others} 项上月问题属于本月没有选择的报告，未列入）'
+    from .waf.report import coverage_growth
+    if '03' in waf_reports and coverage_growth(tracked):
+        text += f'；{coverage_growth(tracked)}'
     return [f'与 {tracked["previous"]} 相比', text]
 
 

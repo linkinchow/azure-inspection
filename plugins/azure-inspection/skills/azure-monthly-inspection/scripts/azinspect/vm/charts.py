@@ -70,7 +70,7 @@ def make_pngs(data, chart_dir: Path):
             ax.text(v + total * 0.004, i, f'{v:,.0f}（{v / total:.0%}）', va='center', fontsize=9, color=cs.INK)
         ax.set_yticks(range(len(rows)), [k for k, _ in rows], fontsize=9, color=cs.INK)
         ax.set_xlim(0, max(v for _, v in rows) * 1.22)
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x / 1000:,.0f}K' if x >= 1000 else f'{x:,.0f}'))
+        ax.xaxis.set_major_formatter(FuncFormatter(cs.amount_tick))
         ax.set_title(f'各订阅每月预计节省（合计 USD {total:,.2f}，官网列表价）', loc='left', fontsize=11, color=cs.INK, pad=10)
         cs.save(fig, chart_dir / FILES['subscriptions'])
 
@@ -82,7 +82,7 @@ def make_pngs(data, chart_dir: Path):
         ax.text(v + base * 0.01, i, f'{v:,.0f}' if name.startswith('当前') else f'{v:,.0f}（每月省 {base - v:,.0f}）', va='center', fontsize=9, color=cs.INK)
     ax.set_yticks(range(len(rows)), [n for n, _ in rows], fontsize=10, color=cs.INK)
     ax.set_xlim(0, base * 1.35)
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x / 1000:,.0f}K'))
+    ax.xaxis.set_major_formatter(FuncFormatter(cs.amount_tick))
     ax.set_title('VM 每月费用：当前与各方案对比（USD，官网列表价）', loc='left', fontsize=11, color=cs.INK, pad=10)
     cs.save(fig, chart_dir / FILES['plans'])
     return {k: v for k, v in FILE_PATHS.items() if (chart_dir / FILES[k]).exists()}

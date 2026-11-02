@@ -625,7 +625,18 @@ def month_sentence(tracked, report):
         text += f'“本月未检查”中{"，".join(reasons)}，{"都" if len(reasons) > 1 else ""}不能判断是否已解决。'
     if s['severityChanged']:
         text += f'另有 {len(s["severityChanged"])} 项严重程度有变化，见 Excel“与上月相比”列。'
+    if report == '03' and coverage_growth(tracked):
+        text += coverage_growth(tracked) + '。'
     return text
+
+
+def coverage_growth(tracked):
+    """The month Defender recommendations first cover the subscriptions Resource Graph left out: what reads as new was there."""
+    grown = (tracked or {}).get('coverageGrowth', {}).get('defender:S-I11')
+    if not grown:
+        return ''
+    return (f'Defender 建议覆盖的订阅从 {grown[0]} 个增加到 {grown[1]} 个（本月起 Resource Graph 没有返回的订阅改为按订阅读取补上），'
+            '新增和涉及范围扩大的 Defender 建议多为原来就存在的问题')
 
 
 def markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows=None,

@@ -37,7 +37,7 @@ sys.dont_write_bytecode = True
 from azinspect.cli import main as cli  # noqa: E402
 from azinspect.core import config as config_mod  # noqa: E402
 from azinspect.core.http import PRICES  # noqa: E402
-from azinspect.core.io import Workspace, write_json  # noqa: E402
+from azinspect.core.io import Workspace, read_json, write_json  # noqa: E402
 from azinspect.core.period import ReportPeriod  # noqa: E402
 from azinspect.cost import collect as cost_collect  # noqa: E402
 from azinspect.cost import supplement_costs  # noqa: E402
@@ -743,8 +743,8 @@ NARRATIVE = {
     '00': {
         'conclusion': ['**最需要先处理的是支付数据库 pay-mysql-prod**：防火墙放行所有地址、没有强制加密，也没有高可用和异地备份。'
                        '问题主要集中在门户手工创建的资源上，按 Terraform 模块创建的同类资源大多已经符合推荐做法。',
-                       '**9 月费用 USD 17,350.94，比 8 月增加 7.13%**，增长最快的是 data-prod 的 Azure OpenAI（约 44%），来自工作日调用量增加。'
-                       '7 台虚拟机调整规格预计每月节省 USD 760.51（Azure 官网公开列表价），降配稳定后再买 1 年预留实例，合计每月约节省 USD 1,556.42。'],
+                       '**9 月费用 USD {cur}，比 8 月增加 {change}**，增长最快的是 data-prod 的 Azure OpenAI（约 44%），来自工作日调用量增加。'
+                       '{vms} 台虚拟机调整规格预计每月节省 USD {resize}（Azure 官网公开列表价），降配稳定后再买 1 年预留实例，合计每月约节省 USD {ri1}。'],
         'customerQuestions': ['生产和测试环境的划分：本次按订阅和资源名称判断。', 'shopassets/exports 容器是否用于对外分发。',
                               '支付库的恢复时间目标和数据丢失容忍度。', '各资源的负责人和月度预算目标。'],
         'savingsPending': [{'item': 'datalakeraw 存储', 'status': '约 26 TiB 全部在 Hot 层，没有生命周期策略'},
@@ -753,6 +753,17 @@ NARRATIVE = {
 
 
 # ---------------------------------------------------------------- run
+
+def summary_narrative(ws):
+    """00 with the amounts filled in from the built 01/02 results, as the agent copies them (the same figures 00's table shows)."""
+    f = ws.month_dir('findings')
+    totals = read_json(f / 'cost' / 'model.json')['comparableTotals']
+    vm = read_json(f / 'vm' / 'summary.json')
+    ri1 = next(p for p in read_json(f / 'vm' / 'price-summary.json')['plans'] if p['key'] == 'ri1')
+    figures = {'cur': f'{totals["cur"]:,.2f}', 'change': f'{totals["changeRate"]:.2%}', 'vms': vm['recommendedVMCount'],
+               'resize': f'{vm["monthlyPotentialSavingsUSD"]:,.2f}', 'ri1': f'{ri1["monthlySaving"]:,.2f}'}
+    return {**NARRATIVE['00'], 'conclusion': [p.format(**figures) for p in NARRATIVE['00']['conclusion']]}
+
 
 def commitments_part(ws):
     """Invented RI/SP data in the format of cost/commitments.collect: two reserved web VMs, an unused reservation,
@@ -812,12 +823,16 @@ def run(root: Path, log=print):
     waf_part(ws, cfg, MONTH)
     peer_part(ws)
     for code, data in NARRATIVE.items():
-        write_json(ws.month_dir('narrative') / f'{code}.json', data)
+        if code != '00':
+            write_json(ws.month_dir('narrative') / f'{code}.json', data)
     args = ['--workspace', str(root), '--month', MONTH]
     cli(['analyze', *args, '--part', 'cost', '--offline'])
     cli(['analyze', *args, '--part', 'vm', '--offline', '--price-date', '2026-10-26'])
     cli(['analyze', *args, '--part', 'peer', '--offline'])
-    cli(['build', *args, '--part', 'all'])
+    for part in ('vm', 'cost', 'peer', 'waf'):   # the order of build --part all
+        cli(['build', *args, '--part', part])
+    write_json(ws.month_dir('narrative') / '00.json', summary_narrative(ws))   # 00 last: it quotes 01 and 02's results
+    cli(['build', *args, '--part', 'summary'])
     status = cli(['crosscheck', *args])
     cli(['quality-check', '--path', str(ws.month_dir('reports'))])
     if status:

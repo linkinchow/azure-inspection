@@ -68,21 +68,26 @@ def _type(resource_id):
     return '/'.join(parts[i + 1:i + 3])
 
 
-def _from_identity(ws):
-    """Unhealthy High/Medium assessments from the security_identity pillar (Defender assessments API, per subscription).
+def _from_identity(ws, skip=()):
+    """Unhealthy High/Medium assessments from the security_identity pillar (Defender assessments API, per subscription),
+    for the subscriptions not in `skip`.
 
-    Used when Resource Graph's securityresources table returns nothing for this account (seen in practice: the query
-    succeeds with 0 rows while the per-subscription API returns hundreds of recommendations).
+    Used for the subscriptions Resource Graph's securityresources table returned nothing for (seen in practice: 0 rows
+    for an account while the per-subscription API returns hundreds of recommendations; and on a large tenant, rows for a
+    few subscriptions only).
     """
-    rows, files = [], sorted(Raw(ws, 'security_identity').path('defender').glob('assessments_*.json'))
-    for path in files:
+    rows, files = [], []
+    for path in sorted(Raw(ws, 'security_identity').path('defender').glob('assessments_*.json')):
         data = json.loads(path.read_text(encoding='utf-8'))
+        if str(data.get('subscriptionId')).lower() in skip:
+            continue
+        files.append(path)
         for a in data.get('assessments') or []:
             if a.get('status') == 'Unhealthy' and a.get('severity') in ('High', 'Medium'):
                 rows.append({'subscriptionId': data['subscriptionId'], 'displayName': a.get('displayName'), 'severity': a['severity'],
                              'resourceId': a.get('resourceId'), 'firstUnhealthy': a.get('firstEvaluationDate'),
                              'statusChange': a.get('statusChangeDate'), 'link': None})
-    return rows, len(files)
+    return rows, files
 
 
 def _days(value, end):
@@ -111,10 +116,24 @@ def analyze(ws, cfg, log=print):
             c['notes'].append(f'{key} 读取失败：{data[key].get("error")}')
 
     assessments = data['assessments']['rows']
-    if not assessments:
-        assessments, files = _from_identity(ws)
-        if files:
-            c['notes'].append(f'Resource Graph 的 securityresources 表没有返回 Defender 建议，改用按订阅读取的 Defender 评估接口（与 S-I4 同一来源，{files} 个订阅）')
+    got = {str(r.get('subscriptionId')).lower() for r in assessments}
+    # Resource Graph may answer for some subscriptions only: the others come from the per-subscription Defender API
+    left_out = [s for s in enabled(load_scope(ws)) if s['id'].lower() not in got]
+    if left_out:
+        extra, files = _from_identity(ws, skip=got)
+        assessments = assessments + extra
+        filled = {path.stem.split('_', 1)[1].lower() for path in files}
+        missing = [s['name'] for s in left_out if s['id'].lower() not in filled]
+        if files and not got:
+            c['notes'].append(f'Resource Graph 的 securityresources 表没有返回 Defender 建议，改用按订阅读取的 Defender 评估接口（与 S-I4 同一来源，{len(files)} 个订阅）')
+        elif files:
+            c['filled'] = {'resourceGraph': len(got), 'perSubscription': len(files)}
+            c['notes'].append(f'Resource Graph 只返回了 {len(got)} 个订阅的 Defender 建议，其余 {len(files)} 个订阅改用按订阅读取的 Defender 评估接口补上'
+                              '（与 S-I4 同一来源）')
+        if missing and data['assessments']['status'] == 200:
+            c['otherErrors'] += 1   # what was not read is not resolved (tracking reads this as a failed read)
+            shown = '、'.join(missing[:5]) + (f' 等 {len(missing)} 个' if len(missing) > 5 else '')
+            c['notes'].append(f'订阅 {shown} 的 Defender 建议 Resource Graph 没有返回，也没有按订阅读取的数据（安全检查的身份部分没有采集），可能有遗漏')
     undated = not any(r.get('firstUnhealthy') for r in assessments)
     if undated and assessments:
         c['notes'].append('未取得建议的首次发现时间，无法判断已持续多久：只列出高严重性建议')

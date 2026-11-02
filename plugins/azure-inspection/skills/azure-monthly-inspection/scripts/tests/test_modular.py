@@ -1045,6 +1045,92 @@ class AcceptanceFieldTests(unittest.TestCase):
         self.assertNotIn('acceptance', Findings('operations').add('O2', '中', 'x', 'y', key='k2'))
 
 
+class DefenderCoverageTests(unittest.TestCase):
+    """Backlog W: Resource Graph can return Defender assessments for a few subscriptions only (seen on a large tenant).
+    Subscriptions it left out are filled from the per-subscription Defender API that S-I4 reads; without that data the
+    check says it may be incomplete, so a problem is never resolved because it was not read."""
+
+    def run_defender(self, identity):
+        import importlib
+        defender = importlib.import_module('azinspect.waf.defender')
+        sub = lambda s: f'/subscriptions/{s}'  # noqa: E731
+        old = '2026-07-01T00:00:00Z'
+        with tempfile.TemporaryDirectory() as d:
+            ws = io.Workspace(d, '2026-09')
+            ws.create()
+            io.write_json(ws.raw('waf/scope.json'), {'subscriptions': [{'id': s, 'name': f'sub-{s}', 'state': 'Enabled'} for s in 'abc']})
+            io.write_json(ws.raw('waf/defender/manifest.json'), {'window': {'end': '2026-10-01T00:00:00Z'}})
+            io.write_json(ws.raw('waf/defender/results.json'), {'collectedAt': '2026-10-01T00:00:00Z',
+                'assessments': {'status': 200, 'rows': [{'subscriptionId': 'a', 'displayName': 'Rec A', 'severity': 'High',
+                                                         'resourceId': sub('a'), 'firstUnhealthy': old}]},
+                'policyStates': {'status': 200, 'rows': []}, 'policyAssignments': {'status': 200, 'rows': []}})
+            for s, items in identity.items():
+                io.write_json(ws.raw(f'waf/security_identity/defender/assessments_{s}.json'), {'subscriptionId': s, 'http': 200,
+                    'assessments': items})
+            return defender.analyze(ws, config.load(TEMPLATE), log=lambda *_: None)
+
+    def test_left_out_subscriptions_filled_per_subscription(self):
+        high = {'status': 'Unhealthy', 'severity': 'High', 'displayName': 'Rec B', 'resourceId': '/subscriptions/b',
+                'firstEvaluationDate': '2026-06-01T00:00:00Z'}
+        out = self.run_defender({'b': [high], 'c': [], 'a': [{**high, 'displayName': 'Rec A'}]})
+        titles = sorted(f['evidence']['recommendation'] for f in out['findings'] if f['check'] == 'S-I11')
+        self.assertEqual(titles, ['Rec A', 'Rec B'])            # b filled; a not read twice
+        c = out['coverage']['S-I11']
+        self.assertTrue(any('其余 2 个订阅' in n for n in c['notes']), c['notes'])
+        self.assertEqual(c['filled'], {'resourceGraph': 1, 'perSubscription': 2})
+        self.assertEqual(c.get('otherErrors') or 0, 0)
+
+    def test_first_month_after_filling_is_explained(self):
+        # the month the left-out subscriptions are filled, recommendations that were always there read as new or wider:
+        # 03 and 00 say the coverage grew
+        from azinspect import tracking
+        from azinspect.waf.report import month_sentence
+
+        def month(d, m, subs_hit, filled, policy=''):
+            ws = io.Workspace(d, m)
+            ws.create()
+            io.write_json(ws.raw('waf/scope.json'), {'subscriptions': [{'id': s, 'name': s, 'state': 'Enabled'} for s in 'abc']})
+            cov = {'attempted': 2, 'succeeded': 2, **({'filled': {'resourceGraph': 1, 'perSubscription': 2}} if filled else {})}
+            io.write_json(ws.month_dir('findings') / 'waf' / 'defender.json', {'pillar': 'defender', 'coverage': {'S-I11': cov}, 'findings': [
+                {'id': 'S-I11-x', 'check': 'S-I11', 'severity': '中', 'finding': 'Defender for Cloud 高严重性建议“X”已超过 30 天未处理',
+                 'resourceName': '资源', 'subscriptionName': '多个订阅',
+                 'members': [{'name': f'r-{s}', 'subscription': s} for s in subs_hit]}] + ([
+                {'id': 'S-I11-p', 'check': 'S-I11', 'severity': '低', 'finding': 'Azure Policy 分配“P”有 3 个不合规资源，分布在 3 个订阅',
+                 'resourceName': '3 个资源', 'subscriptionName': '多个订阅（3 个）',
+                 'members': [{'name': f'p-{s}', 'subscription': s} for s in policy]}] if policy else [])})
+            return ws
+        with tempfile.TemporaryDirectory() as d:
+            tracking.update(month(d, '2026-08', 'a', False), log=lambda *_: None)
+            out = tracking.update(month(d, '2026-09', 'abc', True), log=lambda *_: None)
+        self.assertEqual(out['coverageGrowth'], {'defender:S-I11': [1, 3]})
+        self.assertIn('Defender 建议覆盖的订阅从 1 个增加到 3 个', month_sentence(out, '03'))
+        self.assertIn('Defender 建议覆盖的订阅从 1 个增加到 3 个', summary.month_row(out, ['03', '04'])[1])
+        with tempfile.TemporaryDirectory() as d:   # Policy rows (not filled) already spanning every subscription do not hide it
+            tracking.update(month(d, '2026-08', 'a', False, policy='abc'), log=lambda *_: None)
+            out = tracking.update(month(d, '2026-09', 'abc', True, policy='abc'), log=lambda *_: None)
+        self.assertEqual(out['coverageGrowth'], {'defender:S-I11': [1, 3]})
+        with tempfile.TemporaryDirectory() as d:   # the next month, or without filling: nothing to explain
+            tracking.update(month(d, '2026-08', 'abc', True), log=lambda *_: None)
+            out = tracking.update(month(d, '2026-09', 'abc', True), log=lambda *_: None)
+        self.assertEqual(out.get('coverageGrowth'), {})
+
+    def test_left_out_subscriptions_without_per_subscription_data(self):
+        out = self.run_defender({})
+        c = out['coverage']['S-I11']
+        self.assertGreater(c.get('otherErrors') or 0, 0)       # tracking will not resolve what was not read
+        self.assertTrue(any('可能有遗漏' in n for n in c['notes']), c['notes'])
+
+
+class AmountTickTests(unittest.TestCase):
+    def test_ticks_never_repeat(self):
+        # 02_1 read 0K, 0K, 2K, 2K for 500-steps (thousands rounded); every step must read differently
+        from azinspect.core.charts import amount_tick
+        ticks = [amount_tick(x) for x in range(0, 3001, 500)]
+        self.assertEqual(ticks, ['0', '500', '1K', '1.5K', '2K', '2.5K', '3K'])
+        self.assertEqual(len(set(amount_tick(x) for x in range(0, 2001, 250))), 9)
+        self.assertEqual(amount_tick(-1500), '-1.5K')
+
+
 class CrosscheckTests(unittest.TestCase):
     def test_rules_for_reports_left_out(self):
         with tempfile.TemporaryDirectory() as d:
