@@ -179,7 +179,10 @@ def markdown(cfg, period, d, n, pngs, scope):
     lines = [f'# {cfg.name} Azure 巡检汇总报告（{nxt.label}）', '',
              f'**范围**：{cfg.name} ' + (f'{scope["readable"]} 个' if scope['readable'] is not None else '的') + ' Azure 订阅。'
              + (f'{scope["note"]}。' if scope['note'] else '') + (f'{scope["chosen"]}。' if scope.get('chosen') else ''), ''] + content + [
-             f'**方式**：使用贵司提供的账号，以只读方式读取{reads}，没有修改任何资源，也没有做端口扫描。', ''] + \
+             f'**方式**：使用贵司提供的账号，以只读方式读取{reads}，没有修改任何资源，也没有做端口扫描。', '',
+             f'**使用说明**：本报告的问题{"、建议和预计节省" if costs else "和建议"}是根据读取到的{"配置、指标和账单数据" if costs else "配置、指标和日志"}自动分析得出的，'
+             '可能因数据不完整、权限不足或环境判断有误而不准确。各项改进请由熟悉环境的负责人逐项确认影响、按变更流程批准后再执行，'
+             '尤其是删除资源、降配、调整网络和权限这类操作。', ''] + \
             (['**时间**：', ''] + times + [''] if times else []) + [waf, '', f'## {next(section)}. 总体结论', '']
     rows = []
     if model:

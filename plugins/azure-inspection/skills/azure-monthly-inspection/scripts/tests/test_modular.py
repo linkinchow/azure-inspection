@@ -617,6 +617,17 @@ class SubscriptionScopeTests(unittest.TestCase):
             text = summary.build(ws, cfg, ReportPeriod.build('2026-09'), log=lambda *_: None).read_text(encoding='utf-8')
         self.assertIn('按贵司选择，本次只检查 1 个订阅：pay-prod', text)
 
+    def test_00_says_how_to_use_it(self):
+        # backlog AC: the reports are automated analysis; each change is reviewed and approved before it is made
+        with tempfile.TemporaryDirectory() as d:
+            text = summary.build(month(d, ['01', '03']), cfg_with(None), ReportPeriod.build('2026-09'), log=lambda *_: None).read_text(encoding='utf-8')
+            self.assertIn('**使用说明**：本报告的问题、建议和预计节省是根据读取到的配置、指标和账单数据自动分析得出的', text)
+            self.assertIn('按变更流程批准后再执行', text)
+        with tempfile.TemporaryDirectory() as d:   # no 01/02: no savings to speak of
+            text = summary.build(month(d, ['03']), cfg_with(None), ReportPeriod.build('2026-09'), log=lambda *_: None).read_text(encoding='utf-8')
+            self.assertIn('本报告的问题和建议是根据读取到的配置、指标', text)
+            self.assertNotIn('预计节省', text.split('**使用说明**')[1].split('\n')[0])
+
 
 class PillarTests(unittest.TestCase):
     """03/04 narrowed to some of their pillars: report.include ['可靠性'] etc."""
