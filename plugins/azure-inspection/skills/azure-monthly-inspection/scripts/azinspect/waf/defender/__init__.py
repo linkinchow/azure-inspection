@@ -11,7 +11,7 @@ import json
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from ..common import Findings, Raw, coverage_entry, enabled, env, load_scope, mixed_env, now
+from ..common import Findings, Raw, coverage_entry, enabled, env, load_scope, mixed_env, now, plain_error
 
 STALE_DAYS = 30
 SEVERITY = {'High': '中', 'Medium': '低'}   # our level for long-open Defender recommendations
@@ -113,7 +113,7 @@ def analyze(ws, cfg, log=print):
             c['succeeded'] += 1
         else:
             c['denied' if status in (401, 403) else 'otherErrors'] += 1
-            c['notes'].append(f'{key} 读取失败：{data[key].get("error")}')
+            c['notes'].append(f'{key} ' + plain_error(status, data[key].get('error')))
 
     assessments = data['assessments']['rows']
     got = {str(r.get('subscriptionId')).lower() for r in assessments}

@@ -84,9 +84,10 @@ class NarrativeIdTests(unittest.TestCase):
         self.assertEqual([t['title'] for t in out['topIssues']], ['a'])
         self.assertEqual(out['topIssues'][0]['findingIds'], ['R1-aaaaaa'])
         self.assertEqual(findings[0]['finding'], 'x2')
-        self.assertEqual(len(warnings), 4)                     # three ids, and the top issue dropped
-        self.assertTrue(all('S-I1-bbbbbb' in w for w in warnings[:3]))
-        self.assertIn('“b”', warnings[3])
+        self.assertEqual(len(warnings), 5)   # three ids, top issue a kept in part (0.10.5), top issue b dropped
+        self.assertEqual(sum('S-I1-bbbbbb' in w for w in warnings), 3)
+        self.assertTrue(any('“a”' in w and '部分' in w for w in warnings))
+        self.assertTrue(any('“b”' in w and '没有列入' in w for w in warnings))
         with self.assertRaises(NarrativeError):   # last month's id now split in two: the agent has to choose
             apply_narrative(findings, {'topIssues': [{'title': 'c', 'findingIds': ['R2-old']}]})
 

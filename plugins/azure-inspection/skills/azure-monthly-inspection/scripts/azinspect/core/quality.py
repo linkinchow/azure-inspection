@@ -150,7 +150,7 @@ def check_tree(root: Path) -> dict[str, list[str]]:
     results = {}
     skipped = set(left_out(root))
     for md in sorted(Path(root).rglob('*.md')):
-        if md.parent == Path(root) and md.name in skipped:
+        if md.parent == Path(root) and md.name in skipped or '未选报告_旧版' in md.parts:   # set aside by build, not delivered
             continue
         issues = check_markdown(md)
         if issues:

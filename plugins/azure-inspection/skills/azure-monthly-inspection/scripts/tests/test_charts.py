@@ -31,6 +31,12 @@ def drawn_ticks(make):
     return seen
 
 
+class SignedAmountTests(unittest.TestCase):
+    def test_no_minus_zero(self):
+        # 01_4 and 01_5 labelled small decreases "-0"
+        self.assertEqual([cs.signed_amount(v) for v in (-0.3, 0.4, 0.0, 5, -1234.4)], ['0', '0', '0', '+5', '-1,234'])
+
+
 class AmountTickTests(unittest.TestCase):
     def test_half_thousand_steps_are_distinct(self):
         labels = [cs.amount_tick(x) for x in range(0, 4001, 500)]

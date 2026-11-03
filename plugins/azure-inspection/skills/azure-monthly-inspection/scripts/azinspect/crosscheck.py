@@ -270,7 +270,20 @@ def x9(ws, chosen=REPORTS):
     return _result('X9', '图表与数据一致', stale)
 
 
-FIGURE = re.compile(r'USD\s*[\d,]+\.\d{2}|\d+\.\d+%')   # exact amounts and percentages; rounded ones (约 44%) are left alone
+# amounts (with or without cents) and percentages with decimals; rounded ones (约 44%, 约 USD 1.2 万) are left alone
+FIGURE = re.compile(r'USD\s*\d[\d,]*(?:\.\d{2})?(?![\d.,]*\d)(?!\s*[万亿])|\d+\.\d+%')
+
+
+def _same_figure(said, shown):
+    """Whole figures only (2.5% is not in 12.5%); a percentage rounded from the shown one counts (14.8% for 14.82%)."""
+    if said == shown:
+        return True
+    if said.endswith('%') and shown.endswith('%'):
+        decimals = len(said[:-1].split('.')[1]) if '.' in said else 0
+        return f'{float(shown[:-1]):.{decimals}f}' == said[:-1]
+    if said.startswith('USD') and shown.startswith('USD') and '.' not in said:   # a whole amount rounded from the shown one
+        return round(float(shown[3:].replace(',', ''))) == int(said[3:].replace(',', ''))
+    return False
 
 
 def x10(ws, chosen=REPORTS):
@@ -284,12 +297,13 @@ def x10(ws, chosen=REPORTS):
     lines = section.splitlines()
     table = re.sub(r'\s+', '', ''.join(x for x in lines if x.startswith('|')))
     details = {p.name[:2]: re.sub(r'\s+', '', p.read_text(encoding='utf-8')) for p in sorted(reports.glob('0[1-5]_*.md')) if p.name[:2] in chosen}
+    shown = [re.sub(r'\s+', '', f) for f in FIGURE.findall(table)]
     items = []
     for figure in dict.fromkeys(FIGURE.findall('\n'.join(x for x in lines if not x.startswith('|')))):
         key = re.sub(r'\s+', '', figure)
-        if key in table:
+        if any(_same_figure(key, s) for s in shown):
             continue
-        found = [code for code, text in details.items() if key in text]
+        found = [code for code, text in details.items() if any(_same_figure(key, s) for s in FIGURE.findall(text))]
         items.append({'resource': figure, 'evidence': '00 结论写了此数字，第 1 节表格中没有' + (f'；{"、".join(found)} 报告中有' if found else '；01–05 报告中也没有'),
                       'suggestion': '金额以表格为准改写 narrative/00.json 的 conclusion 并重新生成 00；引用的是明细报告里的其他数字的，核对无误即可'})
     return _result('X10', '汇总结论数字与表格一致', items, manual=True)

@@ -41,6 +41,32 @@ REGION_LABELS = {
     'brazilsouth': '巴西南部', 'mexicocentral': '墨西哥中部', 'chinaeast2': '中国东部 2', 'chinaeast3': '中国东部 3',
     'chinanorth2': '中国北部 2', 'chinanorth3': '中国北部 3',
 }
+# Cost Management names locations by area code and direction ('JA East', 'US East 2', 'EU West'): the country part
+# of the region name, before or after the direction
+BILLING_AREAS = {'us': 'us', 'eu': 'europe', 'ap': 'asia', 'in': 'india', 'my': 'malaysia', 'ja': 'japan', 'jp': 'japan',
+                 'au': 'australia', 'uk': 'uk', 'ae': 'uae', 'kr': 'korea', 'ca': 'canada', 'br': 'brazil', 'de': 'germany',
+                 'fr': 'france', 'se': 'sweden', 'ch': 'switzerland', 'no': 'norway', 'za': 'southafrica', 'qa': 'qatar',
+                 'il': 'israel', 'pl': 'poland', 'it': 'italy', 'es': 'spain', 'mx': 'mexico', 'nz': 'newzealand',
+                 'id': 'indonesia', 'sa': 'saudiarabia', 'cn': 'china'}
+
+
+def region_key(location) -> str:
+    """The region name ('japaneast') of a location given as a region name or as Cost Management's ('JA East')."""
+    words = str(location or '').lower().split()
+    key = ''.join(words)
+    if key in REGION_LABELS or len(words) < 2 or words[0] not in BILLING_AREAS:
+        return key
+    area, rest = BILLING_AREAS[words[0]], words[1:]
+    number = rest.pop() if rest[-1].isdigit() else ''
+    for candidate in (''.join(rest) + area + number, area + ''.join(rest) + number):
+        if candidate in REGION_LABELS:
+            return candidate
+    return key
+
+
+def region_name(location) -> str:
+    """Chinese name of a region, else the location as given."""
+    return REGION_LABELS.get(region_key(location), location)
 
 
 @dataclass
@@ -108,7 +134,7 @@ class CustomerConfig:
 
     def region(self, location: str) -> str:
         key = (location or '').lower()
-        return self.region_labels.get(key) or REGION_LABELS.get(key, location)
+        return self.region_labels.get(key) or self.region_labels.get(region_key(location)) or region_name(location)
 
     def created_by_standard(self, tags: dict | None) -> bool | None:
         if not self.standard_tag:

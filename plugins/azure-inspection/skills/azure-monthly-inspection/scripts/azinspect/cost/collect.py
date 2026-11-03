@@ -23,7 +23,7 @@ from ..core.reuse import Reuse, signature
 
 API = '2025-03-01'
 CORE = ('curActual', 'prevActual', 'curAmortized', 'curResources')
-KINDS = CORE + ('curPricingModel', 'curResourceGroups', 'budgets')
+KINDS = CORE + ('curPricingModel', 'prevPricingModel', 'curResourceGroups', 'budgets')
 ARM = 'https://management.azure.com'
 COLLECTOR_VERSION = 3
 # Per-resource costs of a subscription with many resource groups are read in batches of resource groups: one huge query
@@ -44,10 +44,11 @@ def query_body(kind, period):
         'curAmortized': ('AmortizedCost', 'Monthly', ['ServiceName']),
         'curResources': ('ActualCost', 'Monthly', ['ResourceId', 'ServiceName']),
         'curPricingModel': ('ActualCost', 'Monthly', ['PricingModel']),
+        'prevPricingModel': ('ActualCost', 'Monthly', ['PricingModel']),   # reservation/savings plan purchases of last month
         'curResourceGroups': ('ActualCost', 'Daily', ['ResourceGroupName']),
     }
     cost_type, granularity, dimensions = definitions[kind]
-    window = period.previous.cost_range() if kind == 'prevActual' else period.current.cost_range()
+    window = period.previous.cost_range() if kind.startswith('prev') else period.current.cost_range()
     return {'type': cost_type, 'timeframe': 'Custom', 'timePeriod': window,
             'dataset': {'granularity': granularity, 'aggregation': {'totalCost': {'name': 'Cost', 'function': 'Sum'}},
                         'grouping': [{'type': 'Dimension', 'name': dim} for dim in dimensions]}}
@@ -261,7 +262,7 @@ def collect(ws, cfg, client, period, log=print, reuse=None):
         rec['result']['ok'] and any(row['cost'] != 0 for row in rows)
         for (sid, kind), (rec, rows) in collector.records.items() if sid == s['id'] and kind in ('curActual', 'prevActual'))]
     active = [s for s in subs if s['id'] in collector.optional_scope]
-    collector.run_jobs([(s, 'curPricingModel') for s in active] + [(s, 'budgets') for s in active])
+    collector.run_jobs([(s, k) for s in active for k in ('curPricingModel', 'prevPricingModel')] + [(s, 'budgets') for s in active])
     meta = collector.snapshot(True)
     budgets = []
     for (sid, kind), (record, _rows) in collector.records.items():

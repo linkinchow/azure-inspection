@@ -65,7 +65,8 @@ def format_markdown(text: str) -> str:
                     token += ' '
             return token
 
-        line = re.sub(r'`+[^`\n]*`+|\]\([^\n]*?\)|https?://[^\s)]+', protect, line)
+        # report file names (01_9月月度成本巡检报告) keep their spelling
+        line = re.sub(r'`+[^`\n]*`+|\]\([^\n]*?\)|https?://[^\s)]+|(?<![A-Za-z0-9])0[0-5]_[^\s|（(、，,]+', protect, line)
         line = format_prose(line)
         for index, value in enumerate(protected):
             line = line.replace('\x00' + str(index) + '\x00', value)

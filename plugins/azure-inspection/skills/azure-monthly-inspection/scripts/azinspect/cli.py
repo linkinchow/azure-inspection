@@ -295,6 +295,10 @@ def cmd_build(args) -> int:
               '确认内容仍然适用时，加 --narrative-checked 重新 build。')
         return 2
     from .waf.report import NarrativeError
+    from .package import ASIDE, set_aside
+    moved = set_aside(ws, chosen.reports)
+    if moved:
+        print(f'本月没有选择的报告的旧文件已移到 reports/{ASIDE}/：{"、".join(moved[:6])}' + (f' 等 {len(moved)} 个' if len(moved) > 6 else ''))
     started, before, built = time.time(), snapshot(ws), []
     parts = ('vm', 'cost', 'peer', 'waf', 'summary') if args.part == 'all' else (args.part,)
     try:

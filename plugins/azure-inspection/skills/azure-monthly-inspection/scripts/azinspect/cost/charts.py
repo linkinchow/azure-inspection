@@ -10,6 +10,7 @@ from openpyxl.chart import BarChart, LineChart, Reference
 from openpyxl.chart.marker import DataPoint
 
 from ..core import charts as cs
+from ..core.config import region_name
 from .views import REGION_LABELS
 
 
@@ -51,15 +52,17 @@ def chart_data(model, sup, period):
         for p in o['daily']:
             nxt[int(p['date'][8:10])]['actual' if str(p['costStatus']).lower() == 'actual' else 'forecast'] += p['cost']
     prev, cur, following = period.previous, period.current, period.following
-    services = sorted(model['services'], key=lambda r: -abs(r['delta']))[:10]
-    regions = sorted(sup['region']['overall']['byLocation'], key=lambda r: -abs(r['cur'] - r['prev']))[:8]
+    # changes that round to 0 are not among the largest
+    services = sorted([r for r in model['services'] if abs(r['delta']) >= 0.5], key=lambda r: -abs(r['delta']))[:10]
+    regions = sorted([r for r in sup['region']['overall']['byLocation'] if abs(r['cur'] - r['prev']) >= 0.5],
+                     key=lambda r: -abs(r['cur'] - r['prev']))[:8]
     return {'timeline': [(date(prev.year, prev.month, d), (daily.get(d) or {}).get('prev')) for d in range(1, prev.days + 1)]
                         + [(date(cur.year, cur.month, d), (daily.get(d) or {}).get('cur')) for d in range(1, cur.days + 1)],
             'prevDailyAverage': model['comparableTotals']['prevDaily'], 'curDailyAverage': model['comparableTotals']['curDaily'],
             'next': [(d, nxt[d]['actual'] if nxt[d]['actual'] else None, nxt[d]['forecast'] if nxt[d]['forecast'] else None) for d in range(1, following.days + 1)],
             'groupLabel': group_label(model), 'groups': [(r['name'], r['prev'], r['cur']) for r in group_rows(model)],
             'services': [(r['name'], r['delta']) for r in services],
-            'regions': [(REGION_LABELS.get(r['location'], r['location']), r['cur'] - r['prev']) for r in regions]}
+            'regions': [(REGION_LABELS.get(r['location']) or region_name(r['location']), r['cur'] - r['prev']) for r in regions]}
 
 
 def _line(ax, x, y, color, **kw):
@@ -136,12 +139,13 @@ def make_pngs(data, labels, chart_dir):
         ax.axvline(0, color=cs.INK2, lw=1)
         span = max([abs(v) for _, v in rows] or [1])
         for i, (_, v) in enumerate(rows):
-            ax.text(v + (span * 0.015 if v > 0 else -span * 0.015), i, f'{v:+,.0f}', va='center', ha='left' if v > 0 else 'right', fontsize=9, color=cs.INK)
+            ax.text(v + (span * 0.015 if v > 0 else -span * 0.015), i, cs.signed_amount(v), va='center', ha='left' if v > 0 else 'right', fontsize=9, color=cs.INK)
         ax.set_yticks(range(len(rows)), [n for n, _ in rows], fontsize=9, color=cs.INK)
-        ax.set_xlim(-span * 1.3, span * 1.3)
+        ax.set_xlim(*cs.bar_limits([v for _, v in rows]))
         ax.xaxis.set_major_formatter(FuncFormatter(cs.amount_tick))
         ax.set_title(title, loc='left', fontsize=11, color=cs.INK, pad=10)
-        ax.text(1, -0.12, '红色：增加    蓝色：减少', transform=ax.transAxes, ha='right', fontsize=8, color=cs.INK2)
+        # above the plot: below it the key covered the last axis label when there were only a few rows
+        ax.text(1, 1.01, '红色：增加    蓝色：减少', transform=ax.transAxes, ha='right', va='bottom', fontsize=8, color=cs.INK2)
         cs.save(fig, chart_dir / names[key])
     return {k: f'charts/{v}' for k, v in names.items()}
 

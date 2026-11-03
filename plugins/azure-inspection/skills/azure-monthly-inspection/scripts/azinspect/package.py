@@ -19,6 +19,29 @@ from .core.quality import check_markdown, check_narratives
 from .selection import TITLES, load as load_selection
 
 REPORT = re.compile(r'^0[0-5]_.+\.(md|xlsx)$')
+ASIDE = '未选报告_旧版'   # reports/ subfolder for files of reports not chosen this month (from an earlier build)
+
+
+def set_aside(ws, chosen):
+    """Moves report files and charts of reports not chosen this month into reports/未选报告_旧版/, so nobody takes them
+    from reports/ with this month's. Returns the moved names (relative to reports/)."""
+    reports = ws.month_dir('reports')
+    keep = {'00', *chosen}
+    moved = []
+    for sub in ('', 'charts'):
+        folder = reports / sub
+        if not folder.is_dir():
+            continue
+        for p in sorted(folder.iterdir()):
+            stale = p.is_file() and p.name[:2] not in keep and (REPORT.match(p.name) if not sub else re.match(r'^0[1-5]_.+\.png$', p.name))
+            if stale:
+                target = reports / ASIDE / sub / p.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    target.unlink()
+                shutil.move(str(p), str(target))
+                moved.append(f'{sub}/{p.name}' if sub else p.name)
+    return moved
 IMAGE = re.compile(r'!\[[^\]]*\]\((charts/[^)]+)\)')
 
 

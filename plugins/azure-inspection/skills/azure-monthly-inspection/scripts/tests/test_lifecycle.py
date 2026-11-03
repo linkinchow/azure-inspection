@@ -188,6 +188,31 @@ class CheckTests(unittest.TestCase):
         _found, run, _inv = self.run_check({}, reviewed='2026-01-01')
         self.assertTrue(any('支持日历最后核对于 2026-01-01' in x for x in run.coverage['R9']['limits']))
 
+    def test_unlinked_notices_read_plainly(self):
+        # 0.10.0 tests: English titles copied as they were, a price notice listed as a retirement, and the PostgreSQL 14
+        # notice listed apart from the PostgreSQL 14 finding it is about
+        rows = {'postgres': [{'id': rid('b', 'Microsoft.DBforPostgreSQL/flexibleServers', 'pg-old'), 'name': 'pg-old', 'resourceGroup': 'rg',
+                              'properties': {'version': '14'}}],
+                'retirements': [
+                    {'subscriptionId': 'a', 'trackingId': 'PG-14', 'status': 'Active', 'retirementDate': '2027-02-01T00:00:00Z',
+                     'title': 'Important notice: Extended Support for PostgreSQL 14 begins 1 February 2027'},
+                    {'subscriptionId': 'a', 'trackingId': 'PR-1', 'status': 'Active', 'retirementDate': '2027-01-01T00:00:00Z',
+                     'title': 'Action required: Prepare for specific Azure VM series and Azure Storage service price updates'},
+                    {'subscriptionId': 'a', 'trackingId': 'CL-2', 'status': 'Active', 'retirementDate': '2026-12-31T00:00:00Z',
+                     'title': 'Transition to the ContainerLogV2 table by 31 December 2026'}]}
+        found, run, _inv = self.run_check(rows)
+        pg = next(f for f in found if f['name'] == 'pg-old')
+        self.assertIn('跟踪 ID PG-14', pg['finding'])                                  # tied to the finding it is about
+        unlinked = next(f for f in found if '未能关联到具体资源' in f['finding'])
+        self.assertNotIn('PostgreSQL', unlinked['finding'])
+        self.assertNotIn('price', unlinked['finding'])                                  # not a retirement
+        self.assertIn('容器日志', unlinked['finding'])
+        self.assertIn('需要迁移或升级', unlinked['finding'])
+        self.assertIn('原文：Transition to the ContainerLogV2 table', unlinked['finding'])
+        self.assertTrue(any('价格' in n for n in run.coverage['R9']['notes']))
+        # the coverage count leaves the price notice out too (it read 3 notices against the list's 2)
+        self.assertTrue(any(n.startswith('微软退役公告 2 条') for n in run.coverage['R9']['notes']), run.coverage['R9']['notes'])
+
     def test_retirement_notices(self):
         st = rid('a', 'Microsoft.Storage/storageAccounts', 'stlegacy')
         rows = {'retirements': [
@@ -238,7 +263,7 @@ class CheckTests(unittest.TestCase):
         self.assertIn('storage & queues', notice['finding'])
         self.assertEqual(notice['severity'], '中')
         unlinked = next(f for f in found if '未能关联到具体资源' in f['finding'])
-        self.assertIn('Action required: feature X & Y（2027-03-01）', unlinked['finding'])
+        self.assertIn('（2027-03-01；原文：Action required: feature X & Y）', unlinked['finding'])   # 0.10.5: Chinese first, title kept
         self.assertEqual(sorted(r['retirementDate'] for r in inv['lifecycle']['retirements']), ['2026-12-31', '2027-03-01'])
         self.assertEqual(lifecycle.parse_date('639263232000000000').date().isoformat(), '2026-09-30')
 

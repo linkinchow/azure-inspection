@@ -18,6 +18,9 @@ HIGH_IMPACT_SCOPE_EXCLUDE = ('vm', 'dbdiag', 'keyvault', 'ai', 'loganalytics', '
 DEVIATION_SCOPE_EXCLUDE = ('vm', 'dbdiag', 'keyvault', 'ai', 'loganalytics')
 
 
+# no creation records were collected this month; some rows may still show a time read elsewhere
+CREATED_GAP = '本月没有采集资源创建记录，原因分析主要用标签和部署历史；没有创建时间的资源显示为“未取得”。'
+
 def _pct(pair):
     return round(100 * pair[1] / pair[0], 1) if pair[0] else None
 
@@ -108,7 +111,7 @@ def analyze(ws, cfg, log=print):
     snapshot = ((ctx.load('security_network/manifest.json') or {}).get('window') or {}).get('snapshot')
     gaps = list(COVERAGE_GAPS)
     if not ctx.created_map:
-        gaps.insert(0, '资源创建时间未取得（没有 raw/peer 的采集数据），原因分析只用了标签和部署历史，创建时间显示为“未取得”。')
+        gaps.insert(0, CREATED_GAP)
     data = {'collectedAt': collected, 'configSnapshot': snapshot, 'analyzedAt': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             'method': {'summary': '对每类资源，按业务线和环境分组，找出环境中已在使用、且符合微软推荐的做法作为标准；多数做法本身不合规时，以少数已合规资源的做法为目标并注明覆盖率。'
                                   '逐资源列出与标准不同的属性，再用标准创建标签、创建时间、部署历史（门户向导部署名）、门户规则命名、供应商等证据推断原因，并给出对齐建议和可行性。',

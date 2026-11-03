@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 
+from ..core.charts import signed_amount
+from ..core.config import region_name
 from ..core.io import read_json
 from . import forecast_scope
 
@@ -38,7 +40,7 @@ def load(ws):
 
 
 def region_label(code, cfg=None):
-    label = REGION_LABELS.get(code) or (cfg.region(code) if cfg else None)
+    label = REGION_LABELS.get(code) or (cfg.region(code) if cfg else region_name(code))
     return f'{label}（{code}）' if label and label != code else code
 
 
@@ -80,7 +82,7 @@ def driver_auto_text(p):
     parts = [(c.get('newMeters', 0), '新增计量或资源'), (c.get('removedMeters', 0), '停用计量或资源'),
              (c.get('dailyRateQuantityEffect', 0), '日均用量变化'), (c.get('calendarEffect', 0), '天数差异'), (c.get('unitCostChange', 0), '单位费用变化')]
     parts = sorted([x for x in parts if abs(x[0]) >= 1], key=lambda x: -abs(x[0]))[:3]
-    text = '；'.join(f'{label} USD {v:+,.0f}' for v, label in parts) or '各项变化都很小'
+    text = '；'.join(f'{label} USD {signed_amount(v)}' for v, label in parts) or '各项变化都很小'
     res = p.get('resources') or {}
     if res.get('newCount'):
         text += f'；新增 {res["newCount"]} 个资源'

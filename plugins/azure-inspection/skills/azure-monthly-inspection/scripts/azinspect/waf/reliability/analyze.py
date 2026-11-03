@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from ..checks import count_text, type_label
 from . import lifecycle
-from ..common import ADVISOR_NO_TEXT, Findings, Raw, advisor_problem, coverage_entry, enabled, env, load_scope, mixed_env
+from ..common import ADVISOR_NO_TEXT, Findings, Raw, advisor_problem, coverage_entry, enabled, env, load_scope, mixed_env, plain_error
 
 CHECKS = [f'R{i}' for i in range(1, 13)]
 SEV_ORDER = {'高': 0, '中': 1, '低': 2}
@@ -115,7 +115,7 @@ class _Run:
         other = Counter((c['status'], (c['error'] or '')[:80]) for c in sel if c['status'] not in (200, 401, 403))
         cv['otherErrors'] += sum(other.values())
         for (st, er), n in other.items():
-            cv['notes'].append(f'{n} calls HTTP {st}: {er}')
+            cv['notes'].append(plain_error(st, er, n))
 
     # -------------------------------------------------------------- AKS helpers
     @staticmethod

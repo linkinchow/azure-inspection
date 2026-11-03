@@ -29,6 +29,21 @@ def compare(rows_prev, rows_cur, field, dp, dc):
     return sorted(result, key=lambda r: (-r['cur'], r['name']))
 
 
+COMMITMENT_MODELS = {'reservation', 'savingsplan'}
+
+
+def commitment_charges(rows, comparable):
+    """Reservation and savings plan charges (purchases) in each month's actual costs of the comparable subscriptions;
+    None without last month's split (collected before 0.10.5)."""
+    if 'prevPricingModel' not in rows or 'curPricingModel' not in rows:
+        return None
+
+    def part(kind):
+        return math.fsum(float(r['cost']) for r in rows[kind] if r.get('subscriptionId') in comparable
+                         and str(r.get('pricingModel') or '').lower().replace(' ', '') in COMMITMENT_MODELS)
+    return {'prev': part('prevPricingModel'), 'cur': part('curPricingModel')}
+
+
 def build(ws, period):
     data = read_json(ws.raw('cost/cost-data.json'))
     if not data.get('complete'):
@@ -134,6 +149,7 @@ def build(ws, period):
             'resourceGroups': resource_groups, 'resources': resource_rows, 'daily': daily_rows,
             'amortizedServices': [{'serviceName': n, 'cost': math.fsum(v)} for n, v in sorted(am_services.items(), key=lambda t: -math.fsum(t[1]))],
             'pricingModels': [{'pricingModel': n, 'cost': math.fsum(v)} for n, v in sorted(pricing.items(), key=lambda t: -math.fsum(t[1]))],
+            'commitmentCharges': commitment_charges(rows, comparable),
             'resourceReview': review,
             'budgets': read_json(budget_path) if budget_path.exists() else None}
 

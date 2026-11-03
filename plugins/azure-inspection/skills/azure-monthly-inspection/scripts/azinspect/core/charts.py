@@ -48,6 +48,18 @@ def amount_tick(x, _=None) -> str:
     return f'{_trim(x / 1000)}K' if abs(x) >= 1000 else _trim(x)
 
 
+def bar_limits(values):
+    """x limits of a change chart: room for labels on the side that has bars; no empty half when all go one way."""
+    span = max([abs(v) for v in values] or [1]) or 1
+    lo, hi = min([0.0] + list(values)), max([0.0] + list(values))
+    return (lo - span * 0.3 if lo < 0 else -span * 0.05), (hi + span * 0.3 if hi > 0 else span * 0.05)
+
+
+def signed_amount(v) -> str:
+    """A change label with its sign, whole units; one that rounds to 0 reads 0, not -0."""
+    return '0' if round(v) == 0 else f'{v:+,.0f}'
+
+
 def clear(chart_dir: Path, report: str) -> None:
     """Remove this report's charts from an earlier build, so a chart that is no longer drawn does not linger in the package."""
     for old in Path(chart_dir).glob(f'{report}_*.png'):

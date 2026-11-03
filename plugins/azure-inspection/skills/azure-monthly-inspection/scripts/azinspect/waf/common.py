@@ -149,6 +149,27 @@ def enabled(subs: list[dict]) -> list[dict]:
     return [s for s in subs if s.get('state') == 'Enabled']
 
 
+# API error codes in plain Chinese for the coverage page; the original text follows in brackets
+ERROR_MEANINGS = [
+    (r'FeatureNotSupported|NotSupported', '资源不支持这项功能，不适用这一检查'),
+    (r'ResourceNotFound|NotFound', '资源不存在或已删除'),
+    (r'AuthorizationFailed|Forbidden|LinkedAuthorizationFailed', '没有读取权限'),
+    (r'NoRegisteredProviderFound|SubscriptionNotRegistered|MissingSubscriptionRegistration', '订阅没有注册相关的资源提供程序'),
+    (r'InvalidResourceType', '接口不认这种资源类型'),
+]
+
+
+def plain_error(status, error, count=1) -> str:
+    """'n 次读取：<Chinese meaning>（HTTP status：original）' for a coverage note."""
+    text = str(error or '')
+    meaning = next((m for rx, m in ERROR_MEANINGS if re.search(rx, text)), None)
+    if not meaning:
+        meaning = ('接口限流' if status == 429 else '服务端错误' if isinstance(status, int) and status >= 500 else
+                   '资源不存在或已删除' if status == 404 else '没有读取权限' if status in (401, 403) else '接口报错')
+    detail = '' if not text or text == f'HTTP {status}' or re.fullmatch(r'None(: ?None)?', text.strip()) else text   # 'None: None': no text kept (before 0.10.4)
+    return f'{count} 次读取：{meaning}（HTTP {status}' + (f'：{detail}' if detail else '') + '）'
+
+
 def coverage_entry() -> dict:
     return {'attempted': 0, 'succeeded': 0, 'denied': 0, 'otherErrors': 0, 'notes': []}
 

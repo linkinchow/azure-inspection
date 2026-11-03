@@ -104,7 +104,7 @@ def subscription_scope(ws, cfg, report=None):
     mg = (['Landing Zone 对照'] if '03' in reports else []) + (['治理检查'] if '04' in reports and '卓越运营' in groups_done else [])
     tenant = (['Entra ID 账号与凭据'] if '03' in reports and '安全' in groups_done else []) + \
              ([f'管理组（{"和".join(mg)}）'] if mg else []) + \
-             (['预留和节省计划订单'] if {'01', '02'} & set(reports) else [])
+             (['预留和节省计划订单'] if '01' in reports else [])   # 02 alone reads only which machines RI/SP cover
     tail = f'；{"、".join(tenant)}不按订阅划分，仍按全租户检查' if tenant else ''
     if subs is None:
         return '按贵司选择，本次只检查 customer.yaml 中指定的订阅' + tail

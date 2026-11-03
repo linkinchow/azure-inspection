@@ -10,7 +10,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from ...core import appliance
-from ..common import Findings, Raw, coverage_entry, enabled, env, load_scope, now
+from ..common import Findings, Raw, coverage_entry, enabled, env, load_scope, now, plain_error
 from .rules import LOWER, RULES
 
 VENDOR = Path(__file__).resolve().parents[4] / 'vendor' / 'aprl'
@@ -89,7 +89,7 @@ def analyze(ws, cfg, log=print):
             c['succeeded'] += 1
         else:
             c['denied' if result['status'] in (401, 403) else 'otherErrors'] += 1
-            c['notes'].append(f'APRL {guid[:8]} 查询失败：{result.get("error")}')
+            c['notes'].append(f'APRL 规则 {guid[:8]} ' + plain_error(result['status'], result.get('error')))
             continue
         rows = result['rows']
         c.setdefault('rules', []).append(guid[:8])

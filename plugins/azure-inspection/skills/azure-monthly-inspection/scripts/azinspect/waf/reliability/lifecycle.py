@@ -210,12 +210,14 @@ def check(run, inv, member, calendar_path: Path = CALENDAR):
     limits.append('Key Vault 中证书的到期日期只能通过数据面读取，本次未检查；Azure Functions 运行时版本只保存在应用设置中，本次未读取。')
     run.coverage['R9'].setdefault('rules', []).extend(sorted({f'version-{p}' for p, _v in cal}) +
                                                       ['appgw-certificate', 'retirement-notice', 'retirement-unlinked'])
-    _versions(run, cal, out, member)
+    versions = _versions(run, cal, out, member)
     _app_gateway(run, out, member)
-    _retirements(run, out, member, limits)
+    _retirements(run, out, member, limits, versions)
 
 
 def _versions(run, cal, out, member):
+    """Adds the version findings; returns [(label, finding)] so retirement notices about the same version join them."""
+    found = []
     items = []      # (family, product, version, resource row, resource type, setting)
     for name, family, key in (('mysql', 'mysql', lambda r: mysql_key((r.get('properties') or {}).get('version'))),
                               ('postgres', 'postgres', lambda r: major_key((r.get('properties') or {}).get('version')))):
@@ -303,6 +305,7 @@ def _versions(run, cal, out, member):
                 rg=rows[0]['resourceGroup'] if n == 1 else None, members=[member(r['name'], r['type'], sub) for r in rows],
                 key=f'lifecycle|{product}|{version}|{sub}' + ('|vmss' if rows[0]['type'] == VMSS_TYPE else ''))
         item['rule'] = f'version-{product}'
+        found.append((label, item))
     unjudged = Counter((x['reason'], x['type']) for x in out['notJudged'])
     if unjudged:
         phrase = {'未识别操作系统版本': '未识别操作系统版本', '未取得运行时版本': '未取得运行时版本',
@@ -310,6 +313,7 @@ def _versions(run, cal, out, member):
         parts = [count_text(n, type_label(t)) + phrase.get(reason, '的系统版本不在支持日历中' if t in (VM_TYPE, VMSS_TYPE) else '的版本不在支持日历中')
                  for (reason, t), n in sorted(unjudged.items(), key=lambda kv: -kv[1])]
         run.coverage['R9'].setdefault('limits', []).append('、'.join(parts) + '，这些资源没有判断是否到期。')
+    return found
 
 
 def _mixed(envs):
@@ -365,7 +369,35 @@ def _retirement_note(run, events, impacted):
     return f'{head}，Service Health 没有为它们列出受影响的资源。'
 
 
-def _retirements(run, out, member, limits):
+PRICE = re.compile(r'\bpric(e|es|ing)\b', re.I)
+RETIRES = re.compile(r'retire|deprecat|end of (life|support)|will be removed', re.I)
+# a notice's product and what it asks, in plain Chinese, before its English title
+NOTICE_PRODUCTS = [(r'ContainerLog|Container insights', '容器日志（Container Insights）'), (r'Log Analytics', 'Log Analytics'),
+                   (r'PostgreSQL', 'PostgreSQL'), (r'MySQL', 'MySQL'), (r'Kubernetes|\bAKS\b', 'AKS'), (r'Redis', 'Redis'),
+                   (r'Cosmos', 'Cosmos DB'), (r'\bSQL\b', 'SQL'), (r'App Service|Web Apps?', 'App Service'), (r'Functions', 'Azure Functions'),
+                   (r'Application Gateway', '应用网关'), (r'Front Door', 'Front Door'), (r'Storage', '存储'), (r'Virtual Machine|\bVMs?\b', '虚拟机'),
+                   (r'Ubuntu', 'Ubuntu'), (r'Windows Server', 'Windows Server'), (r'Python', 'Python'), (r'Node', 'Node.js'), (r'\.NET', '.NET'),
+                   (r'Java', 'Java'), (r'PHP', 'PHP')]
+
+
+def notice_text(title, date):
+    """'<product><what to do>（<date>；原文：<title>）' for a notice not tied to a resource."""
+    t = str(title or '')
+    product = next((cn for rx, cn in NOTICE_PRODUCTS if re.search(rx, t, re.I)), '相关服务')
+    action = ('将进入延长支持，可能产生额外费用' if re.search(r'extended support', t, re.I) else
+              '将退役或停止支持' if RETIRES.search(t) else
+              '需要迁移或升级' if re.search(r'migrat|transition|move to|upgrade|switch', t, re.I) else '有变更')
+    space = ' ' if product[-1:].isascii() and product[-1:].isalnum() else ''   # 'AKS 需要', not 'AKS需要' (Excel is not reformatted)
+    return f"{product}{space}{action}（{date or '日期未取得'}；原文：{t}）"
+
+
+def _same_version(label, title):
+    """A notice about the version a finding names ('PostgreSQL 14' in its title, as whole words)."""
+    words = str(label or '').split()
+    return bool(words) and all(re.search(rf'(?<![\w.]){re.escape(w)}(?![\w.])', str(title or ''), re.I) for w in words)
+
+
+def _retirements(run, out, member, limits, versions=()):
     events = defaultdict(lambda: {'subs': set()})
     for e in run.rows('retirements'):
         ev = events[e.get('trackingId') or e.get('id')]
@@ -384,7 +416,7 @@ def _retirements(run, out, member, limits):
             impacted[r['trackingId']][rid.lower()] = r.get('targetResourceType') or '/'.join(rid.split('/providers/')[-1].split('/')[:2])
     advisor_names = {m['name'].lower() for f in run.findings.items if f['check'] == 'R9' and 'advisorProblem' in (f.get('evidence') or {})
                      for m in f.get('members') or [] if m.get('name')}
-    unlinked, unlinked_sev = [], []
+    unlinked, unlinked_sev, prices = [], [], []
     for tid, ev in sorted(events.items(), key=lambda kv: (parse_date(kv[1].get('retirementDate')) or run.now, kv[0])):
         date = parse_date(ev.get('retirementDate'))
         res = impacted.get(tid) or {}
@@ -395,6 +427,15 @@ def _retirements(run, out, member, limits):
         if sev is None or str(ev.get('status') or 'Active').lower() not in ('active', ''):
             continue
         if not res:
+            if PRICE.search(str(ev.get('title') or '')) and not RETIRES.search(str(ev.get('title') or '')):
+                prices.append(tid)   # Service Health files some price notices as retirements
+                continue
+            same = [item for label, item in versions if _same_version(label, ev.get('title'))]
+            if same:   # the version finding already lists the resources: say the notice there
+                for item in same:
+                    item['finding'] = item['finding'].rstrip('。') + f"。微软已发布相关公告（跟踪 ID {tid}" + (f"，{ev['retirementDate']}" if ev.get('retirementDate') else '') + '）。'
+                    item.setdefault('evidence', {}).setdefault('notices', []).append(record)
+                continue
             unlinked.append(record)
             unlinked_sev.append(sev)
             continue
@@ -416,7 +457,7 @@ def _retirements(run, out, member, limits):
         item['acceptance'] = '在退役日期前按公告完成迁移，Service Health 不再列出受影响的资源'
         item['rule'] = 'retirement-notice'
     if unlinked:
-        lines = '；'.join(f"{x['title']}（{(x['retirementDate'] or '')[:10] or '日期未取得'}）" for x in unlinked[:5])
+        lines = '；'.join(notice_text(x['title'], (x['retirementDate'] or '')[:10]) for x in unlinked[:5])
         # graded by the nearest retirement date among them, at most 中: a notice not tied to a resource may not concern
         # the tenant (Service Health also files some price notices as retirements)
         item = run.add('R9', '中' if '高' in unlinked_sev else min(unlinked_sev, key='高中低'.index), None, '多种',
@@ -426,6 +467,8 @@ def _retirements(run, out, member, limits):
                 '确认这些服务或功能是否在使用。', sub='多个订阅', rg=None, members=[], key='retirement|unlinked')
         item['acceptance'] = '已确认这些服务或功能是否在使用；在用的已在退役日期前完成迁移'
         item['rule'] = 'retirement-unlinked'
+    if prices:
+        run.coverage['R9']['notes'].append(f"{len(prices)} 条价格调整通知不是退役公告，未列入（跟踪 ID {'、'.join(prices[:5])}）。")
     if events:
         limits.append('微软退役公告的受影响资源只覆盖部分服务，且公告发布后最长约两周才会出现；未关联到资源的公告单独列出。')
-        run.coverage['R9']['notes'].append(_retirement_note(run, events, impacted))
+        run.coverage['R9']['notes'].append(_retirement_note(run, {k: v for k, v in events.items() if k not in prices}, impacted))

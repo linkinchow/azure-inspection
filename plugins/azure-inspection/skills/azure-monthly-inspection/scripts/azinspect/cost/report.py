@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -58,6 +59,39 @@ def labels_for(period):
     return {'prev': period.previous.short_label, 'cur': period.current.short_label, 'next': period.following.short_label,
             'prevDays': period.previous.days, 'curDays': period.current.days, 'nextDays': period.following.days,
             'nextMonth': period.following.month, 'curLabel': period.current.label, 'prevLabel': period.previous.label}
+
+
+def read_times(ws):
+    """(first, last) time each kind of cost data was actually read, from the saved queries ('YYYY-MM-DDTHH:MM', UTC):
+    with collect --resume some are reused from an earlier day and some read again."""
+    from glob import glob
+    kinds = {'costs': ('cost/queries', ('*Actual*.json', '*PricingModel*.json')), 'forecast': ('cost/supplement/queries', ('forecast.*.json',)),
+             'supplement': ('cost/supplement/queries', ('[!f]*.json',))}
+    out = {}
+    for kind, (folder, patterns) in kinds.items():
+        times = []
+        for path in [p for pattern in patterns for p in glob(str(ws.raw(folder) / pattern))]:
+            try:
+                rec = read_json(Path(path))
+            except (OSError, ValueError):
+                continue
+            if (rec.get('result') or {}).get('ok') is False:   # a failed read (retried on resume) says nothing about the data used
+                continue
+            pages = (rec.get('result') or {}).get('pages') or []
+            times += [str(p.get('queriedAt'))[:16] for p in pages if p.get('queriedAt')] or ([str(rec['completedAt'])[:16]] if rec.get('completedAt') else [])
+        out[kind] = (min(times), max(times)) if times else None
+    return out
+
+
+def read_time_text(span):
+    """('2026-11-01T10:00', '2026-11-01T11:30') -> '2026 年 11 月 1 日 10:00 至 11:30'."""
+    def day(v):
+        return f'{int(v[5:7])} 月 {int(v[8:10])} 日'
+    a, b = span
+    text = f'{a[:4]} 年 {day(a)} {a[11:16]}'
+    if b == a:
+        return text
+    return text + ' 至 ' + (b[11:16] if b[:10] == a[:10] else f'{day(b)} {b[11:16]}')
 
 
 def cn_date(value):
@@ -255,6 +289,7 @@ def build(ws, cfg, period, narrative=None, log=print):
     dp, dc = labels['prevDays'], labels['curDays']
     model = build_model(ws, period)
     sup = sr.load(ws)
+    sup['readTimes'] = read_times(ws)
     fdir, out = ws.month_dir('findings') / 'cost', ws.month_dir('reports')
     tot = model['comparableTotals']
     tot['amortizedCur'] = model['totals']['amortizedCur']
@@ -524,6 +559,47 @@ def _day(d):
     return f'{d.year}年{d.month}月{d.day}日'
 
 
+def late_cost_note(queried_at, month_end, Lc):
+    """Costs read within two days after the month: the last day's may not be complete yet."""
+    import datetime as dt
+    try:
+        days = (dt.date.fromisoformat(str(queried_at)[:10]) - month_end).days
+    except ValueError:
+        return ''
+    return (f'- 费用在{Lc}结束后 {days} 天内查询，{Lc}最后一天的费用可能还没有全部入账（Azure 费用数据通常延迟 1–2 天），'
+            '月总额和月末几天的日均可能略低。') if 0 < days <= 2 else ''
+
+
+COMMITMENT_SHARE = 0.05   # purchases at least this share of a month's costs: give the daily change without them too
+
+
+def without_commitments(t, cc, dp, dc):
+    """'不含预留和节省计划的购买费用时，日均变化 x%', or '' when purchases are small or last month's split is missing."""
+    if not cc or not t.get('prev') or not t.get('cur'):
+        return ''
+    if max(cc['cur'] / t['cur'], cc['prev'] / t['prev']) < COMMITMENT_SHARE:
+        return ''
+    prev, cur = t['prev'] - cc['prev'], t['cur'] - cc['cur']
+    if prev <= 0 or cur < 0:
+        return ''
+    return f'不含预留和节省计划的购买费用时，日均变化 {percent((cur / dc) / (prev / dp) - 1)}'
+
+
+def read_line(times, queried, Lp, Lc, snapshot):
+    """When each kind of data was read; falls back to the cost run's completion time without saved query records."""
+    if not times.get('costs'):
+        return f'{Lp}和{Lc}费用查询完成时间：{queried}（UTC）；区域、预测、变化原因、数据库、存储和日志检查于{snapshot}读取。'
+    spans = {times.get(k) for k in ('costs', 'supplement', 'forecast') if times.get(k)}
+    if len(spans) == 1:   # all read together (no --resume)
+        return f'{Lp}和{Lc}费用、区域、变化原因和预测读取于 {read_time_text(times["costs"])}（UTC）；数据库、存储和日志检查于{snapshot}读取。'
+    parts = [f'{Lp}和{Lc}费用读取于 {read_time_text(times["costs"])}']
+    if times.get('supplement'):
+        parts.append(f'区域和变化原因读取于 {read_time_text(times["supplement"])}')
+    if times.get('forecast'):
+        parts.append(f'预测读取于 {read_time_text(times["forecast"])}')
+    return '；'.join(parts) + f'（UTC）；数据库、存储和日志检查于{snapshot}读取。'
+
+
 def forecast_note(sup, Lc):
     """Subscriptions without a forecast: a failed read (e.g. throttled) is not a subscription without costs."""
     missing = [s['next'] for s in sup['forecast']['subscriptions'] if s['next'].get('fullMonthEstimate') is None]
@@ -555,10 +631,11 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, cho
              f'范围：{cfg.name} {n_comp}个Azure订阅' + (f'（另有{sum(map(len, unreadable(m).values()))}个订阅的费用无法读取，见第8节）' if unread else '')
              + (f'。{chosen_scope}，费用合计只含这些订阅' if chosen_scope else '') + '。金额单位：USD。**', '',
              '历史费用来自Azure Cost Management的实际费用查询，不是官网列表价；优化建议中的公开报价另行标注为列表价。', '',
-             f'{Lp}和{Lc}费用查询完成时间：{queried}（UTC）；区域、预测、变化原因、数据库、存储和日志检查于{cn_date(db["snapshotAt"])}读取。', '',
+             read_line(sup.get('readTimes') or {}, queried, Lp, Lc, cn_date(db['snapshotAt'])), '',
              '## 1. 费用总览', '',
              f'- {Lc}费用（{n_comp}个订阅） **USD {amount(t["cur"])}**，{Lp} **USD {amount(t["prev"])}**，增减 **USD {amount(t["delta"])}（{percent(t["changeRate"])}）**。',
              f'- {Lc}日均 **USD {amount(t["curDaily"])}**，{Lp}日均 **USD {amount(t["prevDaily"])}**，日均变化 **{percent(t["dailyChangeRate"])}**。'
+             + (f'{without_commitments(t, m.get("commitmentCharges"), dp, dc)}。' if without_commitments(t, m.get('commitmentCharges'), dp, dc) else '')
              + (f'{Lc}比{Lp}{"少" if dc < dp else "多"}{abs(dp - dc)}天，月总额与日均值一起看。' if dc != dp else ''),
              f'- 实际费用查询：{cov["curActual"]["success"]}个订阅的{Lc}费用、{cov["prevActual"]["success"]}个订阅的{Lp}费用均已读取，以上增减比较使用这{n_comp}个订阅'
              + (f'；{unread}，没有按0处理' if unread else '') + '。']
@@ -704,6 +781,10 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, cho
         '建议业务、技术和财务一起确认主要费用变化是否符合计划，选择优先处理的项目，并补齐预算、资源负责人及采购信息。批准后的调整先小范围实施；业务验收和费用结果填写到Excel“建议与跟踪”，未执行的项目不填写已实现节省。', '',
         '## 8. 数据范围与限制', '',
         f'- {Lc}和{Lp}均使用完整自然月ActualCost查询，不以月中或月底预测代替历史费用。']
+    read = (sup.get('readTimes') or {}).get('costs')   # the earliest read decides: a cost reused from an earlier day
+    late = late_cost_note(read[0] if read else m['scope'].get('queriedAt'), period.current.last, Lc)
+    if late:
+        lines.append(late)
     if unread:
         lines.append(f'- {unread}；未取得其费用，不能确认为0。本文费用是{n_comp}个订阅的合计，最终费用以账单为准。')
     lines += [f'- {Ln}费用为Azure Cost Management的预测值，不是账单' + forecast_note(sup, Lc) + '。',

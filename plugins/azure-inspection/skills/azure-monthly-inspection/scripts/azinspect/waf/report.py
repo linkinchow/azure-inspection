@@ -102,8 +102,16 @@ def check_note(fs, cov, note=None):
     if not _failed(cov):
         # rules that cannot see resources in subscriptions left out (customer.yaml scope): they may miss or over-report
         if cov.get('incomplete') or cov.get('overReport'):
-            what = '可能漏报或多报' if cov.get('incomplete') and cov.get('overReport') else '可能漏报' if cov.get('incomplete') else '可能多报，请核对'
-            return f'{base or "所选订阅中未发现问题"}；涉及其他订阅的部分{what}（见“检查范围与限制”）'
+            # name the listed problem that may be over-reported, so it does not read as being about the one named first
+            over = [f for f in fs if f.get('rule') and f['rule'] in (cov.get('overReport') or [])]
+            parts = ([f'其中“{first_clause(over[0]["finding"], 24)}”' + (f'等 {len(over)} 项' if len(over) > 1 else '') + '可能多报，请核对']
+                     if over else [])
+            if cov.get('incomplete'):
+                parts.append('涉及其他订阅的部分可能漏报')
+            if not parts or (cov.get('overReport') and not over and not fs):   # nothing listed to point at
+                what = '可能漏报或多报' if cov.get('incomplete') and cov.get('overReport') else '可能漏报' if cov.get('incomplete') else '可能多报，请核对'
+                parts = [f'涉及其他订阅的部分{what}']
+            return f'{base or "所选订阅中未发现问题"}；' + '；'.join(parts) + '（见“检查范围与限制”）'
         return base or '未发现问题'
     if base:
         return f'{base}；部分读取失败，结果可能不完整'
@@ -205,6 +213,8 @@ def apply_narrative(findings, narrative):
         if ids and not kept:
             warnings.append(f'topIssues“{issue.get("title", "")}”引用的问题本月都不存在，这一条没有列入')
             continue
+        if len(kept) < len(ids):
+            warnings.append(f'topIssues“{issue.get("title", "")}”有部分问题本月不存在，这一条保留了原文，请核对文字是否还和问题清单一致')
         top.append({**issue, 'findingIds': kept} if ids else issue)
     return ({**narrative, 'topIssues': top} if 'topIssues' in narrative else narrative), warnings
 
@@ -370,7 +380,7 @@ def _cut(text, limit, more):
     if number and re.match(r'[\d,.]*\d', text[len(cut):]):   # inside a number: not '1,8'
         cut = cut[:number.start()]
     stem = cut.rstrip()
-    unit = re.match(r' ?[A-Za-z%]{1,3}(?![A-Za-z])|[台个条项块天%]', text[len(stem):]) if stem[-1:].isdigit() else None
+    unit = re.match(r' ?(?:[A-Za-z%]{1,3}(?![A-Za-z])|[台个条项块天次%])', text[len(stem):]) if stem[-1:].isdigit() else None
     if unit:   # '2,460 GB', not '2,460'
         cut = stem + unit.group()
     if cut.rstrip().endswith(('：', ':')):   # say what the colon introduces: its first item
@@ -637,7 +647,7 @@ def month_sentence(tracked, report):
     if c.get('新增检查项发现'):
         from ..tracking import check_label
         names = '、'.join(dict.fromkeys(check_label(k, src) for k, src in s['newChecks']))
-        text += f'“新增检查项发现”来自本月起新增或首次成功执行的检查（{names}），不代表情况变差。'
+        text += f'“新增检查项发现”来自本月起新增或首次成功执行的检查，或已有检查新增的检查规则（{names}），不代表情况变差。'
     if c.get('本月未检查'):
         why = Counter(r.get('notChecked') or '读取失败' for r in tracked['rows'] if r['status'] == '本月未检查' and report_of(r['check']) == report)
         reasons = ([f'{n} 项是对应检查本月读取失败' for k, n in why.items() if k == '读取失败']
