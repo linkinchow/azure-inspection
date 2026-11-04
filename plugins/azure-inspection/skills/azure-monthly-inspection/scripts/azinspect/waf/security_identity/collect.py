@@ -125,7 +125,6 @@ def _per_subscription(raw, client, sub):
     calls['autoProvisioning'] = _call(client, 'S-I4', sid, f'{base}/providers/Microsoft.Security/autoProvisioningSettings?api-version=2017-08-01-preview')
     calls['roleAssignments'] = _get_all(client, 'S-I5', sid, f'{base}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01')
     calls['customRoles'] = _get_all(client, 'S-I5', sid, f"{base}/providers/Microsoft.Authorization/roleDefinitions?api-version=2022-04-01&$filter=type%20eq%20'CustomRole'")
-    calls['classicAdmins'] = _call(client, 'S-I5', sid, f'{base}/providers/Microsoft.Authorization/classicAdministrators?api-version=2015-07-01')
     calls['activityLogDiag'] = _call(client, 'S-I7', sid, f'{base}/providers/Microsoft.Insights/diagnosticSettings?api-version=2021-05-01-preview')
     raw.save(f'subscriptions/{sid}.json', {'subscriptionId': sid, 'name': sub['name'], 'calls': calls})
     return sid, calls

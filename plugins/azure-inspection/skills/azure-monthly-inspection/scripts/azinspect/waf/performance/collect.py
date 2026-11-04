@@ -147,7 +147,9 @@ class Collector:
         return self.client.request('GET', url, check, rid.split('/')[-1])
 
     def batch_metrics(self, label, check, items, namespace, names, aggregation, interval='P1D', flt=None, top=None, force_arm=False):
-        """metrics:getBatch (<=50 ids per subscription/region). A 400 with several metrics is retried metric by metric;
+        """metrics:getBatch (<=50 ids per subscription/region). A batch whose answer is too large (400 over 125 MB) or
+        that keeps failing on the server side (5xx/529 after retries) is split in half and read again, down to single
+        resources, so only what still fails stays unread. A 400 with several metrics is retried metric by metric;
         'global' resources and a 403 use the per-resource ARM metrics GET; a second 403 stops that subscription."""
         res, calls, groups = {}, [], defaultdict(list)
         for it in items:
@@ -211,6 +213,12 @@ class Collector:
                 return
             st, data, err = run_batch(sub, region, rids, names)
             calls.append({'sub': sub, 'region': region, 'n': len(rids), 'metrics': names, 'status': st, 'error': err})
+            too_large = st == 400 and 'exceeded maximum limit' in str(err)
+            if len(rids) > 1 and (too_large or (st or 0) >= 500):
+                half = len(rids) // 2
+                job((sub, region, rids[:half]))
+                job((sub, region, rids[half:]))
+                return
             if st == 200:
                 got = set()
                 for v in data.get('values') or []:

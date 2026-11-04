@@ -20,7 +20,7 @@ from ..core.excel import verify
 from ..core.fmt_md import format_and_check
 from ..core.io import read_json, write_json
 from ..waf.common import load_scope
-from .context import load_narrative
+from .context import created_by, load_narrative
 
 STEM_MD, STEM_XLSX = '05_同类资源配置对比报告', '05_同类资源配置对比明细'
 CHARTS = {'method': '05_1_各创建方式高风险偏差比例.png', 'line': '05_2_各业务线高风险偏差比例.png'}
@@ -47,6 +47,7 @@ GAP_TARGET = {
     ('vm', 'Azure 备份'): '生产机纳入 Azure 备份',
     ('vm', 'Azure Monitor 代理'): '安装 Azure Monitor 代理并配置数据收集规则',
     ('loganalytics', '每日数据上限/数据量告警'): '设置每日上限或数据量告警',
+    ('loganalytics', '保留期'): '审计类日志总保留 180–365 天（超出交互查询期的部分用低价长期保留），排障类 30–90 天，并确认合规要求',
 }
 PLAIN = [('（lift-and-shift）', ''), ('高影响偏差', '高风险偏差'), ('按基线', '按标准做法'), ('基线', '标准做法')]
 
@@ -61,7 +62,7 @@ def plain(text):
 
 def method_label(key):
     return {'未知（无标签、无部署记录）': '既没有标准标签也查不到部署记录的资源', '供应商': '供应商创建的资源',
-            '门户向导': '门户向导创建的资源'}.get(key, f'按 {key} 创建的资源')
+            '门户向导': '门户向导创建的资源'}.get(key, f'{created_by(key)}的资源')
 
 
 def cn_date(iso):
@@ -211,7 +212,7 @@ def default_conclusions(data, stats, standard_name, by_line=True):
         out.append('**各业务线的情况不同。**有高风险偏差的资源：' + '，'.join(f'{k}{ratio(v["highImpact"], v["resources"], v["pct"])}' for k, v in ordered) + '。')
     sv = stats['standardVsOther']
     if sv['standard']['resources']:
-        out.append(f'**按 {standard_name} 创建的资源也有偏差。**{sv["standard"]["resources"]} 个中 {sv["standard"]["deviating"]} 个与标准做法不同，'
+        out.append(f'**{created_by(standard_name)}的资源也有偏差。**{sv["standard"]["resources"]} 个中 {sv["standard"]["deviating"]} 个与标准做法不同，'
                    '说明部分模板默认值需要修正，见“需要修正的模板默认值”。')
     return out
 
@@ -281,7 +282,7 @@ def markdown(ws, cfg, data, narrative, pngs, labels):
                 lines += [notes[key], '']
     sec += 1
     lines += [f'## {sec}. 什么是“标准做法”和“偏差”', '',
-              f'**标准做法**是客户自己的资源里已经在用、而且符合微软推荐的做法，多数取自按 {standard_name} 创建的资源；某类资源没有内部范例时，直接用微软推荐做法。'
+              f'**标准做法**是客户自己的资源里已经在用、而且符合微软推荐的做法，多数取自{created_by(standard_name)}的资源；某类资源没有内部范例时，直接用微软推荐做法。'
               '**偏差**是参数和标准做法不一样的资源。', '',
               '**高风险偏差**是直接对应安全风险或已经引发故障的偏差，包括：AKS 用节点子网分配 Pod IP，或 API Server 对公网开放；数据库有公网防火墙规则或没有私有终结点；'
               'Redis 没有私有终结点或用明文协议；业务存储账户对全网开放或允许 TLS 1.0；容器镜像仓库开着管理员账号；应用网关或 Front Door 没有有效的 WAF。', '']
@@ -305,7 +306,7 @@ def markdown(ws, cfg, data, narrative, pngs, labels):
     if modules:
         sec += 1
         lines += ['', f'## {sec}. 需要修正的模板默认值', '',
-                  f'下面这些偏差出在按 {standard_name} 创建的资源上，说明模板参数本身需要修正。只改现有资源不改模板，以后新建的资源还会带着同样的问题。', '']
+                  f'下面这些偏差出在{created_by(standard_name)}的资源上，说明模板参数本身需要修正。只改现有资源不改模板，以后新建的资源还会带着同样的问题。', '']
         lines += table(['模板/业务线', '当前默认值', '应改为', '影响的资源'], [(m['module'], m['current'], m['target'], m['resources']) for m in modules])
         if narrative.get('moduleNote'):
             lines += ['', narrative['moduleNote']]
@@ -338,7 +339,7 @@ def markdown(ws, cfg, data, narrative, pngs, labels):
                        [(type_name(t), g['attribute'], plain(g.get('note')), GAP_TARGET[(t['typeKey'], g['attribute'])]) for t, g in gaps])
     sec += 1
     lines += ['', f'## {sec}. 方法与局限', '', '**怎么判断原因：**', '',
-              f'- 标准创建标签：资源带 `{labels["standardTag"]}` 标签，视为按 {standard_name} 创建。' if labels['standardTag'] else '- 未配置标准创建标签。',
+              f'- 标准创建标签：资源带 `{labels["standardTag"]}` 标签，视为{created_by(standard_name)}。' if labels['standardTag'] else '- 未配置标准创建标签。',
               '- 创建时间：读取每个资源的创建时间，和同类资源的时间先后对比。' if data.get('createdTimeAvailable') else '- 创建时间：本次未取得。',
               '- 门户部署记录：资源组部署历史中出现门户向导的部署名（如 microsoft.aks-*、CreateRedisEnterprise-*、PostgreSqlFlexibleServer_*、CreateVm-*），视为门户向导创建。',
               '- 防火墙规则名称：ClientIPAddress_日期、AllowAll_日期 是门户“添加当前客户端 IP”“允许全部”按钮自动生成的格式，说明规则是在门户上加的。',

@@ -47,6 +47,37 @@ def percent(x):
     return '不适用' if x is None else f'{x:+.2%}'
 
 
+def daily_phrase(r, Lp):
+    """The recommendation list's daily change: a cost new or almost new this month says so instead of a percentage."""
+    text = daily_change(r)
+    if text == '新增':
+        return f'{Lp}没有这项费用'
+    if text.startswith('新增'):
+        return f'{Lp}几乎没有这项费用（USD {amount(r["prev"])}）'
+    if text.endswith('倍'):
+        return f'日均费用{text.replace("约", f"约为{Lp}的")}'
+    return f'日均变化{text}'
+
+
+def narrative_limitations(narrative):
+    """Limitations the agent adds in narrative/01.json, written after the standard ones in section 8 and in Excel."""
+    x = narrative.get('limitations') or []
+    return [x] if isinstance(x, str) else [str(i) for i in x]
+
+
+def daily_change(r, key='dailyChangeRate'):
+    """Change of one row: new when last month had none (or less than a dollar), a multiple above +1000%, else a percentage;
+    never a percentage of millions."""
+    prev, cur, rate = r.get('prev') or 0, r.get('cur') or 0, r.get(key)
+    if cur > 0 and prev <= 0:
+        return '新增'
+    if prev < 1 and cur > prev * 11:   # cents last month, more than ten times that now
+        return '新增（上月不到 USD 1）'
+    if rate is not None and rate > 10:
+        return f'约 {rate + 1:,.0f} 倍'
+    return percent(rate)
+
+
 def esc(x):
     return str(x).replace('|', '/').replace('\n', ' ')
 
@@ -115,7 +146,7 @@ def two_months(period):
 def kind_labels(labels):
     Lp, Lc = labels['prev'], labels['cur']
     return {'curActual': f'{Lc}实际费用', 'prevActual': f'{Lp}实际费用', 'curAmortized': f'{Lc}分摊费用', 'curResources': f'{Lc}资源级费用',
-            'curPricingModel': f'{Lc}计价方式', 'curResourceGroups': f'{Lc}资源组费用'}
+            'curPricingModel': f'{Lc}计价方式', 'prevPricingModel': f'{Lp}计价方式', 'curResourceGroups': f'{Lc}资源组费用', 'budgets': '预算'}
 
 
 def stem(period):
@@ -230,7 +261,7 @@ def action_items(ws, model, sup, labels, narrative, period, cs=None):
     for r in sorted([r for r in model['subscriptionServiceDrivers'] if r['delta'] > 0], key=lambda r: -r['delta'])[:4]:
         p = pairs.get((r['subscriptionName'], r['serviceName'])) or {'subscriptionName': r['subscriptionName'], 'serviceName': r['serviceName']}
         items.append({'topic': '费用增长', 'scope': r['subscriptionName'] + ' / ' + r['serviceName'],
-                      'finding': f'{Lc}费用USD {amount(r["cur"])}，较{Lp}增加USD {amount(r["delta"])}；日均变化{percent(r["dailyChangeRate"])}。' + sr.driver_text(p, narrative),
+                      'finding': f'{Lc}费用USD {amount(r["cur"])}，较{Lp}增加USD {amount(r["delta"])}；{daily_phrase(r, Lp)}。' + sr.driver_text(p, narrative),
                       'recommendation': growth_recommendation(r['subscriptionName'], r['serviceName'], narrative), 'saving': None, 'owner': '业务负责人/财务', 'status': '待业务确认',
                       'evidencePeriod': f'{two_months(period)}实际费用'})
     vm_summary = ws.month_dir('findings') / 'vm' / 'summary.json'
@@ -486,6 +517,8 @@ def build(ws, cfg, period, narrative=None, log=print):
         coverage.append([f'{Lc}VM历史数据', f'{rc.get("eligibleMonthInstances", 0)}台在{Lc}已存在，{rc.get("completeMonthCPUMemoryInstances", 0)}台有{dc}个有效日，'
                                             f'{rc.get("partialCPUMemoryInstances", 0)}台部分数据，{rc.get("missingBothInstances", 0)}台缺CPU/内存；'
                                             f'另{rc.get("excludedCreatedAfterMonth", 0)}台在{Lc}之后创建，不计入{Lc}用量'])
+    for x in narrative_limitations(narrative):
+        coverage.append(['补充说明', x])
     for s in wb:
         s.sheet_view.showGridLines = False
         s.auto_filter.ref = f'A3:{L(s.max_column)}{s.max_row}'
@@ -585,6 +618,25 @@ def without_commitments(t, cc, dp, dc):
     return f'不含预留和节省计划的购买费用时，日均变化 {percent((cur / dc) / (prev / dp) - 1)}'
 
 
+def drivers_intro(drivers, Lp, Lc):
+    """Section 3's first sentence: how many of the largest changes were broken down, naming the ones that failed."""
+    pairs = drivers.get('pairs') or []
+    up = sum(1 for p in pairs if p.get('kind') == 'increase')
+    down = len(pairs) - up
+    failed = [p for p in pairs if p.get('status') != 'success']
+    head = f'下表按资源和计量比较了{Lp}与{Lc}的费用和用量。'
+    tail = '计量名称是Azure账单中的计费项目名称。'
+    if not failed:
+        return head + f'前 {up} 项增长和前 {down} 项下降均已拆分到具体资源。' + tail
+
+    def why(p):
+        http = next((e.get('httpStatus') for e in (p.get('errors') or {}).values() if isinstance(e, dict)), None)
+        return '接口限流' if http == 429 else f'查询失败（HTTP {http}）' if http else '查询失败'
+    missed = '；'.join(f"{p['subscriptionName']} 的 {p['serviceName']}（{why(p)}）" for p in failed)
+    return (head + f'费用变化最大的 {len(pairs)} 项中 {len(pairs) - len(failed)} 项已拆分到具体资源；'
+            f'{missed}没有拆分成功，未列入下表，需要时可在下月或续采时补读。' + tail)
+
+
 def read_line(times, queried, Lp, Lc, snapshot):
     """When each kind of data was read; falls back to the cost run's completion time without saved query records."""
     if not times.get('costs'):
@@ -671,12 +723,12 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, cho
     lines += [f'- {h}' for h in highlights] + ['', f'## 2. 哪些{"业务" if group == "业务组" else "订阅"}、服务和区域变化最大', '',
                                                f'|{group}|{Lp}费用USD|{Lc}费用USD|增减USD|变化率|日均变化率|', '|---|---:|---:|---:|---:|---:|']
     for r in cost_charts.group_rows(m):
-        lines.append(row([r['name'], amount(r['prev']), amount(r['cur']), amount(r['delta']), percent(r['changeRate']), percent(r['dailyChangeRate'])]))
+        lines.append(row([r['name'], amount(r['prev']), amount(r['cur']), amount(r['delta']), daily_change(r, 'changeRate'), daily_change(r)]))
     if 'groups' in pngs:
         lines += ['', f'![各{group}{Lp}与{Lc}费用]({pngs["groups"]})']
     lines += ['', '### 主要服务', '', f'|服务|{Lp}费用USD|{Lc}费用USD|增减USD|日均变化率|', '|---|---:|---:|---:|---:|']
     for r in m['services'][:15]:
-        lines.append(row([r['name'], amount(r['prev']), amount(r['cur']), amount(r['delta']), percent(r['dailyChangeRate'])]))
+        lines.append(row([r['name'], amount(r['prev']), amount(r['cur']), amount(r['delta']), daily_change(r)]))
     if 'services' in pngs:
         lines += ['', f'![费用增减最大的服务]({pngs["services"]})']
     if notes.get('services'):
@@ -690,7 +742,7 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, cho
     lines += [''] + ([notes['regions'], ''] if notes.get('regions') else ['其余区域见Excel“区域对比”。', ''])
     if 'regions' in pngs:
         lines += [f'![各区域费用增减]({pngs["regions"]})', '']
-    lines += ['## 3. 费用变化原因', '', f'下表按资源和计量比较了{Lp}与{Lc}的费用和用量，前10项增长和前5项下降均已拆分到具体资源。计量名称是Azure账单中的计费项目名称。', '',
+    lines += ['## 3. 费用变化原因', '', drivers_intro(sup['drivers'], Lp, Lc), '',
               f'|订阅|服务|{Lp}USD|{Lc}USD|增减USD|主要原因|', '|---|---|---:|---:|---:|---|']
     for p in [p for p in sup['drivers']['pairs'] if p.get('status') == 'success']:
         lines.append(row([p['subscriptionName'], p['serviceName'], amount(p['totals']['prev']), amount(p['totals']['cur']), amount(p['totals']['delta']), sr.driver_text(p, narrative)]))
@@ -792,7 +844,8 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, cho
               f'- 日志来源明细只查询了{cn_date(tail[0])}至{period.current.last.day}日；全月摄取量来自工作区用量记录。',
               f'- 成本管理费用以最终发票为准；没有{Lc}月度预算目标时不判断是否超预算，没有执行记录时不声称已经省钱。',
               '- RI/SP订单、预算及订阅指标权限的读取情况在Excel“数据覆盖与说明”列出；读不到的记录按“未知”处理，可能仍有订单或预算。',
-              f'- 当前资源配置与公开列表价来自巡检时读取，单独标注，不能追溯为{Lc}部署状态或已实现收益。', '',
+              f'- 当前资源配置与公开列表价来自巡检时读取，单独标注，不能追溯为{Lc}部署状态或已实现收益。']
+    lines += [f'- {x}' for x in narrative_limitations(narrative)] + ['',
               '## 参考', '',
               '- [Microsoft WAF Cost Optimization](https://learn.microsoft.com/en-us/azure/well-architected/cost-optimization/checklist)',
               '- [收集和复核费用数据](https://learn.microsoft.com/en-us/azure/well-architected/cost-optimization/collect-review-cost-data)',

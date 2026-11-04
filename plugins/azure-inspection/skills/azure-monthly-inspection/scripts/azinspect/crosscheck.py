@@ -1,4 +1,4 @@
-"""Cross-report checks X1-X11 (references/cross-checks.md). Read-only over the month's findings and reports.
+"""Cross-report checks X1-X12 (references/cross-checks.md). Read-only over the month's findings and reports.
 
 Writes findings/crosscheck.json. Each rule returns status '通过', '需要处理' (items listed with a suggested action),
 '需人工确认', '未检查' (inputs missing) or '不适用' (a report it compares was not chosen this month). Nothing here changes a report: the agent decides, writes notes into the
@@ -115,7 +115,7 @@ def x1_x2_x3(ws):
             for r in same[:1]:
                 names = [x['name'] for x in pools[(sub, pool)] if x.get('pool') == r.get('pool')]
                 x3.append({'resource': f'{it.get("cluster") or ""}/{pool}', 'subscription': r['subscriptionName'], 'from': r['currentSKU'],
-                           'handled': _noted(ws, r['subscriptionName'], names), 'names': names,
+                           'handled': _noted(ws, r['subscriptionName'], names, 'X3', '内存'), 'names': names,
                            'to': r.get('targetSKU'), 'evidence': f'{f["id"]}（{f["severity"]}）：{f["finding"][:120]}',
                            'suggestion': '在 02 加提醒：先解决内存压力，不宜只降 CPU'})
     return [_result('X1', titles[0], x1), _result('X2', titles[1], x2), _result('X3', titles[2], x3)]
@@ -338,11 +338,71 @@ def x11(ws, chosen=REPORTS):
     return _result('X11', title, items)
 
 
+def _minor_key(v):
+    return tuple(int(x) for x in str(v).split('.')[:2])
+
+
+def _strings(obj):
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _strings(v)
+
+
+AKS_TARGET = re.compile(r'(?:升级到|升级至|升到)\s*(?:至少\s*)?(?:Kubernetes\s*)?(1\.\d{2})(?!\d)')   # two-digit minors: not TLS 1.2
+
+
+def x12(ws, chosen=REPORTS):
+    """AKS upgrade targets in 05 (standard version, deviations), its links into the 03/04 issue lists and the narratives
+    (05, 03/04 topIssues and text overrides, 00 immediate) must not be below the lowest minor version in AKS standard
+    support in the clusters' regions: the same version table 03's R9/S-I3 use to call a cluster past support."""
+    title = 'AKS 升级目标不低于标准支持版本'
+    versions = _load(ws.raw('waf/reliability/aks/k8s-versions.json'))
+    if versions is None:
+        return _result('X12', title, [], '缺少 03 可靠性采集的 AKS 版本表（raw/waf/reliability/aks/k8s-versions.json）')
+    lowest = []
+    for v in versions.values():
+        official = [x['version'] for x in ((v or {}).get('data') or {}).get('values') or []
+                    if 'KubernetesOfficial' in ((x.get('capabilities') or {}).get('supportPlan') or []) and not x.get('isPreview')]
+        if official:
+            lowest.append(min(official, key=_minor_key))
+    if not lowest:
+        return _result('X12', title, [])
+    floor = max(lowest, key=_minor_key)   # supported in every region with clusters
+    findings, narrative = ws.month_dir('findings'), ws.month_dir('narrative')
+    peer = _load(findings / 'peer' / 'baseline.json') or {}
+    aks = [x for x in peer.get('types') or [] if x.get('typeKey') == 'aks']
+    sources = [('05 同类对比结果（findings/peer/baseline.json）', aks,
+                '用 0.10.7 或更新版本重新运行 analyze（05 的标准版本会取标准支持版本），再 build'),
+               ('05 联动到 03/04 问题清单“对齐标准的做法”（findings/peer/links.json）', _load(findings / 'peer' / 'links.json'),
+                '用 0.10.7 或更新版本重新运行 analyze，再 build'),
+               ('narrative/05.json', _load(narrative / '05.json'), '改写说明文件中的版本号，再 build')]
+    for code in ('03', '04'):
+        n = _load(narrative / f'{code}.json') or {}
+        sources.append((f'narrative/{code}.json', [n.get('topIssues'), n.get('findingTextOverrides')], '改写说明文件中的版本号，再 build'))
+    sources.append(('narrative/00.json', (_load(narrative / '00.json') or {}).get('immediate'), '改写说明文件中的版本号，再生成 00'))
+    items, seen = [], set()
+    for where, data, fix in sources:
+        found = {m for s in _strings(data) for m in AKS_TARGET.findall(s)}
+        found |= {str(a['baseline']['attributes'].get('version')) for a in aks if data is aks and (a.get('baseline') or {}).get('attributes', {}).get('version')}
+        for v in sorted(found, key=_minor_key):
+            if _minor_key(v) < _minor_key(floor) and (where, v) not in seen:
+                seen.add((where, v))
+                items.append({'resource': where, 'evidence': f'写的 AKS 升级目标或标准版本是 {v}，低于集群所在区域最低的标准支持版本 {floor}'
+                                                             '（03 的 R9/S-I3 会把它判为已超出标准支持）',
+                              'suggestion': f'{fix}；目标版本至少 {floor}'})
+    return _result('X12', title, items)
+
+
 # reports a rule compares; a rule is not applicable when a report it needs was not chosen this month
 # (reports or pillars of 03/04): X1-X4 compare the performance pillar of 04 (P1, P2, P4, P5)
 PILLARS_ALL = {'可靠性', '安全', '卓越运营', '性能效率'}
 NEEDS = {'X1': [{'02'}, {'性能效率'}], 'X2': [{'02'}, {'性能效率'}], 'X3': [{'02'}, {'性能效率'}], 'X4': [{'01'}, {'性能效率'}],
-         'X5': [{'01'}, PILLARS_ALL], 'X8': [PILLARS_ALL], 'X11': [{'01'}]}
+         'X5': [{'01'}, PILLARS_ALL], 'X8': [PILLARS_ALL], 'X11': [{'01'}], 'X12': [{'可靠性'}]}
 
 
 def _applicable(rule, chosen):
@@ -360,7 +420,7 @@ def run(ws, log=print):
     chosen, groups = load_selection(ws), load_groups(ws)
     rules = x1_x2_x3(ws) + [x4(ws), x5(ws, chosen, groups)]
     x67, expected = x6_x7(ws, chosen)
-    rules += x67 + [x8(ws, chosen, groups), x9(ws, chosen), x10(ws, chosen), x11(ws, chosen)]
+    rules += x67 + [x8(ws, chosen, groups), x9(ws, chosen), x10(ws, chosen), x11(ws, chosen), x12(ws, chosen)]
     rules = [_applicable(r, chosen + groups) for r in rules]
     out = {'rules': rules, 'expectedNumbers': expected}
     write_json(ws.month_dir('findings') / 'crosscheck.json', out)

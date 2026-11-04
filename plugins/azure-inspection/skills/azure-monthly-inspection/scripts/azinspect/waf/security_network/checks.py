@@ -17,6 +17,15 @@ SUBNET = 'Microsoft.Network/virtualNetworks/subnets'
 ALLOWED_BY = re.compile(r'(?:subnet|nic):([^/;]+)/([^=;]+)=Allow')     # NSG layers in network.effective() details
 
 
+
+def listener_text(listeners):
+    """What an application gateway's public frontend serves: its listeners and ports, or that it has none yet."""
+    if not listeners:
+        return '目前没有配置监听'
+    ports = ', '.join(sorted({str(x['port']) for x in listeners}, key=lambda x: int(x) if x.isdigit() else 0))
+    return f'直接对外提供 {len(listeners)} 个监听（端口 {ports}）'
+
+
 def member(name, rtype, subscription):
     return {'name': name, 'type': rtype, 'subscription': subscription}
 
@@ -860,10 +869,9 @@ def _app_gateway(c, F, r, wafpol):
             'wafPolicyState': ps.get('state'), 'wafPolicyMode': ps.get('mode'),
             'legacyWafConfig': {'enabled': wcfg.get('enabled'), 'mode': wcfg.get('firewallMode')} if wcfg else None,
             'sslPolicy': ssl, 'listeners': listeners, 'environment': e_}
-    ports_txt = ', '.join(sorted({str(x['port']) for x in listeners}, key=lambda x: int(x) if x.isdigit() else 0))
     if public and 'WAF' not in tier:
         F.add('S-N6', '低' if is_test(e_) else '中', r, rtype,
-              f'应用网关 {r["name"]} 为 {tier}（不带 WAF），公网前端直接对外提供 {len(listeners)} 个监听（端口 {ports_txt}），入口没有 Web 应用防火墙防护。',
+              f'应用网关 {r["name"]} 为 {tier}（不带 WAF），公网前端{listener_text(listeners)}，入口没有 Web 应用防火墙防护。',
               {'appGateway': item}, '评估升级到 WAF_v2 并关联 WAF 策略（先 Detection 观察 1–2 周再切 Prevention），或在前面加 Front Door + WAF；'
                                     '若这些端口承载的是非 HTTP 协议，需先确认 WAF 规则的适用性。', confirm=True)
     elif public and 'WAF' in tier:

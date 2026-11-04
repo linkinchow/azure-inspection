@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from ...core import appliance
+from ..checks import of_which, only_text
 from ..common import mixed_env
 from ..pipeline import SSH_PENDING
 from .context import is_prod, is_test, member, subscription_members
@@ -35,7 +36,7 @@ def audit(ctx):
     if no_export:
         envs = [ctx.sub_env(x) for x in no_export]
         ctx.add('S-I7', '中', _many(len(no_export)), None, None, 'Microsoft.Insights/diagnosticSettings', mixed_env(envs),
-                finding=(f'{len(no_export)} 个已启用订阅（含 {sum(is_prod(e) for e in envs)} 个生产订阅）都没有' if len(no_export) > 1 else
+                finding=(f'{len(no_export)} 个已启用订阅' + of_which(sum(is_prod(e) for e in envs), '含 {} 个生产订阅') + '都没有' if len(no_export) > 1 else
                          f'订阅 {no_export[0]} 没有') + '把活动日志导出到 Log Analytics、存储或事件中心，'
                         '平台只保留 90 天，超过后无法追溯谁在何时修改或删除了资源。',
                 evidence={'subscriptionsWithoutExport': no_export},
@@ -132,7 +133,8 @@ def vms(ctx):
         no_eah = [x for x in inventory if not x['encryptionAtHost']]
         ctx.add('S-I8', '低', '多个订阅', None, f'{len(inventory)} 台虚拟机', VM_TYPE, mixed_env([x['environment'] for x in inventory]),
                 finding=f'{len(inventory)} 台非 AKS 虚拟机中 {len(not_trusted)} 台未使用受信任启动（安全启动/vTPM），{len(no_eah)} 台未启用主机加密；'
-                        f'只有 {sum(x["amaInstalled"] for x in inventory)} 台装了 Azure Monitor 代理，{sum(x["mdeInstalled"] for x in inventory)} 台有 Defender for Endpoint 扩展。',
+                        + only_text(sum(x['amaInstalled'] for x in inventory), len(inventory), '台', '装了 Azure Monitor 代理') + '，'
+                        + only_text(sum(x['mdeInstalled'] for x in inventory), len(inventory), '台', '有 Defender for Endpoint 扩展') + '。',
                 evidence={'nonTrustedLaunch': len(not_trusted), 'noEncryptionAtHost': len(no_eah), 'ama': sum(x['amaInstalled'] for x in inventory),
                           'mde': sum(x['mdeInstalled'] for x in inventory), 'withManagedIdentity': sum(1 for x in inventory if x['identityType']),
                           'withVMAccessExtension': sum(x['vmAccessExtension'] for x in inventory)},
@@ -197,7 +199,7 @@ def _patch_findings(ctx, no_patch, pending):
         items = [x for v in no_patch.values() for x in v]
         prod_count = sum(len(v) for k, v in no_patch.items() if is_prod(ctx.sub_env(ctx.name_of(k))))
         ctx.add('S-I8', '中', _many(len(no_patch)), None, f'{len(items)} 台虚拟机', VM_TYPE, mixed_env([x['environment'] for x in items]),
-                finding=f'{len(items)} 台非 AKS 虚拟机（其中 {prod_count} 台在生产订阅）都没有 Azure Update Manager 补丁评估记录，补丁模式为镜像默认，'
+                finding=f'{len(items)} 台非 AKS 虚拟机' + of_which(prod_count, '其中 {} 台在生产订阅') + f'都没有 Azure Update Manager 补丁评估记录，补丁模式为镜像默认，'
                         '无法知道缺多少关键/安全更新。',
                 evidence={'bySubscription': {ctx.name_of(k): len(v) for k, v in no_patch.items()},
                           'patchModes': sorted({f'{x["patchMode"]}/{x["assessmentMode"]}' for x in items}),

@@ -403,7 +403,8 @@ def task_drivers(run, model, period):
     return {'description': 'Per (subscription, service) driver decomposition at (resource, meter) level; components sum to cur - prev.',
             'apiVersion': API, 'groupingUsed': dims, 'pilot': trials, 'days': {'prev': dp, 'cur': dc}, 'pairs': out,
             'coverage': {'pairs': len(out), 'successful': sum(e['status'] == 'success' for e in out),
-                         'reconciled': sum(bool(e.get('reconciliation', {}).get('ok')) for e in out)}, 'complete': True}
+                         'reconciled': sum(bool(e.get('reconciliation', {}).get('ok')) for e in out)},
+            'complete': all(e['status'] == 'success' for e in out)}
 
 
 def collect(ws, cfg, client, period, model, log=print, reuse=None):

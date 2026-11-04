@@ -6,16 +6,16 @@
 
 ## 写作素材
 
-分析命令会为每份报告生成 `findings/<报告>-digest.json`，包含：
-- 各检查项的问题数和涉及资源数
-- 每条问题的编号、严重程度、资源、发现、建议
-- 同类对比的偏差
-- 费用变化的主要来源
-- 上月仍未处理的问题
+分析命令把每个检查来源的结果写进 `findings/waf/<来源>.json`：03 读 `reliability`、`aprl`、`landing_zone`、`security_network`、`security_identity`、`defender`，04 读 `operations`、`performance`、`amba`（本月没选的报告没有对应文件）。每个文件包含：
+- `findings`：每条问题的编号（`id`）、检查项、严重程度、资源、发现、建议
+- `coverage`、`limitations`：读取情况和脚本已写的限制
+- `inventory`：参与检查的资源清单
+
+同类对比的偏差在 `findings/peer/baseline.json`（05），上月仍未处理的问题在 build 后的 `findings/tracking.json`。
 
 先读素材，再写说明。不要凭记忆或其他客户的情况写。
 
-01、02 目前还没有单独的 digest 文件，直接读以下数据：
+01、02 直接读以下数据：
 - 01：`findings/cost/model.json`（订阅、业务组、服务、资源组的费用和变化，费用最高的 20 个资源在 `topResources`；全部资源的明细在 `findings/cost/resources.json`，文件很大，一般不需要读），`raw/cost/supplement/drivers.json`（每个主要变化按资源和计量拆解，含 `topResources`、`topMeters`），`raw/cost/resources/*.json`（数据库、存储、日志），`findings/cost/actions.json`（自动生成的建议）。
 - 02：`findings/vm/summary.json`、`recommendations.json`、`candidate-checks.json`。
 
@@ -72,6 +72,7 @@
   - `notableDatabases`：除自动筛选（CPU 和内存都低于 20% 且费用 USD 300 以上）外，还要列入“费用较高的低使用率资源”表的数据库或缓存名称。
   - `storageTableNote`：存储表下的一句说明；`storageNotes`、`logNotes`、`networkNotes`：存储、日志、网络各节的要点列表。
   - `downsizeExclusions`：交叉核对 X4 后，不宜降档的数据库或缓存，格式 `[{"name": "...", "reason": "内存持续增长，按当前速度约 N 天达到 80%"}]`；01 会把它们移出低使用率候选表并写明原因。
+  - `limitations`：补充到第 8 节“数据范围与限制”和 Excel“数据覆盖与说明”的条目（列表或一句话）。
   - `actions`：补充到建议清单的项目，字段为 `topic`、`scope`、`finding`、`recommendation`、`saving`（不估算时为 null）、`owner`、`status`、`evidencePeriod`。数据库、缓存、存储、日志的具体建议写在这里。
 - **02 虚拟机**：
   - `crossCheckNotes`：交叉核对后加在逐台建议“说明”列的提醒，格式为 `[{"subscription": "...", "namePrefix": "...", "note": "..."}]`。可选 `rules`（如 `["X1"]`）和 `kinds`（如 `["内存"]`）：写了就只覆盖这些规则和冲突类型，不写时覆盖这些机器的所有交叉核对规则；交叉核对结果会写出每条冲突被哪条说明覆盖。
@@ -95,7 +96,7 @@
   - `extraSavings`：节省表中 VM 以外的方案，`[{"item","current","after","saving"}]`（官网列表价，金额来自 01 或其他已核对的数据）。
   - `savingsPending`：需要客户确认后才能估算节省的项目，`[{"item","status"}]`。
   - `pillarNotes`：各支柱 3–5 个要点，键为“可靠性”“安全”“卓越运营”“性能效率”；缺省取 03、04 的 `checkNotes`。
-  - `actionPlan`：本周内、一个月内、一个季度内，写法同 03（列表，或用“；”分隔多项的字符串）；缺省合并 03、04 的处理顺序。
+  - `actionPlan`：本周内、一个月内、一个季度内，写法同 03（列表，或用“；”分隔多项的字符串）；缺省合并 03、04 的处理顺序（相同的条目只列一次；有意思相近的条目时，build 会提醒在这里写合并后的计划）。
   - `customerQuestions`：需要客户确认或提供的信息（列表）。
   - `followUp`：后续一节的文字。
   - 数字以脚本为准：总体结论表、节省表等由脚本从各报告取数。`conclusion` 要写费用变化和预计节省的金额（质量检查会查），照抄第 1 节表格里的数字，不要另行计算或沿用上一版的数字；交叉核对 X10 会列出表格里没有的金额和百分比。

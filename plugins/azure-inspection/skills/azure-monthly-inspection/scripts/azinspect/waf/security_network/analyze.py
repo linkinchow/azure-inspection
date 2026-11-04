@@ -62,7 +62,7 @@ def consolidate(items):
         out.append({**f0, 'resourceName': f'{len(rows)} 个：' + ', '.join(i['resourceName'] for i in rows), 'resourceId': None,
                     'resourceGroup': rgs[0] if len(rgs) == 1 else '(多个)',
                     'environment': mixed_env([i['environment'] for i in rows]),
-                    'finding': f'该订阅有 {len(rows)} 个资源{summary}：' + '；'.join(i['finding'].rstrip('。') for i in rows[:6])
+                    'finding': f'该订阅有 {len(rows)} 个{" " if summary[:1].isascii() else ""}{summary}：' + '；'.join(i['finding'].rstrip('。') for i in rows[:6])
                                + ('；…（其余见证据）' if len(rows) > 6 else '') + '。',
                     'evidence': {'consolidatedFrom': len(rows),
                                  'items': [{'resourceName': i['resourceName'], 'resourceGroup': i['resourceGroup'], 'environment': i['environment'],

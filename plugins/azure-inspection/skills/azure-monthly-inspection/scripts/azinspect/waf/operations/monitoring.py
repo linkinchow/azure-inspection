@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import collections
 
+from ..checks import only_text
 from ..common import advisor_problem, is_prod, mixed_env
 from .data import DATA_TYPES, DB_MONITORING_POOLS, short, sub_of
 
@@ -141,8 +142,8 @@ def check_data_resources(d, out, key_rows, aks_rows):
         bytype = collections.Counter(k['typeLabel'] for k in other)
         lines = sorted({d.cfg.business_line(k['subscriptionName']) for k in other} - {None})
         with_logs = sum(1 for k in other if k['hasDiagnosticLogs'])
-        out.add('O2', '高', (f"{'、'.join(lines)} 等业务线的" if lines else '') + f" {len(other)} 个生产数据库和缓存（{'、'.join(f'{t} {n} 个' for t, n in bytype.most_common())}）没有任何 Azure 告警规则，"
-                + (f"其中只有 {with_logs} 个开了诊断日志" if with_logs else "也都没有开诊断日志") + "；CPU/存储打满、连接耗尽或实例不可用时不会有人收到通知。",
+        out.add('O2', '高', (f"{'、'.join(lines)} 等业务线的 " if lines else '') + f"{len(other)} 个生产数据库和缓存（{'、'.join(f'{t} {n} 个' for t, n in bytype.most_common())}）没有任何 Azure 告警规则，"
+                + ('其中' + only_text(with_logs, len(other), '个', '开了诊断日志') if with_logs else "也都没有开诊断日志") + "；CPU/存储打满、连接耗尽或实例不可用时不会有人收到通知。",
                 REC_DB, subscription=subs_text(other), resource_name=f"{len(other)} 个数据库/缓存实例", resource_type='多种（MySQL/PostgreSQL/Redis/MongoDB）',
                 environment=mixed_env([k['environment'] for k in other]), evidence={'items': [kitem(k) for k in other], 'byType': dict(bytype)},
                 members=[{'name': k['resourceName'], 'type': k['type'], 'subscription': k['subscriptionName']} for k in other], key='data-no-alert',
@@ -150,8 +151,8 @@ def check_data_resources(d, out, key_rows, aks_rows):
     if self_side:
         bytype = collections.Counter(k['typeLabel'] for k in self_side)
         lines = sorted({d.cfg.business_line(k['subscriptionName']) for k in self_side} - {None})
-        out.add('O2', '中', (f"{'、'.join(lines)} 业务线的" if lines else '') + f" {len(self_side)} 个生产数据库和缓存（{'、'.join(f'{t} {n} 个' for t, n in bytype.most_common())}）没有任何 Azure 告警规则，"
-                f"只有 {sum(1 for k in self_side if k['hasDiagnosticLogs'])} 个开了诊断日志（慢查询/审计）；所在订阅的集群有 {pools} 节点池，推测由自建的数据库监控覆盖，但 Redis 和平台层故障未见告警。",
+        out.add('O2', '中', (f"{'、'.join(lines)} 业务线的 " if lines else '') + f"{len(self_side)} 个生产数据库和缓存（{'、'.join(f'{t} {n} 个' for t, n in bytype.most_common())}）没有任何 Azure 告警规则，"
+                + only_text(sum(1 for k in self_side if k['hasDiagnosticLogs']), len(self_side), '个', '开了诊断日志') + f"（慢查询/审计）；所在订阅的集群有 {pools} 节点池，推测由自建的数据库监控覆盖，但 Redis 和平台层故障未见告警。",
                 REC_DB, subscription=subs_text(self_side), resource_name=f"{len(self_side)} 个数据库/缓存实例", resource_type='多种（MySQL/PostgreSQL/Redis/MongoDB）',
                 environment=mixed_env([k['environment'] for k in self_side]),
                 evidence={'items': [kitem(k) for k in self_side], 'byType': dict(bytype), 'selfHostedSignal': '、'.join(pmm_clusters) + f' 有 {pools} 节点池'},
@@ -209,8 +210,9 @@ def check_vms(d, out, vm_rows, cov_type):
     vm_cov = cov_type['虚拟机（非 AKS）']
     stopped = '（且已停机）' if vm_cov['amaInstalled'] and not vm_cov['amaRunning'] else ''
     examples = '、'.join(v['resourceName'] for v in sorted(data_vms, key=lambda v: -(v['dataDisks'] or 0))[:3])
-    out.add('O1', '中', f"{len(gap)} 台运行中的生产虚拟机（其中 {len(data_vms)} 台挂有数据盘" + (f"，如 {examples}" if examples else '') + "）没有安装 Azure Monitor 代理、没有 VM Insights、也没有任何告警规则，"
-            f"只能看到宿主机层面的 CPU/磁盘 IO，看不到内存和磁盘剩余空间，磁盘写满或进程挂掉不会告警；全部 {len(vm_rows)} 台非 AKS 虚拟机中只有 {vm_cov['amaInstalled']} 台装了代理{stopped}。",
+    disks = f"（其中 {len(data_vms)} 台挂有数据盘" + (f"，如 {examples}" if examples else '') + "）" if data_vms else ''
+    out.add('O1', '中', f"{len(gap)} 台运行中的生产虚拟机{disks}没有安装 Azure Monitor 代理、没有 VM Insights、也没有任何告警规则，"
+            f"只能看到宿主机层面的 CPU/磁盘 IO，看不到内存和磁盘剩余空间，磁盘写满或进程挂掉不会告警；全部 {len(vm_rows)} 台非 AKS 虚拟机中{only_text(vm_cov['amaInstalled'], len(vm_rows), '台', '装了代理')}{stopped}。",
             '先对挂数据盘和承载核心服务的虚拟机安装 Azure Monitor 代理并关联 VM Insights 数据收集规则，'
             '配置“可用内存<10%”“磁盘剩余空间<15%”“CPU>90% 持续 15 分钟”“VM 不可用（资源健康）”告警；可用 Azure Policy 对新 VM 自动部署代理；' + NO_CHANGE,
             subscription=subs_text(gap), resource_name=f"{len(gap)} 台虚拟机", resource_type='Microsoft.Compute/virtualMachines',

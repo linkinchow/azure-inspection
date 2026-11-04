@@ -143,13 +143,10 @@ def _scope_level(scope, sid):
 def roles(ctx, assessments):
     tenant = ctx.cfg.tenant_id.lower()
     inventory, root_owner, root_uaa, orphans, guests, app_priv = [], {}, {}, defaultdict(list), {}, {}
-    custom_wild, classic = [], {}
+    custom_wild = []
     for s in ctx.enabled:
         sid, calls = s['id'], ctx.subcalls[s['id']]
         assignments = ((calls.get('roleAssignments') or {}).get('body') or {}).get('value')
-        ch = calls.get('classicAdmins') or {}
-        classic[s['name']] = {'http': ch.get('http'), 'count': len((ch.get('body') or {}).get('value', [])) if ch.get('http') == 200 else None,
-                              'note': ch.get('error')}
         for rd in ((calls.get('customRoles') or {}).get('body') or {}).get('value') or []:
             actions = [a for pm in rd['properties'].get('permissions', []) for a in pm.get('actions', [])]
             if '*' in actions or any(a.strip() in ('*/write', '*/delete', 'Microsoft.Authorization/*') for a in actions):
@@ -210,12 +207,10 @@ def roles(ctx, assessments):
                 recommendation='删除这些孤立角色分配，保持权限清单干净、便于审计。' + NO_CHANGE,
                 key='orphaned-assignments', members=subscription_members([name]))
     _app_principals(ctx, app_priv)
-    ctx.inventory.update(roleAssignments=inventory, customRolesWithWildcard=custom_wild, classicAdministrators=classic)
+    ctx.inventory.update(roleAssignments=inventory, customRolesWithWildcard=custom_wild)
     resolved = len(ctx.gobj)
     ctx.notes['S-I5'].append(f'Graph directoryObjects/getByIds 请求 {ctx.graph.get("requestedIds", 0)} 个特权主体，解析 {resolved} 个，未解析的视为孤立分配。'
                              if ctx.graph_ok else 'Graph 目录对象读取失败，无法判断孤立分配和来宾账号。')
-    classic_http = sorted({v['http'] for v in classic.values()}, key=str)
-    ctx.notes['S-I5'].append(f'classicAdministrators API 返回 {classic_http}（经典管理员已于 2024 年退役）。')
     ctx.notes['S-I5'].append(f'未展开 Entra 组成员。包含 \'*\' 通配动作的自定义角色：{len(custom_wild)} 个。')
     return app_priv
 

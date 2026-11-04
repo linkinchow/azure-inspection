@@ -20,6 +20,9 @@ SKIP = {'4b69bad3-3aad-45e8-a68e-1d76667313b4': 'cross-table join (resourceconta
                                                 'role assignments are covered by S-I5',
         '3f630472-2dd6-49c5-a5c2-622f54b69bad': 'RFC 1918 regex is written with \\. inside a verbatim string, so every '
                                                 'address is reported as non-compliant'}
+# The upstream depth query also requires a management group below root (compliant = 1 < chain <= 4); a subscription
+# directly under root has a chain of 1, which the ROOT item already reports, so it passes the depth item.
+DEPTH, ROOT = '2df27ee4-12e7-4f98-9f63-04722dd69c5b', '33b6b780-8b9f-4e5c-9104-9d403a923c34'
 TITLES = {
     '4b69bad3': '用 Entra 组分配权限，而不是直接分配给个人',
     '1559ab91': '域控制器跨可用区部署至少两台',
@@ -84,14 +87,32 @@ def collect(ws, cfg, client, window, log=print):
     log(f'Landing Zone 对照：执行 {len(results)} 条清单查询，{sum(1 for r in results if r["status"] != 200)} 条失败')
 
 
-def _label(row):
-    """Readable name of a checked item: a *name column, else the last part of an id, else the first text value."""
+def _scope_label(scope, subs):
+    parts = [x for x in str(scope).split('/') if x]
+    low = [x.lower() for x in parts]
+    if not parts:
+        return '租户根'
+    if 'resourcegroups' in low:
+        return '资源组 ' + parts[low.index('resourcegroups') + 1]
+    if 'managementgroups' in low:
+        return '管理组 ' + parts[low.index('managementgroups') + 1]
+    if low[0] == 'subscriptions' and len(parts) > 1:
+        return subs.get(low[1]) or parts[1]
+    return parts[-1]
+
+
+def _label(row, subs=None):
+    """Readable name of a checked item: a *name column, else the last part of an id, else a scope (subscription,
+    resource group, management group), else the first text value."""
     for key in sorted(row, key=lambda k: (k.lower() != 'name', not k.lower().endswith('name'))):
         if key.lower().endswith('name') and row[key]:
             return str(row[key])
     for key in ('id', 'resourceId', 'subnetId', 'vnetId'):
         if row.get(key):
             return str(row[key]).rstrip('/').split('/')[-1]
+    if row.get('scope'):
+        name = _scope_label(row['scope'], subs or {})
+        return f'{name}（{row["ownerCount"]} 个 Owner）' if row.get('ownerCount') is not None else name
     texts = [v for k, v in row.items() if isinstance(v, str) and v and k != 'compliant' and not v.lower().startswith('/subscriptions/')]
     return texts[0] if texts else '（未命名）'
 
@@ -104,19 +125,26 @@ def analyze(ws, cfg, log=print):
     raw = Raw(ws, 'landing_zone')
     data, manifest, meta = raw.load('results.json'), raw.load('manifest.json') or {}, checklist()
     items = {i['guid']: i for i in meta['items']}
+    try:
+        subs = {s['id'].lower(): s['name'] for s in load_scope(ws)}
+    except (FileNotFoundError, TypeError, KeyError):
+        subs = {}
+    under_root = {x.get('id') for r in data['results'] if r['guid'] == ROOT and r['status'] == 200
+                  for x in r['rows'] if x.get('id') and not _is_compliant(x.get('compliant'))}
     rows = []
     for r in data['results']:
         item = items.get(r['guid'])
         if not item or r['guid'] in SKIP:
             continue
-        ok = [x for x in r['rows'] if _is_compliant(x.get('compliant'))]
-        bad = [x for x in r['rows'] if not _is_compliant(x.get('compliant'))]
+        good = [_is_compliant(x.get('compliant')) or (r['guid'] == DEPTH and x.get('id') in under_root) for x in r['rows']]
+        ok = [x for x, g in zip(r['rows'], good) if g]
+        bad = [x for x, g in zip(r['rows'], good) if not g]
         rows.append({'guid': r['guid'], 'category': CATEGORIES.get(item['category'], item['category']),
                      'title': TITLES.get(r['guid'][:8], item['text']), 'severity': SEVERITY.get(item['severity'], item['severity']),
                      'status': ('读取失败' if r['status'] != 200 else '不适用（没有相关资源）' if not r['rows']
                                 else '全部符合' if not bad else '有不符合项'),
                      'compliant': len(ok) if r['status'] == 200 else None, 'nonCompliant': len(bad) if r['status'] == 200 else None,
-                     'examples': sorted({_label(x) for x in bad})[:10], 'link': item.get('link'), 'text': item['text']})
+                     'examples': sorted({_label(x, subs) for x in bad})[:10], 'link': item.get('link'), 'text': item['text']})
     order = {'有不符合项': 0, '全部符合': 1, '不适用（没有相关资源）': 2, '读取失败': 3}
     rows.sort(key=lambda x: (order[x['status']], {'高': 0, '中': 1, '低': 2}.get(x['severity'], 3), x['category']))
     out = Findings('landing_zone').write(ws, window=manifest.get('window'), coverage={}, scope={'items': len(rows)},

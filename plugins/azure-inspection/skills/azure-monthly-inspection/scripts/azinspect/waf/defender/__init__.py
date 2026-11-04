@@ -43,7 +43,9 @@ def collect(ws, cfg, client, window, log=print):
         out[key] = {'status': status, 'error': error, 'rows': rows or []}
     raw.save('results.json', {'collectedAt': now(), **out})
     raw.save('manifest.json', {'collectedAt': now(), 'window': window})
-    log(f'Defender/Policy：未处理的高、中严重性建议 {len(out["assessments"]["rows"])} 条记录，不合规的策略状态 {len(out["policyStates"]["rows"])} 条')
+    n = len(out['assessments']['rows'])
+    found = f'未处理的高、中严重性建议 {n} 条记录' if n else 'Resource Graph 没有返回 Defender 建议，分析时改用安全支柱按订阅读取的结果'
+    log(f'Defender/Policy：{found}，不合规的策略状态 {len(out["policyStates"]["rows"])} 条')
 
 
 def _name(resource_id):

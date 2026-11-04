@@ -137,6 +137,26 @@ def type_label(resource_type: str | None) -> str:
     return TYPE_LABELS.get(t) or TYPE_LABELS.get('/'.join(t.split('/')[:2])) or '资源'
 
 
+def only_text(n: int, total: int, unit: str, what: str) -> str:
+    """'只有 3 台装了代理'; none: '没有一台装了代理'; all: '17 台都装了代理'."""
+    return f'没有一{unit}{what}' if not n else f'{n} {unit}都{what}' if n == total else f'只有 {n} {unit}{what}'
+
+
+def node_os_channel(value) -> str:
+    """AKS node OS upgrade channel for customers: Azure's value 'None' means no automatic update, not a missing value."""
+    return {None: '未设置（不自动更新）', 'None': 'None（不自动更新）', 'Unmanaged': 'Unmanaged（由节点系统自行更新）'}.get(value, str(value))
+
+
+def all_of(n: int) -> str:
+    """'都' for two or more ('3 个主库都没有…'), nothing for one."""
+    return '都' if n > 1 else ''
+
+
+def of_which(n: int, template: str) -> str:
+    """'（其中 2 台在生产订阅）' from '其中 {} 台在生产订阅'; nothing when n is 0."""
+    return f'（{template.format(n)}）' if n else ''
+
+
 def count_text(n: int, label: str) -> str:
     """'5 台虚拟机', '3 个 NAT 网关'."""
     space = ' ' if label[:1].isascii() else ''

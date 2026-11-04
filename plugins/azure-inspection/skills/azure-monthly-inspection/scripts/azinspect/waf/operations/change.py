@@ -37,7 +37,7 @@ def check_upgrades(d, out, aks_rows, inventory):
     stale_node_image = [r for r in aks_rows if r['nodeOSUpgradeChannel'] == 'NodeImage' and (r['nodeImageAgeDaysMin'] or 0) > 120]
     tests = [r['resourceName'] for r in aks_rows if r['environment'].get('value') in ('test', 'dev')]
     out.add('O4', '中', f"AKS 升级没有统一流程：{len(no_auto)}/{len(aks_rows)} 个集群关闭了 Kubernetes 自动升级，节点镜像自动更新 "
-            f"{sum(1 for r in aks_rows if r['nodeOSUpgradeChannel'] == 'None')} 个为 None，{window_text}；"
+            f"{sum(1 for r in aks_rows if r['nodeOSUpgradeChannel'] == 'None')} 个为 None（不自动更新），{window_text}；"
             f"版本分散在 {len(versions)} 个版本（{', '.join(f'{k}×{n}' for k, n in sorted(versions.items(), key=lambda kv: str(kv[0])))}），"
             f"节点镜像最旧约 {oldest} 天" + ('，即使设为 NodeImage 的集群镜像也已超过 120 天未更新' if stale_node_image else '') + '。',
             '制定集群升级节奏：' + (f"测试集群（{'、'.join(tests)}）先行，" if tests else '先在测试集群验证，') +

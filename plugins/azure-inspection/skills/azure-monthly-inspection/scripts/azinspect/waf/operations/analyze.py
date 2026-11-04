@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import collections
 
-from ..common import Findings, coverage_entry
+from ..common import Findings, coverage_entry, not_applicable
 from . import change, governance, monitoring
 from .data import Data, build_aks_rows, build_key_rows, build_rules, build_vm_rows, coverage_by_type, short
 
@@ -42,6 +42,8 @@ def coverage(d):
     cov = {c: coverage_entry() for c in CHECKS}
     shared = {'attempted': 0, 'succeeded': 0, 'denied': 0, 'otherErrors': 0}
     for c in d.calls:
+        if not_applicable(c):
+            continue
         target = cov.get(c.get('check')) or shared
         target['attempted'] += 1
         status = c.get('status')

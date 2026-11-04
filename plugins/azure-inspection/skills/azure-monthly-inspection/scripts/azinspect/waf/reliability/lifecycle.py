@@ -183,11 +183,14 @@ def cert_expiry(public_cert_data):
         raw = base64.b64decode(public_cert_data)
     except (ValueError, TypeError):
         return None
+    import warnings
     certs = []
     for load in (pkcs7.load_der_pkcs7_certificates, pkcs7.load_pem_pkcs7_certificates, lambda b: [x509.load_der_x509_certificate(b)],
                  lambda b: [x509.load_pem_x509_certificate(b)]):
         try:
-            certs = load(raw)
+            with warnings.catch_warnings():   # BER instead of DER: cryptography warns but still reads it
+                warnings.simplefilter('ignore')
+                certs = load(raw)
         except (ValueError, TypeError):
             continue
         if certs:
@@ -282,7 +285,7 @@ def _versions(run, cal, out, member):
             continue
         label, n = entry.get('label') or f'{product} {version}', len(rows)
         noun = type_label(rows[0]['type']) if family == 'os' else FAMILY_NOUN[family]
-        subject = f"中的{noun} {rows[0]['name']}" if n == 1 else f'有 {count_text(n, noun)}'
+        subject = f"中的{noun} {rows[0]['name']} " if n == 1 else f'有 {count_text(n, noun)}'
         text = f"订阅 {sub} {subject}使用 {label}，标准支持{when_text(end, run.now)}"
         confirm = None
         if ext and end < run.now and family in ('mysql', 'postgres') and entry.get('extendedPaid'):

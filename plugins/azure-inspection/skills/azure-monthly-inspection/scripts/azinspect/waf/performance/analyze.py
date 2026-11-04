@@ -67,7 +67,7 @@ class Analyzer:
         rel_rows = lambda name: (self.rel.load(f'arg/{name}.json') or {}).get('rows') or []  # noqa: E731
         self.appliances = appliance.index(rel_rows('vms') + rel_rows('vmss'), cfg.appliance_names() if cfg else None)
         self.F = Findings('performance')
-        self.cov = {f'P{i}': {'attempted': 0, 'succeeded': 0, 'denied': 0, 'notes': []} for i in range(1, 11)}
+        self.cov = {f'P{i}': {'attempted': 0, 'succeeded': 0, 'denied': 0, 'otherErrors': 0, 'notes': []} for i in range(1, 11)}
         self.inv, self.limits = {}, []
 
     # ------------------------------------------------------------------ helpers
@@ -107,6 +107,21 @@ class Analyzer:
             if other:
                 c['notes'].append('非 200 响应（不含 401/403）：' + '，'.join(f'{a} ×{b}' for a, b in other.items())
                                   + '（400 表示该指标或粒度不支持，已逐个指标重试；429/5xx 为限流或服务端错误，已重试）。')
+        # resources a metric read still could not reach after retries and split batches: failed reads of their check
+        # (intermediate split batches are not counted: their resources were read in smaller batches)
+        label_check = {str(c.get('target') or '').split('/')[0]: c.get('check') for c in calls if '/' in str(c.get('target') or '')}
+        for label, check in sorted(label_check.items()):
+            results = (self.raw.load(f'metrics/{label}.json') or {}).get('results') or {}
+            unread = sorted(rid.rstrip('/').split('/')[-1] for rid, v in results.items()
+                            if isinstance(v, dict) and str(v.get('_error') or '').startswith('HTTP')
+                            and not str(v['_error']).startswith(('HTTP 401', 'HTTP 403')))   # no permission: counted as denied
+            if not unread:
+                continue
+            for k, checks in mapping.items():
+                if check in checks:
+                    self.cov[k]['otherErrors'] = self.cov[k].get('otherErrors', 0) + len(unread)
+                    self.cov[k]['notes'].append(f'{label}：{len(unread)} 个资源重试和拆分后仍未读到，未检查：'
+                                                + '、'.join(unread[:10]) + ('等' if len(unread) > 10 else '') + '。')
         arg = [c for c in calls if c.get('check') == 'ARG']
         self.cov['P8']['attempted'] += len(arg)
         self.cov['P8']['succeeded'] += sum(1 for c in arg if c.get('status') == 200)

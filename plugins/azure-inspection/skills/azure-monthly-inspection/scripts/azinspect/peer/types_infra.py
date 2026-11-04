@@ -3,10 +3,18 @@ from __future__ import annotations
 
 import collections
 
+from .context import created_by
 from .engine import TypeReport, std_root_cause
 from .types_platform import SN, _diag_counts
 
 SPECIAL_SUBNETS = {'gatewaysubnet', 'azurebastionsubnet', 'azurefirewallsubnet', 'azurefirewallmanagementsubnet', 'routeserversubnet'}
+
+
+def ama_gap(per_vm):
+    """The Azure Monitor agent gap of 05's VM type: how many machines have the agent."""
+    have = sum(1 for v in per_vm if v['ama'])
+    return {'attribute': 'Azure Monitor 代理', 'followedBy': have, 'of': len(per_vm),
+            'note': f'{len(per_vm)} 台中 {have} 台安装了 Azure Monitor 代理。'}
 
 
 def appgw_type(ctx):
@@ -152,14 +160,14 @@ def vm_type(ctx):
         pwd_tf = [v['name'] for v in r['vms'] if v['tf'] and v['pwd']]
         nz_tf = [v['name'] for v in r['vms'] if v['tf'] and not v['zones']]
         if pwd_tf:
-            notes.append(f'{len(pwd_tf)} 台按 {ctx.standard_name} 创建的机器仍允许 SSH 密码登录，属于模板默认值问题')
+            notes.append(f'{len(pwd_tf)} 台{created_by(ctx.standard_name)}的机器仍允许 SSH 密码登录，属于模板默认值问题')
         if nz_tf:
-            notes.append(f'{len(nz_tf)} 台按 {ctx.standard_name} 创建的机器未指定可用区，同样是模板参数问题')
+            notes.append(f'{len(nz_tf)} 台{created_by(ctx.standard_name)}的机器未指定可用区，同样是模板参数问题')
         return {'standardTagged': f'{r["tfCount"]}/{len(r["vms"])}', 'earliestCreated': r['created'], 'businessLine': r['line'], 'notes': notes}
     T.run(rc, lambda r, d: d.update({'linkedFindingIds': ctx.linked(r['sub'], checks={'S-N3', 'S-I8', 'R3', 'R7'})[:12]}))
     T.uniform_gaps = [
         {'attribute': 'Azure 备份', 'followedBy': None, 'of': total, 'note': '见可靠性检查 R7（虚拟机备份）。'},
-        {'attribute': 'Azure Monitor 代理', 'followedBy': sum(v['ama'] for v in per_vm), 'of': total, 'note': '安装了 Azure Monitor 代理的机器数。'}]
+        ama_gap(per_vm)]
     return T, {'publicIp': '无', 'sshAuth': '仅密钥', 'zones': '指定并分散', 'backup': 'Azure 备份', 'monitoring': 'Azure Monitor 代理'}
 
 

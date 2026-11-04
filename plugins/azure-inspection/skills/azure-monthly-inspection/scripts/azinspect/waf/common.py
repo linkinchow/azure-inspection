@@ -174,6 +174,13 @@ def coverage_entry() -> dict:
     return {'attempted': 0, 'succeeded': 0, 'denied': 0, 'otherErrors': 0, 'notes': []}
 
 
+def not_applicable(call: dict) -> bool:
+    """A saved call whose answer means 'not applicable', not a failed read: Blob settings of a FileStorage account,
+    the retired classic administrators API (calls recorded before 0.10.7 skipped them)."""
+    url, error = str(call.get('url') or ''), str(call.get('error') or '')
+    return '/classicadministrators' in url.lower() or (call.get('status', call.get('http')) == 400 and 'FeatureNotSupportedForAccount' in error)
+
+
 def tally(coverage: dict, check: str, status) -> None:
     c = coverage.setdefault(check, coverage_entry())
     c['attempted'] += 1

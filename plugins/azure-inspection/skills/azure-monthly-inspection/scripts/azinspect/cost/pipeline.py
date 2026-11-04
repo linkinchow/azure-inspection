@@ -20,6 +20,13 @@ STEP_OUTPUTS = {'resources': ['cost/resources/inventory.json', 'cost/resources/d
                 'orphan': ['cost/orphan.json'], 'review': ['cost/review/results.json']}
 
 
+def step_signature(name, month, enabled, cost_data):
+    """A step is reused only for the same subscriptions and the same cost reads: the steps choose resources by cost, so
+    costs read later under --resume make them run again."""
+    read = sorted(f"{r['subscriptionId']}.{r['queryKind']}" for r in cost_data.get('index') or [] if r.get('ok'))
+    return signature('cost-step', cost_collect.COLLECTOR_VERSION, name, month, sorted(enabled), read)
+
+
 def _step(ws, reuse, name, sig, run, log):
     marker = ws.raw(f'cost/_steps/{name}.json')
     if reuse.load(marker, sig, lambda r: all(ws.raw(o).exists() for o in r['outputs'])) is not None:
@@ -36,9 +43,10 @@ def collect(ws, cfg, client, period, log=print, resume=False):
     cost_collect.collect(ws, cfg, client, period, log, reuse)
     model = build_model(ws, period)
     supplement_costs.collect(ws, cfg, client, period, model, log, reuse)
-    subscriptions = [{**s, 'state': s.get('state') or s.get('stateAtCollection')} for s in read_json(ws.raw('cost/cost-data.json'))['subscriptions']]
+    cost_data = read_json(ws.raw('cost/cost-data.json'))
+    subscriptions = [{**s, 'state': s.get('state') or s.get('stateAtCollection')} for s in cost_data['subscriptions']]
     enabled = [s['id'] for s in subscriptions if s.get('state') == 'Enabled']
-    sig = lambda name: signature('cost-step', cost_collect.COLLECTOR_VERSION, name, period.current.key, sorted(enabled))  # noqa: E731
+    sig = lambda name: step_signature(name, period.current.key, enabled, cost_data)  # noqa: E731
     _step(ws, reuse, 'resources', sig('resources'), lambda: resources.collect(ws, client, period, model, subscriptions, log), log)
     _step(ws, reuse, 'orphan', sig('orphan'), lambda: orphan.collect(ws, client, enabled, log), log)
     commitments.collect(ws, client, period, log, reuse)

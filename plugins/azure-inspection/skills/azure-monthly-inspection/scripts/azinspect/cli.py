@@ -87,6 +87,13 @@ def _writes(permissions) -> bool:
     return any(a == '*' or a.endswith(('/write', '/delete')) or a.endswith('/*') and a != 'microsoft.support/*' for a in actions)
 
 
+def _credentials(permissions) -> bool:
+    """Can this role fetch credentials or keys (AKS kubeconfig, storage keys, secrets)? A wildcard counts as writing instead."""
+    actions = [a.lower() for p in permissions or [] for a in p.get('actions') or []]
+    return any(a.endswith('/action') and ('credential' in a or '/listkeys/' in a or '/listsecrets/' in a or '/regeneratekey' in a)
+               for a in actions)
+
+
 # roles that can write only quota or support requests: named apart from roles that change resources
 LOW_RISK_ROLES = {'Quota Request Operator', 'Support Request Contributor'}
 
@@ -107,21 +114,26 @@ def _roles(client, object_id, sub_ids, names):
             if rid not in defs:
                 _status, d, _error = client.get(f'{rid}?api-version=2022-04-01', 'access', 'role-definition')
                 props = (d or {}).get('properties') or {}
-                defs[rid] = {'role': props.get('roleName') or rid.rsplit('/', 1)[-1], 'writes': _writes(props.get('permissions')) if d else None}
+                defs[rid] = {'role': props.get('roleName') or rid.rsplit('/', 1)[-1], 'writes': _writes(props.get('permissions')) if d else None,
+                             'credentials': _credentials(props.get('permissions')) if d else None}
             rows.append({'subscription': names.get(sid, sid), 'scope': a['properties'].get('scope'), **defs[rid]})
-    low = sorted({r['role'] for r in rows if r['writes'] and r['role'] in LOW_RISK_ROLES})
+    low = sorted({r['role'] for r in rows if r['role'] in LOW_RISK_ROLES})
     write = sorted({r['role'] for r in rows if r['writes'] and r['role'] not in LOW_RISK_ROLES})
+    creds = sorted({r['role'] for r in rows if r.get('credentials') and not r['writes'] and r['role'] not in LOW_RISK_ROLES})
     subs = sorted({r['subscription'] for r in rows if r['writes'] and r['role'] not in LOW_RISK_ROLES})
     if low:
         print(f'提示：该账号有只能提交配额申请或支持工单的角色（{"、".join(low)}），不能修改资源，风险较低。')
     if write:
         print(f'注意：该账号在 {len(subs)} 个订阅有可写角色（{"、".join(write)}）。巡检脚本只发读请求，'
               '但建议改用读者等只读角色；由 AI agent 执行巡检时，可写角色的风险更高。')
-    elif rows and not low:
+    if creds:
+        print(f'注意：该账号有能取凭据或密钥的角色（{"、".join(creds)}），例如取得 AKS 的 kubeconfig 或存储账户密钥。'
+              '巡检脚本会拦截这类请求、不取凭据，但建议移除；由 AI agent 执行巡检时风险更高。')
+    if rows and not (write or low or creds):
         print('角色核对：只有只读角色。')
     if denied:
         print(f'  {len(denied)} 个订阅的角色分配读取失败，未能核对是否有可写角色')
-    return {'read': not denied, 'assignments': rows, 'writeRoles': write, 'lowRiskRoles': low, 'writeSubscriptions': subs, 'denied': denied}
+    return {'read': not denied, 'assignments': rows, 'writeRoles': write, 'lowRiskRoles': low, 'credentialRoles': creds, 'writeSubscriptions': subs, 'denied': denied}
 
 
 def cmd_access_check(args) -> int:
@@ -235,11 +247,19 @@ def cmd_collect(args) -> int:
         raise
     finally:
         ws.save_calls(f'collect-{args.part}', client.calls)
+    missing = {}
+    if ('cost', 'full') in plan:
+        from .cost.collect import unread
+        missing = unread(ws)
+    if missing:
+        names = '、'.join(f'{n}（{"、".join(k)}）' for n, k in sorted(missing.items()))
+        print(f'费用采集完成，但 {len(missing)} 个订阅的费用没读到：{names}。01 不会包含这些费用，不能当作 0。'
+              f'多半是限流或服务端出错，过一段时间后补读（已读到的会直接复用）：')
+        print(f'  {command} --part cost --resume')
     if failed:
         print(f'采集完成，但以下支柱失败：{"、".join(failed)}。查明原因后补采：')
         print(f'  {command} --part waf --pillars {",".join(failed)}')
-        return 1
-    return 0
+    return 1 if failed or missing else 0
 
 
 def _chosen(ws, part, step):
@@ -406,7 +426,7 @@ def main(argv=None) -> int:
             p.add_argument('--offline', action='store_true', help='只用已保存的官网价格，不联网查询')
             p.add_argument('--price-date', help='价格日期 YYYY-MM-DD，默认今天；只使用该日期及之前查询的价格')
         p.set_defaults(func=func)
-    p = sub.add_parser('crosscheck', help='跨报告交叉核对（X1–X11），结果写入 findings/crosscheck.json')
+    p = sub.add_parser('crosscheck', help='跨报告交叉核对（X1–X12），结果写入 findings/crosscheck.json')
     p.add_argument('--workspace', required=True)
     p.add_argument('--month', help='巡检的月份 YYYY-MM，默认上一个完整月')
     p.set_defaults(func=cmd_crosscheck)

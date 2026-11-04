@@ -1,6 +1,7 @@
 """Peer comparison for storage accounts, Key Vault, container registries, AI accounts and Log Analytics workspaces."""
 from __future__ import annotations
 
+from .context import created_by
 from .engine import TypeReport, std_root_cause
 from .types_platform import SN, _vendor_confirm
 
@@ -70,7 +71,7 @@ def storage_type(ctx):
         if r['tfstate']:
             notes.append('IaC 状态存储账户：状态文件中通常含有资源敏感信息，应优先收紧网络和共享密钥访问')
         if r['tf'] and net_dev(r):
-            notes.append(f'按 {ctx.standard_name} 创建但仍对全网开放：存储账户模板没有统一设置网络规则')
+            notes.append(f'{created_by(ctx.standard_name)}但仍对全网开放：存储账户模板没有统一设置网络规则')
         return std_root_cause(ctx, r, notes)
     T.run(rc)
     shared = sum(1 for r in T.items if r['shared'] is False)
@@ -179,7 +180,11 @@ def la_type(ctx):
     capped = sum(1 for r in T.items if r['cap'] not in (None, -1, -1.0))
     T.uniform_gaps.append({'attribute': '每日数据上限/数据量告警', 'followedBy': capped, 'of': n,
                            'note': f'{n - capped}/{n} 个工作区没有设置每日上限。'})
+    if retentions and max(retentions) <= 30:   # same reading as 04's O3: 30 days is too short for audit logs
+        T.uniform_gaps.append({'attribute': '保留期', 'followedBy': 0, 'of': n,
+                               'note': f'全部只保留 {max(retentions)} 天；审计类日志建议总保留 180–365 天（见 04 的 O3）。'})
     auto = [r['name'] for r in T.items if r['name'].startswith('DefaultWorkspace-')]
     if auto:
         T.insights.append(f'{len(auto)} 个 DefaultWorkspace-* 工作区由门户在启用监控时自动创建，不是规划出来的工作区；建议按业务线或区域收敛到少数几个工作区。')
-    return T, {'retentionInDays': retentions[0] if len(retentions) == 1 else '、'.join(map(str, retentions))}
+    # Microsoft's recommendation, not the workspaces' current values (shown as "按微软推荐" when no workspace sets an example)
+    return T, {'每日数据上限/数据量告警': '设置', '保留期': '审计类日志总保留 180–365 天，排障类 30–90 天'}

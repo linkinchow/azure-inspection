@@ -17,6 +17,7 @@ import concurrent.futures
 import datetime as dt
 import json
 import math
+import time
 
 from ..core.io import read_json, write_json
 from ..core.reuse import Reuse, signature
@@ -26,6 +27,12 @@ CORE = ('curActual', 'prevActual', 'curAmortized', 'curResources')
 KINDS = CORE + ('curPricingModel', 'prevPricingModel', 'curResourceGroups', 'budgets')
 ARM = 'https://management.azure.com'
 COLLECTOR_VERSION = 3
+# A query still throttled (429) or failing on the server side (5xx) after the client's retries is read again in turn
+# after the other queries of its stage, once per turn, within RETRY_SECONDS for the whole collection (seen on a
+# tenant: month-total queries gave up after minutes of retries and the collection went on without them).
+RETRY_STATUS = {429, 500, 502, 503, 504}
+RETRY_SECONDS = 20 * 60
+RETRY_WAIT_SECONDS = 60
 # Per-resource costs of a subscription with many resource groups are read in batches of resource groups: one huge query
 # could run for hours and was lost when interrupted. Date ranges are not used: every resource would appear once per range.
 SPLIT_RESOURCE_GROUPS = 100
@@ -93,7 +100,7 @@ def normalized(record, currency):
     return rows
 
 
-def fetch_pages(client, url, body, kind):
+def fetch_pages(client, url, body, kind, max_attempts=None):
     """All pages of one query. A successful page without a cost table is an error, never 'empty'."""
     pages, error, seen = [], None, set()
     while url:
@@ -101,7 +108,8 @@ def fetch_pages(client, url, body, kind):
             error = {'message': 'Duplicate nextLink or pagination limit reached', 'queriedAt': now()}
             break
         seen.add(url)
-        status, data, err = client.request('GET' if kind == 'budgets' else 'POST', url, 'cost', kind, body=body)
+        status, data, err = client.request('GET' if kind == 'budgets' else 'POST', url, 'cost', kind, body=body,
+                                           **({'max_attempts': max_attempts} if max_attempts else {}))
         if status != 200:
             error = {'httpStatus': status, 'message': err, 'queriedAt': now(), 'url': url}
             break
@@ -124,18 +132,22 @@ class Collector:
         self.records = {}
         self.started = now()
         self.optional_scope = []
+        self.read = {}            # good reads of this run by file: a retried split query reads only the failed batches
+        self.retry_end = None     # deadline shared by the retry rounds
 
-    def fetch(self, sub, kind, body, name):
+    def fetch(self, sub, kind, body, name, max_attempts=None):
         """(record, rows) of one query saved as raw/cost/queries/<subscription>.<name>.json; with --resume a valid saved record is reused."""
         suffix = 'Microsoft.Consumption/budgets?api-version=2024-08-01' if kind == 'budgets' else f'Microsoft.CostManagement/query?api-version={API}'
         url = f"{ARM}/subscriptions/{sub['id']}/providers/{suffix}"
         rel = f'cost/queries/{sub["id"]}.{name}.json'
         sig = signature('cost-query', COLLECTOR_VERSION, kind, url, body)
+        if rel in self.read:
+            return self.read[rel]
         record = self.reuse.load(self.ws.raw(rel), sig, lambda r: r['result']['ok'] and (r.get('validation') or {}).get('ok', True))
         reused = record is not None
         if not reused:
             record = {'collectorVersion': COLLECTOR_VERSION, 'subscription': sub, 'queryKind': kind, 'query': body, 'url': url, 'startedAt': now()}
-            record['result'] = fetch_pages(self.client, url, body, kind)
+            record['result'] = fetch_pages(self.client, url, body, kind, max_attempts)
             record['completedAt'] = now()
             if kind == 'curActual' and not record['result']['ok'] and (record['result']['error'] or {}).get('httpStatus') == 400:
                 detail = json.dumps(record['result']['error']).lower()
@@ -144,7 +156,7 @@ class Collector:
                     fallback['dataset']['grouping'] = [{'type': 'Dimension', 'name': 'ServiceName'}]
                     record['unsupportedCombinedGrouping'] = record['result']
                     record['query'] = fallback
-                    record['result'] = fetch_pages(self.client, url, fallback, kind)
+                    record['result'] = fetch_pages(self.client, url, fallback, kind, max_attempts)
                     record['resourceGroupFallbackRequired'] = True
         try:
             rows = normalized(record, self.currency) if kind != 'budgets' else []
@@ -155,10 +167,12 @@ class Collector:
             rows = []
         if not reused:
             self.ws.save_raw(rel, self.reuse.stamp(record, sig))
+        if record['result']['ok'] and (record.get('validation') or {}).get('ok', True):
+            self.read[rel] = (record, rows)
         return record, rows
 
-    def job(self, sub, kind):
-        record, rows = self.fetch(sub, kind, None if kind == 'budgets' else query_body(kind, self.period), kind)
+    def job(self, sub, kind, max_attempts=None):
+        record, rows = self.fetch(sub, kind, None if kind == 'budgets' else query_body(kind, self.period), kind, max_attempts)
         self.records[(sub['id'], kind)] = (record, rows)
         return record
 
@@ -172,7 +186,38 @@ class Collector:
         _record, rows = self.records.get((sub['id'], 'curActual'), (None, []))
         return sorted({r['resourceGroup'] for r in rows if r.get('resourceGroup')}, key=str.lower)
 
-    def resources_in_parts(self, sub, groups):
+    @staticmethod
+    def retryable(record):
+        return not record['result']['ok'] and (record['result'].get('error') or {}).get('httpStatus') in RETRY_STATUS
+
+    def retry_one(self, sub, kind):
+        if kind == 'curResources' and len(self.resource_groups(sub)) > SPLIT_RESOURCE_GROUPS:
+            return self.resources_in_parts(sub, self.resource_groups(sub), max_attempts=1)
+        return self.job(sub, kind, max_attempts=1)
+
+    def retry_throttled(self, kinds, clock=time.monotonic, sleep=time.sleep):
+        """Queries of `kinds` still throttled or failing on the server side read again in turn, each once per turn
+        (month totals first), pausing after a turn in which all failed again, until the shared time limit; what is
+        left stays a failed read."""
+        left = sorted([(rec['subscription'], kind) for (_sid, kind), (rec, _rows) in self.records.items() if kind in kinds and self.retryable(rec)],
+                      key=lambda x: (kinds.index(x[1]), x[0]['name']))
+        if not left:
+            return
+        if self.retry_end is None:
+            self.retry_end = clock() + RETRY_SECONDS
+        total = len(left)
+        self.log(f'  {total} 个费用查询被限流或服务端出错，现在轮流补读（整个费用采集的补读合计最多 {RETRY_SECONDS // 60} 分钟）')
+        while left and clock() < self.retry_end:
+            still = []
+            for sub, kind in left:
+                if clock() >= self.retry_end or self.retryable(self.retry_one(sub, kind)):
+                    still.append((sub, kind))
+            if len(still) == len(left):
+                sleep(max(0.0, min(RETRY_WAIT_SECONDS, self.retry_end - clock())))
+            left = still
+        self.log(f'  补读：读到 {total - len(left)}/{total} 个' + (f'，{len(left)} 个仍未读到，记为读取失败' if left else ''))
+
+    def resources_in_parts(self, sub, groups, max_attempts=None):
         """Per-resource costs read in batches of resource groups; cost outside any resource group is the difference to the month total."""
         batches = [groups[i:i + RESOURCE_GROUP_BATCH] for i in range(0, len(groups), RESOURCE_GROUP_BATCH)]
 
@@ -180,7 +225,7 @@ class Collector:
             n, batch = numbered
             body = query_body('curResources', self.period)
             body['dataset']['filter'] = {'dimensions': {'name': 'ResourceGroupName', 'operator': 'In', 'values': batch}}
-            return self.fetch(sub, 'curResources', body, f'curResources.part{n:03d}')
+            return self.fetch(sub, 'curResources', body, f'curResources.part{n:03d}', max_attempts)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             parts = list(pool.map(one, enumerate(batches, 1)))
@@ -246,6 +291,17 @@ class Collector:
         return meta
 
 
+def unread(ws):
+    """{subscription name: [query kinds]} of month-total and per-resource cost queries that failed for a reason other
+    than permissions (throttling, server errors): `--resume` can read them later."""
+    path = ws.raw('cost/cost-data.json')
+    out = {}
+    for r in (read_json(path).get('index') or []) if path.exists() else []:
+        if r.get('queryKind') in CORE and r.get('status') == 'error':
+            out.setdefault(r['name'], []).append(r['queryKind'])
+    return out
+
+
 def collect(ws, cfg, client, period, log=print, reuse=None):
     from ..vm.collect import subscriptions_in_scope
     subs = []
@@ -255,6 +311,7 @@ def collect(ws, cfg, client, period, log=print, reuse=None):
     log(f'费用采集：{len(subs)} 个订阅，{period.current.label}（对比 {period.previous.label}）')
     collector.run_jobs([(s, k) for s in subs for k in CORE if k != 'curResources'])
     collector.run_resource_jobs(subs)   # after curActual: its resource groups decide which subscriptions are read in parts
+    collector.retry_throttled(CORE)      # before the steps that depend on which subscriptions have cost
     supplemental = [(r['subscription'], 'curResourceGroups') for r, _ in list(collector.records.values()) if r.get('resourceGroupFallbackRequired')]
     if supplemental:
         collector.run_jobs(supplemental)
@@ -263,6 +320,7 @@ def collect(ws, cfg, client, period, log=print, reuse=None):
         for (sid, kind), (rec, rows) in collector.records.items() if sid == s['id'] and kind in ('curActual', 'prevActual'))]
     active = [s for s in subs if s['id'] in collector.optional_scope]
     collector.run_jobs([(s, k) for s in active for k in ('curPricingModel', 'prevPricingModel')] + [(s, 'budgets') for s in active])
+    collector.retry_throttled(('curPricingModel', 'prevPricingModel', 'budgets'))
     meta = collector.snapshot(True)
     budgets = []
     for (sid, kind), (record, _rows) in collector.records.items():

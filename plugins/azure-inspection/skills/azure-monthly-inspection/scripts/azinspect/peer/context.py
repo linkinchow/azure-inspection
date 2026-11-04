@@ -34,6 +34,12 @@ UPDATE_PAT = re.compile(r'^(Update|Upgrade|MySQLFlexibleServerParameters|Postgre
 METHOD_PORTAL, METHOD_UNKNOWN, METHOD_VENDOR = '门户向导', '未知（无标签、无部署记录）', '供应商'
 
 
+def created_by(name):
+    """'按 Terraform 创建' / '按标准方式创建': spaces only around a Latin name."""
+    name = str(name)
+    return f'按 {name} 创建' if name.isascii() else f'按{name}创建'
+
+
 class Context:
     def __init__(self, ws, cfg, narrative=None):
         self.ws, self.cfg = ws, cfg

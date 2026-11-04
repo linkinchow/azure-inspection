@@ -224,7 +224,8 @@ class _Collector:
             out = {'id': t['id'], 'name': t['name'], 'type': t['type'], 'subscriptionId': t['subscriptionId'], 'resourceGroup': t['resourceGroup']}
             uris = [('self', t['id'])]
             if t['type'] == 'microsoft.storage/storageaccounts':
-                uris.append(('blobServices', t['id'] + '/blobServices/default'))
+                if str(t.get('kind') or '').lower() != 'filestorage':   # file shares only: no Blob service
+                    uris.append(('blobServices', t['id'] + '/blobServices/default'))
                 out['costUSD'] = t.get('costUSD')
             for label, rid in uris:
                 st, data, err = self.client.get(rid + '/providers/Microsoft.Insights/diagnosticSettings?api-version=2021-05-01-preview',

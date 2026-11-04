@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from ..common import coverage_entry
+from ..common import coverage_entry, not_applicable
 from . import checks_access, checks_aks, checks_resources
 from .context import Ctx
 
@@ -20,7 +20,7 @@ def _coverage(ctx):
     coverage = {k: coverage_entry() for k in CHECKS}
     for call in index.get('calls', []):
         c = coverage.get(call.get('check'))
-        if c is None:
+        if c is None or not_applicable(call):
             continue
         status = call.get('http', call.get('status')) or 0
         c['attempted'] += 1

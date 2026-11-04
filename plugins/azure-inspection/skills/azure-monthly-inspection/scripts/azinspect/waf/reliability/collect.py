@@ -220,6 +220,8 @@ class _Collector:
     # ------------------------------------------------------------------ storage
     def storage(self):
         def blob(r):
+            if str(r.get('kind') or '').lower() == 'filestorage':   # file shares only: no Blob service to read (400)
+                return {'id': r['id'], 'name': r['name'], 'status': 'not-applicable', 'error': 'FileStorage 账户不支持 Blob', 'blobService': None}
             st, d, e = self.c.get(f"{r['id']}/blobServices/default?api-version=2023-05-01", 'R6', r['name'])
             return {'id': r['id'], 'name': r['name'], 'status': st, 'error': e, 'blobService': d}
 

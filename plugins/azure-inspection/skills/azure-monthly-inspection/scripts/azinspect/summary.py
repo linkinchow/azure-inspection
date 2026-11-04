@@ -115,12 +115,28 @@ def default_pillar_notes(d):
     return {g: v[:5] for g, v in notes.items()}
 
 
+def _plan_key(text):
+    return re.sub(r'[\s，。；、,.;:：（）()]', '', str(text))
+
+
 def default_plan(d):
+    """03's and 04's plans one after the other; an item both have (same words, punctuation aside) is listed once."""
     plan = {}
     for code in ('03', '04'):
         for key, items in action_plan(d['narrative'][code].get('actionPlan')).items():
-            plan.setdefault(key, []).extend(items)
+            seen = {_plan_key(x) for x in plan.get(key, [])}
+            plan.setdefault(key, []).extend(x for x in items if _plan_key(x) not in seen)
     return plan
+
+
+def similar_plan_items(plan, ratio=0.6):
+    """Pairs of items in one period that say nearly the same thing: build asks for a merged actionPlan in 00."""
+    from difflib import SequenceMatcher
+    pairs = []
+    for items in action_plan(plan).values():
+        for i, a in enumerate(items):
+            pairs += [(a, b) for b in items[i + 1:] if SequenceMatcher(None, _plan_key(a), _plan_key(b)).ratio() >= ratio]
+    return pairs
 
 
 def plan_lines(plan):
@@ -347,6 +363,10 @@ def build(ws, cfg, period, narrative=None, log=print):
     if '02' in d['reports'] and vm_manifest.exists():
         m = read_json(vm_manifest)
         scope['vmWindow'] = cn_span(str(m['start'])[:10], str(m['end'])[:10])
+    if not action_plan(n.get('actionPlan')):
+        for a, b in similar_plan_items(default_plan(d)):
+            log(f'提醒：00 的处理计划合并了 03、04 的计划，其中两条意思相近：“{a[:40]}”和“{b[:40]}”。'
+                '建议在 narrative/00.json 写合并后的 actionPlan，再生成 00')
     md = markdown(cfg, period, d, n, pngs, scope)
     path = out / f'{stem(period)}.md'
     path.write_text(md, encoding='utf-8')

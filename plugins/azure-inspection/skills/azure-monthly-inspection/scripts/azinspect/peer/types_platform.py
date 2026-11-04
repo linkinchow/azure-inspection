@@ -5,6 +5,7 @@ import ipaddress
 import re
 from collections import Counter
 
+from ..waf.checks import node_os_channel
 from .engine import TypeReport, most_common, std_root_cause
 
 SN = 'security_network/raw'
@@ -20,6 +21,25 @@ def _vendor_confirm(r):
 def _minor(version):
     m = re.match(r'(\d+)\.(\d+)', str(version or ''))
     return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def standard_version(common, versions, keys):
+    """(standard minor version, raised): the majority's minor version, or the lowest minor in standard support in all the
+    clusters' regions when the majority's is past it (same source as 03's R9: AKS versions per subscription/region)."""
+    official = None
+    for key in keys:
+        vd = next((v for k, v in (versions or {}).items() if k.lower() == key.lower()), None)
+        if vd is None:
+            continue
+        vals = (vd.get('data') or {}).get('values') or []
+        here = {v['version'] for v in vals if 'KubernetesOfficial' in ((v.get('capabilities') or {}).get('supportPlan') or [])
+                and not v.get('isPreview')}
+        official = here if official is None else official & here
+    if not official or common in official:
+        return common, False
+    ordered = sorted(official, key=lambda v: tuple(map(int, v.split('.'))))
+    later = [v for v in ordered if tuple(map(int, v.split('.'))) > tuple(map(int, common.split('.')))]
+    return (later or ordered)[0], True
 
 
 # ---------------------------------------------------------------------------------------------- AKS
@@ -83,7 +103,7 @@ def aks_type(ctx):
             'poolsNoZones': [x['name'] for x in pools if not x.get('availabilityZones')],
             'sysCount': sum(x.get('count') or 0 for x in pools if x.get('mode') == 'System'),
             'sysActual': sum(actual.get(n, 0) for n in system_pools) if actual else None,
-            'version': p.get('kubernetesVersion'),
+            'version': p.get('kubernetesVersion'), 'subscriptionId': parts[2], 'location': b.get('location'),
             'ci': bool((addons.get('omsagent') or {}).get('enabled')) if isinstance(addons.get('omsagent'), dict) else False,
             'prom': bool(((p.get('azureMonitorProfile') or {}).get('metrics') or {}).get('enabled')),
             'netpol': net.get('networkPolicy'), 'dataplane': net.get('networkDataplane'), 'outbound': net.get('outboundType'),
@@ -103,11 +123,19 @@ def aks_type(ctx):
     n_mon = sum(1 for r in T.items if r['ci'] and r['prom'])
     common = most_common(['.'.join(map(str, _minor(r['version']))) for r in T.items if _minor(r['version'])])
     n_ver = sum(1 for r in T.items if _minor(r['version']) and '.'.join(map(str, _minor(r['version']))) == common)
+    majority = common
+    if common:
+        keys = sorted({f"{r['subscriptionId']}/{r.get('location')}" for r in T.items})
+        common, raised = standard_version(common, ctx.load('reliability/aks/k8s-versions.json', {}), keys)
+    else:
+        raised = False
     max_pods = most_common([m for r in T.items if r['podSubnet'] for m in r['maxPods']])
     peers_dates = {r['name']: r['created'] for r in T.items if r['tf'] and not r['vendor']}
     T.baseline_rationale = (f'以客户自己集群中已在使用、且符合微软推荐的做法为标准：独立 Pod 子网或 Overlay（{n_pod}/{n} 个集群）、'
                             f'私有 API Server（{n_private}/{n}）、Standard 层（{n_std}/{n}）、节点镜像自动更新（{n_img}/{n}）、'
-                            f'Azure 监控（{n_mon}/{n}），版本取多数集群的 {common}（{n_ver}/{n}）。')
+                            f'Azure 监控（{n_mon}/{n}），'
+                            + (f'多数集群的版本 {majority}（{n_ver}/{n}）已超出 AKS 标准支持，版本取本区域最低的标准支持版本 {common}。'
+                               if raised else f'版本取多数集群的 {common}（{n_ver}/{n}）。'))
 
     def ipam_rec(r):
         if r['vendor']:
@@ -130,7 +158,7 @@ def aks_type(ctx):
            feas='原地修改（需维护窗口或应用配合）', short='先配置授权 IP 范围（原地生效，几分钟）', confirm=_vendor_confirm, major=True)
     T.attr('tier', '控制面层级', f'Standard（{n_std}/{n} 个集群，提供 SLA）', lambda r: r['tier'],
            lambda r: r['tier'] != 'Standard' and r['prod'], rec='把控制面层级改为 Standard', feas='原地修改', confirm=_vendor_confirm)
-    T.attr('nodeOS', '节点系统镜像自动更新', f'NodeImage（{n_img}/{n} 个集群）', lambda r: r['nodeOS'],
+    T.attr('nodeOS', '节点系统镜像自动更新', f'NodeImage（{n_img}/{n} 个集群）', lambda r: node_os_channel(r['nodeOS']),
            lambda r: r['nodeOS'] in (None, 'None', 'Unmanaged'), rec='把节点系统自动更新通道设为 NodeImage 并配置维护窗口', feas='原地修改')
     T.attr('zones', '节点池可用区', '所有节点池跨可用区', lambda r: '未跨可用区的节点池：' + ', '.join(r['poolsNoZones']),
            lambda r: bool(r['poolsNoZones']),
@@ -142,7 +170,7 @@ def aks_type(ctx):
                                                    if r['sysActual'] == 0 and not (r['podSubnet'] or r['overlay']) else ''),
            feas='原地修改', confirm=lambda r: _vendor_confirm(r) or (None if r['prod'] else '非生产集群，可视成本决定是否调整'))
     if common:
-        T.attr('version', 'Kubernetes 版本', f'{common}（{n_ver}/{n} 个集群）', lambda r: r['version'],
+        T.attr('version', 'Kubernetes 版本', f'{common}（本区域最低的标准支持版本）' if raised else f'{common}（{n_ver}/{n} 个集群）', lambda r: r['version'],
                lambda r: (_minor(r['version']) or (0, 0)) < tuple(map(int, common.split('.'))),
                rec=f'逐个小版本升级到 {common}（先升控制面再升节点池，先在测试集群演练）', feas='原地修改（需维护窗口或应用配合）',
                confirm=_vendor_confirm)

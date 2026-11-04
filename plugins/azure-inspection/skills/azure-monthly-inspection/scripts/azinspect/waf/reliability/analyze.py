@@ -7,9 +7,9 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-from ..checks import count_text, type_label
+from ..checks import all_of, count_text, node_os_channel, type_label
 from . import lifecycle
-from ..common import ADVISOR_NO_TEXT, Findings, Raw, advisor_problem, coverage_entry, enabled, env, load_scope, mixed_env, plain_error
+from ..common import ADVISOR_NO_TEXT, Findings, Raw, advisor_problem, coverage_entry, enabled, env, load_scope, mixed_env, not_applicable, plain_error
 
 CHECKS = [f'R{i}' for i in range(1, 13)]
 SEV_ORDER = {'高': 0, '中': 1, '低': 2}
@@ -107,7 +107,7 @@ class _Run:
 
     def cover(self, prefixes, check):
         """Coverage of a check from the saved call records."""
-        sel = [c for c in self.calls if any(c['check'] == p or c['check'].startswith(p + '-') for p in prefixes)]
+        sel = [c for c in self.calls if any(c['check'] == p or c['check'].startswith(p + '-') for p in prefixes) and not not_applicable(c)]
         cv = self.coverage[check]
         cv['attempted'] += len(sel)
         cv['succeeded'] += sum(1 for c in sel if c['status'] == 200)
@@ -346,9 +346,8 @@ def r3(run):
         inv['appgw'].append(row)
         min_inst = (auto or {}).get('minCapacity') if auto else cap
         if (min_inst or 0) < 2:
-            run.add('R3', '低' if nonprod(ae) else '中', r['id'], 'Microsoft.Network/applicationGateways', r['name'], ae,
-                    f"应用网关 {r['name']}（{row['sku']}）固定只有 {cap} 个实例、未开启自动扩缩容，也未显式配置可用区，实例维护或故障时会中断。",
-                    row, '把实例数下限调到至少 2（建议开启自动扩缩容，最小 2），并在支持的区域使用跨可用区部署。',
+            text, rec, sev = appgw_low_instances(r['name'], row['sku'], cap, auto, r.get('zones'), '低' if nonprod(ae) else '中')
+            run.add('R3', sev, r['id'], 'Microsoft.Network/applicationGateways', r['name'], ae, text, row, rec,
                     '确认该应用网关是否承载生产流量。' if ae['value'] == 'unknown' else None)
         elif not r.get('zones'):
             run.add('R3', '低', r['id'], 'Microsoft.Network/applicationGateways', r['name'], ae,
@@ -440,7 +439,7 @@ def r5(run):
     if geo_off:
         run.add('R5', '低', None, 'Microsoft.DBforMySQL|DBforPostgreSQL/flexibleServers', ', '.join(x['name'] for x in geo_off),
                 {'value': 'prod', 'label': '生产', 'basis': '见涉及资源'},
-                f'{len(geo_off)} 个生产 MySQL/PostgreSQL 主库都没有开启异地冗余备份，整个 Azure 区域不可用时无法在配对区域恢复。',
+                f'{len(geo_off)} 个生产 MySQL/PostgreSQL 主库{all_of(len(geo_off))}没有开启异地冗余备份，整个 Azure 区域不可用时无法在配对区域恢复。',
                 {'servers': [{k: x[k] for k in ('name', 'sub', 'sku', 'backupRetentionDays', 'geoRedundantBackup')} for x in geo_off]},
                 '按业务对区域级容灾的要求选择：对关键库开启异地冗余备份（多数情况下只能在创建服务器时选择，已有服务器需要通过还原到新服务器实现），或建立跨区域只读副本。',
                 '确认哪些数据库需要区域级容灾（RPO/RTO 目标）。', sub='(多个订阅)', rg=None,
@@ -498,6 +497,21 @@ def r5(run):
     run.inventory['R5'] = inv
 
 
+def appgw_low_instances(name, sku, cap, auto, zones, sev):
+    """(finding, recommendation, severity) for an application gateway that can run on fewer than two instances.
+    With autoscale the gateway stays highly available even at a minimum of 0 (Microsoft: Scaling and Zone-redundant
+    Application Gateway v2); a new instance takes about 3-5 minutes, so a low minimum means waiting under a traffic surge:
+    low. A fixed single instance has no spare one while it is replaced: `sev` (medium in production)."""
+    where = f"，已跨可用区 {'、'.join(map(str, zones))} 部署" if zones else '，也未显式配置可用区'
+    zone_fix = '。' if zones else '；并在支持的区域使用跨可用区部署。'
+    if auto:
+        text = (f"应用网关 {name}（{sku}）开启了自动扩缩容（最少 {auto.get('minCapacity') or 0} 个、最多 {auto.get('maxCapacity')} 个实例）{where}。"
+                '服务本身仍保持高可用，但流量突增时新实例约需 3–5 分钟才能就绪，期间可能出现延迟升高或请求排队。')
+        return text, '按平时流量的高峰设置最少实例数（每个实例约 10 个容量单位），让突发流量不必等待扩容' + zone_fix, '低'
+    text = f'应用网关 {name}（{sku}）固定只有 {cap or 0} 个实例、未开启自动扩缩容{where}，这个实例维护或故障时，新实例就绪前（约 3–5 分钟）服务会中断。'
+    return text, '开启自动扩缩容，或把固定实例数调到至少 2' + zone_fix, sev
+
+
 # ====================================================================== R6 storage redundancy and recovery
 def r6(run):
     run.cover(['R6'], 'R6')
@@ -537,7 +551,7 @@ def r6(run):
                     row, '开启 Blob 软删除和容器软删除；如为迁移遗留的临时账户，确认后清理。', '确认该账户是否仍在使用。')
     run.inventory['R6'] = inv
     run.coverage['R6']['notes'].append(f"存储用量来自 Azure Monitor（{run.window.get('snapshot')} 前 2 天内最后一个小时值）；"
-                                       'FileStorage 类型的存储账户不支持读取 Blob 服务设置，返回 400 属正常。')
+                                       'FileStorage 类型的存储账户只有文件共享，没有 Blob 服务，不检查 Blob 软删除等设置。')
 
 
 # ====================================================================== R7 VM backup
@@ -720,7 +734,7 @@ def r9(run):
         if old:
             oldest = max(old, key=lambda p: p['imageAgeDays'])
             item = run.add('R9', '中' if (oldest['imageAgeDays'] > 180 and not nonprod(ce)) else '低', cl['id'], CLUSTER, cl['name'], ce,
-                    f"集群 {cl['name']} 节点操作系统自动更新通道为 {aup.get('nodeOSUpgradeChannel')}，{len(old)} 个节点池的节点镜像超过 120 天未更新（最旧 {oldest['pool']} 为 {oldest['nodeImageVersion']}，约 {oldest['imageAgeDays']} 天），缺少内核和安全修复，且越久不升级、一次升级的变化越大。",
+                    f"集群 {cl['name']} 节点操作系统自动更新通道为 {node_os_channel(aup.get('nodeOSUpgradeChannel'))}，{len(old)} 个节点池的节点镜像超过 120 天未更新（最旧 {oldest['pool']} 为 {oldest['nodeImageVersion']}，约 {oldest['imageAgeDays']} 天），缺少内核和安全修复，且越久不升级、一次升级的变化越大。",
                     {'nodeOSUpgradeChannel': aup.get('nodeOSUpgradeChannel'), 'upgradeChannel': aup.get('upgradeChannel'), 'pools': old, 'envBasis': ce['basis']},
                     '把节点操作系统升级通道设为 NodeImage（或 SecurityPatch）并配置维护窗口，先在测试集群执行；同时规划 Ubuntu 22.04 到 24.04 的迁移（Kubernetes 1.35 起节点不再支持 22.04）。',
                     key=f"{cl['id']}|node-image")
