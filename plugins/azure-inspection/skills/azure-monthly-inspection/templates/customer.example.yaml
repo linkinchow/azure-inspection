@@ -43,6 +43,15 @@ rules:
   # 可选：有意对外公开（例如供下载分发）的存储账户名称（正则）。同类对比（05）不把它们的匿名访问列为偏差，改为请客户确认。
   # publicStorageAccounts: '^contoso(public|download)'
 
+  # 可选：Azure Managed Lustre 巡检策略。85% 是微软可调整的示例；95%、3 小时和 80% 覆盖率为本插件默认策略，不是微软硬性要求。
+  # managedLustre:
+  #   warningPct: 85
+  #   criticalPct: 95
+  #   sustainedHours: 3
+  #   minCoveragePct: 80
+  #   requireRootSquash: false  # false 时已确认关闭仍给低级别的权限边界评审建议
+  #   requireCmk: false         # 平台默认加密有效，仅在客户要求 CMK 时列为策略差距
+
   # 业务线：按订阅名称、资源组名称或资源名称匹配，用于按业务汇总费用和问题。可留空。
   businessLines: []
   #  - {label: 电商, match: 'shop'}

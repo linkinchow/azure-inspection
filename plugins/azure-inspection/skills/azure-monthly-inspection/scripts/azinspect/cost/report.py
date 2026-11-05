@@ -146,6 +146,7 @@ def two_months(period):
 def kind_labels(labels):
     Lp, Lc = labels['prev'], labels['cur']
     return {'curActual': f'{Lc}实际费用', 'prevActual': f'{Lp}实际费用', 'curAmortized': f'{Lc}分摊费用', 'curResources': f'{Lc}资源级费用',
+            'prevResources': f'{Lp}资源级费用',
             'curPricingModel': f'{Lc}计价方式', 'prevPricingModel': f'{Lp}计价方式', 'curResourceGroups': f'{Lc}资源组费用', 'budgets': '预算'}
 
 
@@ -320,6 +321,7 @@ def build(ws, cfg, period, narrative=None, log=print):
     dp, dc = labels['prevDays'], labels['curDays']
     model = build_model(ws, period)
     sup = sr.load(ws)
+    sup['lustre'] = sr.lustre_comparison(sup['lustre'], model)
     sup['readTimes'] = read_times(ws)
     fdir, out = ws.month_dir('findings') / 'cost', ws.month_dir('reports')
     tot = model['comparableTotals']
@@ -402,7 +404,19 @@ def build(ws, cfg, period, narrative=None, log=print):
                 formula(s, i, 8, f'=G{i}/F{i}-1', r['dailyChangeRate'])
         return s
     comparison('业务组对比', f'业务组：{Lc}与{Lp}实际费用', model['groups'])
-    comparison('服务对比', f'Azure服务：{Lc}与{Lp}实际费用', model['services'])
+    service_sheet = comparison('服务对比', f'Azure服务：{Lc}与{Lp}实际费用', model['services'])
+    storage_breakdown = (model.get('lustreCosts') or {}).get('storageBreakdown')
+    if storage_breakdown:
+        service_sheet.append([])
+        service_sheet.append(['Storage费用拆分（已包含，不重复计入合计；其余费用含未归属部分）'])
+        for name, previous, current in [('Storage（原始服务合计）', storage_breakdown['parentPrev'], storage_breakdown['parentCur']),
+                                        ('其中：Azure Managed Lustre（已包含）', storage_breakdown['prev'], storage_breakdown['cur']),
+                                        ('Storage其余费用（含未归属）', storage_breakdown['remainingPrev'], storage_breakdown['remainingCur'])]:
+            delta = current - previous if previous is not None and current is not None else None
+            rate = current / previous - 1 if previous is not None and previous > 0 and current is not None else None
+            daily_rate = (current / dc) / (previous / dp) - 1 if rate is not None else None
+            service_sheet.append([name, previous, current, delta, rate, previous / dp if previous is not None else None,
+                                  current / dc if current is not None else None, daily_rate])
     driver = sheet('增长与下降来源', '订阅×服务：费用变化来源', '费用变化能定位到服务和资源；是否由业务量、数量或价格变化引起，需结合业务证据确认。',
                    ['业务组', '订阅', '服务', f'{Lp}USD', f'{Lc}USD', '增减USD', '变化率', '日均变化率'])
     for i, r in enumerate(model['subscriptionServiceDrivers'], 4):
@@ -569,7 +583,7 @@ def build(ws, cfg, period, narrative=None, log=print):
     for name, col in [('数据库与缓存用量', 13), ('变化原因拆解', 12), ('日志摄取与保留', 8), ('存储容量与层级', 12)]:
         wb[name].column_dimensions[L(col)].width = 80
     order = ['月度总览', '图表', '订阅对比', '业务组对比', '服务对比', '区域对比', '变化原因拆解', '主要计量变化', '增长与下降来源', '资源组对比', f'{Lc}资源费用', '每日费用',
-             f'{Ln}费用预测', '分摊与计价方式', 'RI与SP', 'Azure购买建议', '建议与跟踪', f'{Lc}VM使用情况', '数据库与缓存用量', '存储容量与层级', '日志摄取与保留', '当前闲置资源待确认', '预算检查', '数据覆盖与说明']
+             f'{Ln}费用预测', '分摊与计价方式', 'RI与SP', 'Azure购买建议', '建议与跟踪', f'{Lc}VM使用情况', '数据库与缓存用量', '存储容量与层级', 'Lustre容量与费用', '日志摄取与保留', '当前闲置资源待确认', '预算检查', '数据覆盖与说明']
     wb._sheets = [wb[n] for n in order if n in wb.sheetnames]
     aw.column_dimensions['B'].width, aw.column_dimensions['C'].width, aw.column_dimensions['D'].width, aw.column_dimensions['H'].width = 60, 85, 100, 65
     for i in range(4, aw.max_row + 1):
@@ -667,6 +681,58 @@ def _forecast_chart_scope(sup, m, dn, dc, Lc):
             if fcov['missed'] and fcov['share'] is not None else '')
 
 
+def lustre_markdown(data, cur_label, prev_label=None):
+    if data is None:
+        return []
+    billing = data.get('billingComparison')
+    if billing:
+        prev_label = prev_label or billing['months']['prev']
+        storage = billing['storageBreakdown']
+        lines = ['### Azure Managed Lustre', '', sr.lustre_coverage(data), '',
+                 '以下按主服务表的两月可比订阅范围拆分 Storage，已包含在总费用中，不重复相加。只将原始服务为 Storage 的 Lustre 根资源费用列入该子项；'
+                 '同一资源的带宽和关联 Blob 等费用保持原服务归属。其余 Storage 费用可能包含未归属费用。', '',
+                 f'|存储费用项目|{prev_label}实际费用USD|{cur_label}实际费用USD|增减USD|月费用变化率|日均变化率|',
+                 '|---|---:|---:|---:|---:|---:|']
+        for name, previous, current in [('Storage（原始服务合计）', storage['parentPrev'], storage['parentCur']),
+                                        ('其中：Azure Managed Lustre（已包含）', storage['prev'], storage['cur']),
+                                        ('Storage其余费用（含未归属）', storage['remainingPrev'], storage['remainingCur'])]:
+            delta = current - previous if previous is not None and current is not None else None
+            rate = current / previous - 1 if previous is not None and previous > 0 and current is not None else None
+            daily_rate = (current / billing['days']['cur']) / (previous / billing['days']['prev']) - 1 if rate is not None else None
+            lines.append(row([name, amount(previous), amount(current), amount(delta), percent(rate), percent(daily_rate)]))
+        lines += ['', f'按{prev_label} {billing["days"]["prev"]}天、{cur_label} {billing["days"]["cur"]}天计算日均变化；'
+                  '汇总使用未舍入金额，逐项显示值相加可能有分币尾差。', '']
+        for month, label in [('prev', prev_label), ('cur', cur_label)]:
+            sources = list(billing['coverage'][month].values())
+            complete = sum(source['status'] == 'complete' for source in sources)
+            lines.append(f'- {label}逐资源费用：{complete}/{len(sources)}个订阅读取并与月度费用核对一致。'
+                         + ('存在未归属资源ID的费用，不猜测其是否属于 Lustre。' if any(source.get('hasUnattributedCharges') for source in sources) else '')
+                         + ('未取得或未对账一致的月份费用保留未知，不按0处理。' if complete != len(sources) else ''))
+        lines += ['', '逐文件系统费用可包含原始 Storage 以外的服务，不能直接用下表合计替代上述 Storage 子项。'
+                  '“仅某月有账单记录”不代表创建或删除；Tier、SKU、容量和区域均为当前配置快照，不是历史配置。', '',
+                  f'|订阅|文件系统|Tier|SKU|当前容量TiB|区域|{prev_label}实际费用USD|{cur_label}实际费用USD|增减USD|月费用变化率|日均变化率|账单记录范围|',
+                  '|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---|']
+        resources = sorted(data.get('resources') or [], key=lambda item: (-max(abs(item.get('curCostUSD') or 0), abs(item.get('prevCostUSD') or 0)), item['resourceId'].lower()))
+        for resource in resources[:20]:
+            lines.append(row([resource.get('subscriptionName'), resource['name'], resource.get('tier') or '未取得', resource.get('skuName') or '未取得',
+                              resource.get('capacityTiB') if resource.get('capacityTiB') is not None else '未取得', resource.get('region') or '未取得',
+                              amount(resource.get('prevCostUSD')), amount(resource.get('curCostUSD')), amount(resource.get('deltaUSD')),
+                              percent(resource.get('changeRate')), percent(resource.get('dailyChangeRate')), sr.lustre_billing_label(resource.get('billingStatus'))]))
+        lines += ['', f'配置读取时间：{data.get("snapshotAt") or "未取得"}；完整 ARM ID、可用区、两个月读取状态及全部文件系统见 Excel“Lustre容量与费用”。', '', sr.LUSTRE_ADVICE, '']
+        return lines
+    lines = ['### Azure Managed Lustre', '', sr.lustre_coverage(data), '',
+             '费用按完整 ARM ID 匹配既有账单，已包含在报告总费用中；关联 Blob 存储等依赖费用保持各自归属。当前配置不代表账单月份的部署状态。', '',
+             f'|订阅|文件系统|Tier|SKU|当前容量TiB|区域|可用区|{cur_label}实际费用USD|用量与限制|',
+             '|---|---|---|---|---:|---|---|---:|---|']
+    resources = sorted(data.get('resources') or [], key=lambda item: (-(item.get('curCostUSD') or 0), item['resourceId'].lower()))
+    for resource in resources[:20]:
+        lines.append(row([resource.get('subscriptionName'), resource['name'], resource.get('tier'), resource.get('skuName'), resource.get('capacityTiB'),
+                  resource.get('region'), '、'.join(resource.get('zones') or []), amount(resource.get('curCostUSD')), sr.lustre_note(resource)]))
+    if resources:
+        lines += ['', f'配置读取时间：{data.get("snapshotAt") or "未取得"}；完整 ARM ID 和全部文件系统见 Excel“Lustre容量与费用”。', '', sr.LUSTRE_ADVICE]
+    return lines + ['']
+
+
 def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, chosen_scope=''):
     Lp, Lc, Ln = labels['prev'], labels['cur'], labels['next']
     dp, dc, dn = labels['prevDays'], labels['curDays'], labels['nextDays']
@@ -729,6 +795,9 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, cho
     lines += ['', '### 主要服务', '', f'|服务|{Lp}费用USD|{Lc}费用USD|增减USD|日均变化率|', '|---|---:|---:|---:|---:|']
     for r in m['services'][:15]:
         lines.append(row([r['name'], amount(r['prev']), amount(r['cur']), amount(r['delta']), daily_change(r)]))
+        storage = (m.get('lustreCosts') or {}).get('storageBreakdown')
+        if r['name'].lower() == 'storage' and storage:
+            lines.append(row(['其中：Azure Managed Lustre（已包含）', amount(storage['prev']), amount(storage['cur']), amount(storage['delta']), percent(storage['dailyChangeRate'])]))
     if 'services' in pngs:
         lines += ['', f'![费用增减最大的服务]({pngs["services"]})']
     if notes.get('services'):
@@ -815,8 +884,9 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, cho
         lines.append(row([a['subscriptionName'], a['name'], a.get('redundancy'), cap, growth, tier, '只有删除规则' if delete_only else lc.get('status', '未取得'), amount(a['curCostUSD'])]))
     no_policy = st['coverage']['lifecycle'].get('未配置', 0)
     lines += [''] + ([narrative['storageTableNote'], ''] if narrative.get('storageTableNote') else []) + [f'- {x}' for x in (narrative.get('storageNotes') or [])] + [f'- {no_policy}个存储账户没有生命周期策略，建议按数据保留要求确认是否需要转冷或删除规则。',
-                                                                                 '- 本次未检查备份保管库的备份策略；快照清单见Excel“当前闲置资源待确认”。', '',
-                                                                                 '### 日志', '', f'共{lg["coverage"]["found"]}个Log Analytics工作区，{Lc}费用USD {amount(lg["coverage"]["curCostUSD"])}。{Lc}费用较高的{len([w for w in lg["workspaces"] if w.get("top3")])}个工作区：', '']
+                                                                                 '- 本次未检查备份保管库的备份策略；快照清单见Excel“当前闲置资源待确认”。', '']
+    lines += lustre_markdown(sup.get('lustre'), Lc, Lp)
+    lines += ['### 日志', '', f'共{lg["coverage"]["found"]}个Log Analytics工作区，{Lc}费用USD {amount(lg["coverage"]["curCostUSD"])}。{Lc}费用较高的{len([w for w in lg["workspaces"] if w.get("top3")])}个工作区：', '']
     tail = lg['period'].get('sourceWindow') or ['', '']
     lines += [f'|订阅|工作区|{Lc}费用USD|{Lc}可计费GB|主要数据类型|保留天数|主要来源（{cn_date(tail[0])}至{period.current.last.day}日）|', '|---|---|---:|---:|---|---:|---|']
     for w in [w for w in lg['workspaces'] if w.get('top3')]:

@@ -32,11 +32,100 @@ def load(ws):
     base = ws.raw('cost')
     sup = {'region': _read(base / 'supplement/region.json'), 'forecast': _read(base / 'supplement/forecast.json'),
            'drivers': _read(base / 'supplement/drivers.json'), 'databases': _read(base / 'resources/databases.json'),
-           'storage': _read(base / 'resources/storage.json'), 'logs': _read(base / 'resources/logs.json')}
+           'storage': _read(base / 'resources/storage.json'), 'logs': _read(base / 'resources/logs.json'),
+           'lustre': load_lustre(ws)}
     assert sup['region']['reconciliation']['allOk'], '区域费用合计与订阅费用不一致'
     for p in sup['drivers']['pairs']:
         assert p.get('status') != 'success' or p['reconciliation']['ok'], p['subscriptionName']
     return sup
+
+
+def load_lustre(ws, model=None):
+    path = ws.raw('cost/resources/lustre.json')
+    data = read_json(path) if path.exists() else {'status': None, 'resources': [], 'error': '没有采集 Azure Managed Lustre 配置记录'}
+    return lustre_comparison(data, model) if model else data
+
+
+def lustre_comparison(data, model):
+    billing = model.get('lustreCosts')
+    if not billing:
+        return data
+    inventory = {resource['resourceId'].lower(): resource for resource in data.get('resources') or []}
+    rows = {}
+    for bill in billing['resources']:
+        key = bill['resourceId'].lower()
+        configuration = inventory.get(key) or {}
+        rows[key] = {**configuration, **bill, 'name': configuration.get('name') or bill['name'],
+                     'configurationStatus': 'read' if configuration else 'not_in_current_inventory'}
+    for key, configuration in inventory.items():
+        if key in rows:
+            continue
+        subscription_id = key.split('/')[2]
+        values, statuses = {}, {}
+        for month in ('prev', 'cur'):
+            source = billing['coverage'][month].get(subscription_id) or {}
+            values[month] = 0.0 if source.get('reconciled') and not source.get('hasUnattributedCharges') else None
+            statuses[month] = source.get('status') or 'not-collected'
+        rows[key] = {**configuration, 'prevCostUSD': values['prev'], 'curCostUSD': values['cur'],
+                     'deltaUSD': values['cur'] - values['prev'] if all(value is not None for value in values.values()) else None,
+                     'changeRate': None, 'dailyChangeRate': None, 'prevStatus': statuses['prev'], 'curStatus': statuses['cur'],
+                     'prevDailyUSD': values['prev'] / billing['days']['prev'] if values['prev'] is not None else None,
+                     'curDailyUSD': values['cur'] / billing['days']['cur'] if values['cur'] is not None else None,
+                     'billingStatus': 'unknown_previous' if values['prev'] is None else 'unknown_current' if values['cur'] is None else 'not_billed',
+                     'configurationStatus': 'read'}
+    return {**data, 'resources': list(rows.values()), 'billingComparison': {key: value for key, value in billing.items() if key != 'resources'}}
+
+
+def lustre_billing_label(status):
+    return {'continuing': '两月均有账单记录', 'previous_only': '仅上月有账单记录', 'current_only': '仅本月有账单记录',
+            'unknown_previous': '上月账单未能核对', 'unknown_current': '本月账单未能核对', 'not_billed': '两月均未匹配账单记录'}.get(status, '未能核对')
+
+
+LUSTRE_ADVICE = ('结合容量与 inode 峰值、作业周期和重建耗时评审规格及生命周期；'
+                 '按留存、恢复和召回要求评审可选 Blob 归档。低吞吐量仅作观察，不作为闲置或缩容依据；暂不估算节省金额。')
+
+
+def lustre_note(resource):
+    notes = [resource.get('telemetryNote') or '未取得成本月份的 Lustre 容量、inode 和吞吐指标。']
+    if resource.get('configurationError'):
+        notes.append('完整配置读取失败：' + str(resource['configurationError']))
+    if resource.get('curCostUSD') is None:
+        notes.append('账单未匹配完整资源 ID 或金额未取得，费用未知')
+    if 'prevCostUSD' in resource and resource['prevCostUSD'] is None:
+        notes.append('上月费用未知，未按0处理')
+    if resource.get('configurationStatus') == 'not_in_current_inventory':
+        notes.append('当前清单未匹配到配置，不据此判断资源已删除')
+    return '；'.join(notes)
+
+
+def lustre_coverage(data):
+    if data.get('status') is None:
+        if data.get('billingComparison'):
+            return f'当前配置清单未取得；费用比较仅依据两月账单，匹配 {len(data.get("resources") or [])} 个文件系统。'
+        return '没有采集记录，本月未检查 Azure Managed Lustre。'
+    count = sum(resource.get('configurationStatus') != 'not_in_current_inventory' for resource in data.get('resources') or [])
+    if data.get('status') != 200 or data.get('errors'):
+        return f'已取得 {count} 个文件系统；清单或完整配置读取不完整，见原始记录。'
+    return f'已读取 {count} 个文件系统；配置为当前快照，成本月份的容量、inode 和吞吐指标未采集。'
+
+
+def lustre_sheet(sheet, data, cur_label, prev_label=None):
+    paired = data.get('billingComparison')
+    prev_label = prev_label or ((paired or {}).get('months') or {}).get('prev') or '上月'
+    paired_columns = [f'{prev_label}实际费用USD', '增减USD', '月费用变化率', '日均变化率', f'{prev_label}读取情况', f'{cur_label}读取情况', '账单记录范围',
+                      '原始计费服务', f'{prev_label}日均USD', f'{cur_label}日均USD'] if paired else []
+    result = sheet('Lustre容量与费用', f'Azure Managed Lustre：{cur_label}实际费用与当前配置',
+                   lustre_coverage(data) + '按完整 ARM ID 匹配既有账单，费用已包含在总计中；依赖存储费用另按各自资源计费。' + LUSTRE_ADVICE,
+                   ['订阅', '资源组', '文件系统', '完整资源ID', 'SKU', 'Tier', 'Tier来源', '配置容量TiB', '区域', '可用区', f'{cur_label}实际费用USD'] + paired_columns + ['配置读取时间UTC', '用量与读取限制', '评审建议'])
+    for resource in sorted(data.get('resources') or [], key=lambda item: (-(item.get('curCostUSD') or 0), item['resourceId'].lower())):
+        compared = [resource.get('prevCostUSD'), resource.get('deltaUSD'), resource.get('changeRate'), resource.get('dailyChangeRate'),
+                    resource.get('prevStatus'), resource.get('curStatus'), lustre_billing_label(resource.get('billingStatus')),
+                    '、'.join(resource.get('rawServiceNames') or []), resource.get('prevDailyUSD'), resource.get('curDailyUSD')] if paired else []
+        result.append([resource.get('subscriptionName'), resource.get('resourceGroup'), resource['name'], resource['resourceId'],
+                       resource.get('skuName'), resource.get('tier'), resource.get('tierSource'), resource.get('capacityTiB'),
+                       resource.get('region'), '、'.join(resource.get('zones') or []), resource.get('curCostUSD')] + compared +
+                       [data.get('snapshotAt') if resource.get('configurationStatus') != 'not_in_current_inventory' else None, lustre_note(resource), LUSTRE_ADVICE])
+    return result
 
 
 def region_label(code, cfg=None):
@@ -195,6 +284,8 @@ def add_sheets(sheet, formula, sup, model, labels, narrative, cfg):
                    u.get('growthPct'), '，'.join(f'{k} {v:,.0f}' for k, v in (a.get('tierMixLastDayGiB') or {}).items()), a.get('egressGiBCur'),
                    lc.get('status', '未取得') + ('：' + rules if rules else ''), a['curCostUSD']])
     out.append((ss, []))
+    if sup.get('lustre') is not None:
+        out.append((lustre_sheet(sheet, sup['lustre'], L_cur, L_prev), [14, 15] if sup['lustre'].get('billingComparison') else []))
     lg = sup['logs']
     tail = lg['period'].get('sourceWindow') or ['', '']
     ls = sheet('日志摄取与保留', f'Log Analytics：{L_cur}摄取量和保留设置',
@@ -223,6 +314,8 @@ def coverage_rows(sup, model, labels):
             ['日志工作区', f'{lg["coverage"]["found"]}个工作区；费用USD 50以上的{lg["coverage"]["curCostGE50"]}个已查询摄取量；检查{lg["coverage"]["diagnosticSettingsChecked"]}个资源的诊断设置，'
              + (f'{lg["coverage"]["resourcesWithDuplicateDestinations"]}个资源有同一类日志发送到多个工作区' if lg['coverage']['resourcesWithDuplicateDestinations'] else '未发现同一类日志重复发送')],
             ['资源配置时间', f'数据库、缓存、存储和日志的规格及配置为{int(db["snapshotAt"][5:7])}月{int(db["snapshotAt"][8:10])}日读取的当前状态，不一定是{labels["cur"]}配置']]
+    if sup.get('lustre') is not None:
+        rows.append(['Azure Managed Lustre', lustre_coverage(sup['lustre'])])
     return rows
 
 

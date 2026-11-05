@@ -20,6 +20,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
+from ...core import lustre
 from ...core.io import read_json
 from ..common import Raw, enabled, load_scope, now
 
@@ -85,7 +86,7 @@ ARG_Q = {
                "'microsoft.cache/redisenterprise','microsoft.documentdb/mongoclusters','microsoft.network/applicationgateways','microsoft.cdn/profiles',"
                "'microsoft.network/frontdoors','microsoft.storage/storageaccounts','microsoft.keyvault/vaults','microsoft.network/virtualnetworks',"
                "'microsoft.containerregistry/registries','microsoft.network/virtualnetworkgateways','microsoft.network/bastionhosts',"
-               "'microsoft.eventhub/namespaces','microsoft.network/loadbalancers','microsoft.network/natgateways') "
+               "'microsoft.eventhub/namespaces','microsoft.network/loadbalancers','microsoft.network/natgateways','microsoft.storagecache/amlfilesystems') "
                "| project id, name, type=tolower(type), subscriptionId, resourceGroup, location, tags, sku, kind, ps=tostring(properties.provisioningState), "
                "state=tostring(properties.state)",
     'vnetgw': "resources | where type =~ 'microsoft.network/virtualnetworkgateways' or type =~ 'microsoft.network/expressroutecircuits' "
@@ -107,7 +108,7 @@ ARG_Q = {
 
 DIAG_TYPES = {'microsoft.dbformysql/flexibleservers', 'microsoft.dbforpostgresql/flexibleservers', 'microsoft.cache/redis',
               'microsoft.cache/redisenterprise', 'microsoft.documentdb/mongoclusters', 'microsoft.network/applicationgateways',
-              'microsoft.cdn/profiles', 'microsoft.network/frontdoors'}
+              'microsoft.cdn/profiles', 'microsoft.network/frontdoors', 'microsoft.storagecache/amlfilesystems'}
 TOP_STORAGE_N = 10
 ACTIVITY_DAYS = 90
 
@@ -168,6 +169,9 @@ class _Collector:
     def rows(self, name):
         return (self.raw.load(f'arg/{name}.json') or {}).get('rows') or []
 
+    def lustre(self):
+        lustre.collect_inventory(self.client, self.enabled, self.save, 'O1')
+
     def arg(self):
         summary = {}
         for name, q in ARG_Q.items():
@@ -213,6 +217,10 @@ class _Collector:
 
     def diagnostics(self):
         targets_all = self.rows('targets')
+        known = {row['id'].lower() for row in targets_all}
+        targets_all += [dict(row, type=lustre.RESOURCE_TYPE.lower())
+                        for row in (self.raw.load('lustre/inventory.json') or {}).get('rows') or []
+                        if row['id'].lower() not in known]
         top_ids = top_storage(self.ws)
         if not top_ids:
             self.log('未找到成本巡检的存储账户费用（raw/cost/resources/storage.json），诊断设置只检查数据库、缓存和入口资源')
@@ -336,6 +344,7 @@ def _diag_values(data):
         out.append({'name': d.get('name'), 'workspaceId': p.get('workspaceId'), 'storageAccountId': p.get('storageAccountId'),
                     'eventHub': bool(p.get('eventHubAuthorizationRuleId')), 'logAnalyticsDestinationType': p.get('logAnalyticsDestinationType'),
                     'logs': [(l.get('category') or l.get('categoryGroup'), l.get('enabled')) for l in (p.get('logs') or [])],
+                    'logRetention': [{k: l.get(k) for k in ('category', 'categoryGroup', 'retentionPolicy')} for l in p.get('logs') or []],
                     'metrics': [(m.get('category'), m.get('enabled')) for m in (p.get('metrics') or [])]})
     return out
 
@@ -350,7 +359,7 @@ def top_storage(ws) -> dict:
     return {a['resourceId'].lower(): cost(a) for a in sorted(accounts, key=lambda a: -cost(a))[:TOP_STORAGE_N]}
 
 
-PHASES = ['arg', 'subscription_reads', 'deployments', 'diagnostics', 'vm_dcra', 'management_groups', 'aks_activity', 'workspace_tables']
+PHASES = ['arg', 'lustre', 'subscription_reads', 'deployments', 'diagnostics', 'vm_dcra', 'management_groups', 'aks_activity', 'workspace_tables']
 
 
 def collect(ws, cfg, client, window, log=print, phases=None):

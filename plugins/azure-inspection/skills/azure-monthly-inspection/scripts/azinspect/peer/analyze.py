@@ -4,14 +4,15 @@ from __future__ import annotations
 import collections
 from datetime import datetime, timezone
 
+from ..core import lustre
 from ..core.io import write_json
 from . import links as links_mod
 from .context import METHOD_PORTAL, METHOD_UNKNOWN, METHOD_VENDOR, Context
-from .types_data import acr_type, ai_type, kv_type, la_type, storage_type
+from .types_data import acr_type, ai_type, kv_type, la_type, managed_lustre_type, storage_type
 from .types_infra import afd_type, appgw_type, diag_type, vm_type, vnet_type
 from .types_platform import aks_type, db_type, mongo_type, redis_type
 
-BUILDERS = [aks_type, lambda c: db_type(c, 'mysql'), lambda c: db_type(c, 'postgres'), redis_type, mongo_type, storage_type,
+BUILDERS = [aks_type, lambda c: db_type(c, 'mysql'), lambda c: db_type(c, 'postgres'), redis_type, mongo_type, storage_type, managed_lustre_type,
             kv_type, acr_type, ai_type, appgw_type, afd_type, vm_type, vnet_type, la_type, diag_type]
 # Types counted in the high-impact statistics (resource-level, with risk attributes)
 HIGH_IMPACT_SCOPE_EXCLUDE = ('vm', 'dbdiag', 'keyvault', 'ai', 'loganalytics', 'vnet')
@@ -100,16 +101,33 @@ COVERAGE_GAPS = [
 def analyze(ws, cfg, log=print):
     ctx = Context(ws, cfg)
     types, out_types = [], []
+    gaps = list(COVERAGE_GAPS)
+    lustre_inventory = ctx.load('performance/lustre/inventory.json')
+    if lustre_inventory is None:
+        gaps.append('Azure Managed Lustre：没有采集配置记录，本月未检查。')
+    elif lustre_inventory.get('status') != 200 or lustre_inventory.get('errors'):
+        gaps.append('Azure Managed Lustre：配置清单或完整属性读取失败或不完整，受影响字段未检查；'
+                    '证据见 raw/waf/performance/lustre/inventory.json。')
     for build in BUILDERS:
         T, base = build(ctx)
         if not T.items:
             continue
+        if T.key == 'managed_lustre':
+            for insight in T.insights:
+                if '未取得' in insight:
+                    gaps.append('Azure Managed Lustre：' + insight)
         types.append(T)
-        out_types.append(T.to_json(base))
+        type_data = T.to_json(base)
+        if T.key == 'managed_lustre':
+            resources = {resource['id'].lower(): resource for resource in (lustre_inventory or {}).get('rows') or []
+                         if str(resource.get('type') or '').lower() == lustre.RESOURCE_TYPE.lower()}
+            type_data['filesystems'] = [dict(lustre.resource_summary(resources[item['id'].lower()]),
+                                             subscriptionId=resources[item['id'].lower()].get('subscriptionId'),
+                                             subscriptionName=item['sub']) for item in T.items]
+        out_types.append(type_data)
     stats = cross_stats(ctx, types)
     collected = (ctx.created_meta or {}).get('collectedAt')
     snapshot = ((ctx.load('security_network/manifest.json') or {}).get('window') or {}).get('snapshot')
-    gaps = list(COVERAGE_GAPS)
     if not ctx.created_map:
         gaps.insert(0, CREATED_GAP)
     data = {'collectedAt': collected, 'configSnapshot': snapshot, 'analyzedAt': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),

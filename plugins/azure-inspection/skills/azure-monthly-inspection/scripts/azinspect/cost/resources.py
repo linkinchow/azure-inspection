@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlencode
 
 from ..core.io import write_json
+from ..core import lustre
 
 MYSQL, PG = 'microsoft.dbformysql/flexibleservers', 'microsoft.dbforpostgresql/flexibleservers'
 REDIS, AMR, AMRDB = 'microsoft.cache/redis', 'microsoft.cache/redisenterprise', 'microsoft.cache/redisenterprise/databases'
@@ -167,8 +168,42 @@ def _table(rec):
     return [dict(zip(cols, row)) for row in t['rows']]
 
 
+def collect_lustre(ws, client, period, model, subscriptions):
+    snapshot = now()
+    enabled = [sub for sub in subscriptions if sub.get('state') == 'Enabled']
+    inventory = lustre.collect_inventory(client, enabled,
+                                         lambda rel, obj: ws.save_raw('cost/resources/' + rel, obj), 'cost-resources')
+    costs = defaultdict(list)
+    for bill in model['resources']:
+        resource_id = bill.get('resourceId')
+        if resource_id:
+            costs[resource_id.lower()].append(bill.get('cost'))
+    names = {sub['id'].lower(): sub['name'] for sub in subscriptions}
+    rows = []
+    for resource in {item['id'].lower(): item for item in inventory.get('rows') or []}.values():
+        summary = lustre.resource_summary(resource)
+        props = resource.get('properties') or {}
+        bills = costs.get(resource['id'].lower())
+        actual = math.fsum(bills) if bills and all(lustre.number(value) for value in bills) else None
+        rows.append({'resourceId': resource['id'], 'name': resource['name'],
+                     'subscriptionName': names.get(resource['subscriptionId'].lower(), resource['subscriptionId']),
+                     'resourceGroup': resource.get('resourceGroup'), 'region': resource.get('location'),
+                     'skuName': summary['sku'], 'tier': summary['tier'], 'tierSource': summary['tierSource'],
+                     'zones': summary['zones'], 'capacityTiB': props.get('storageCapacityTiB'),
+                     'curCostUSD': actual,
+                     'configurationError': resource.get('_readError'),
+                     'telemetryNote': '未采集成本月份的 Lustre 容量、inode 和吞吐指标；配置为当前快照，作业峰值与恢复要求待评审。'})
+    result = {'snapshotAt': snapshot, 'period': {'start': f'{period.current.first.isoformat()}T00:00:00Z',
+                                               'end': f'{period.current.shift(1).first.isoformat()}T00:00:00Z'},
+              'status': inventory.get('status'), 'error': inventory.get('error'), 'errors': inventory.get('errors') or [],
+              'resources': rows, 'inventoryEvidence': 'raw/cost/resources/lustre/inventory.json'}
+    ws.save_raw('cost/resources/lustre.json', result)
+    return result
+
+
 def collect(ws, client, period, model, subscriptions, log=print):
     ctx = _Ctx(ws, client, period)
+    collect_lustre(ws, client, period, model, subscriptions)
     subname = {s['id'].lower(): s['name'] for s in subscriptions}
     enabled = [s['id'] for s in subscriptions if s.get('state') == 'Enabled']
     cost, cost_svc = defaultdict(float), defaultdict(lambda: defaultdict(float))

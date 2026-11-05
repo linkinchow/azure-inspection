@@ -16,20 +16,28 @@ from .model import save as save_model
 
 # steps without per-query files: with --resume a step is skipped when an identical earlier run finished it
 STEP_OUTPUTS = {'resources': ['cost/resources/inventory.json', 'cost/resources/databases.json', 'cost/resources/storage.json',
-                              'cost/resources/logs.json'],
+                              'cost/resources/logs.json', 'cost/resources/lustre.json', 'cost/resources/lustre/inventory.json'],
                 'orphan': ['cost/orphan.json'], 'review': ['cost/review/results.json']}
 
 
 def step_signature(name, month, enabled, cost_data):
     """A step is reused only for the same subscriptions and the same cost reads: the steps choose resources by cost, so
     costs read later under --resume make them run again."""
-    read = sorted(f"{r['subscriptionId']}.{r['queryKind']}" for r in cost_data.get('index') or [] if r.get('ok'))
+    read = sorted(f"{r['subscriptionId']}.{r['queryKind']}" for r in cost_data.get('index') or []
+                  if r.get('ok') and r['queryKind'] != 'prevResources')
     return signature('cost-step', cost_collect.COLLECTOR_VERSION, name, month, sorted(enabled), read)
 
 
 def _step(ws, reuse, name, sig, run, log):
     marker = ws.raw(f'cost/_steps/{name}.json')
-    if reuse.load(marker, sig, lambda r: all(ws.raw(o).exists() for o in r['outputs'])) is not None:
+    def valid(record):
+        if not all(ws.raw(output).exists() for output in STEP_OUTPUTS[name]):
+            return False
+        if name == 'resources':
+            inventory = read_json(ws.raw('cost/resources/lustre/inventory.json'))
+            return inventory.get('status') == 200 and not inventory.get('errors')
+        return True
+    if reuse.load(marker, sig, valid) is not None:
         log(f'  {name}：复用上次已完成的结果')
         return
     run()

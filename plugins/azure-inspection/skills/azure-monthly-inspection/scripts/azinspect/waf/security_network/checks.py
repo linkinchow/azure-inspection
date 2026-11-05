@@ -7,6 +7,7 @@ from __future__ import annotations
 import ipaddress
 import re
 
+from ...core import lustre
 from ..common import env as env_of
 from .network import (ADMIN_PORTS, DB_PORTS, INFRA_SUBNETS, MGMT_PORTS, NSG_UNSUPPORTED_DELEGATIONS, RISKY, endpoint_label,
                       exposure_text, lid, parts, port_match, range_size, rule_dsts, rule_ports, rule_srcs, src_is_internet)
@@ -116,7 +117,7 @@ def _subnet_content(oo, dele, sp):
     return '、'.join(dp) or '无'
 
 
-def check_subnets(c, F):
+def check_subnets(c, F, lustre_rows=()):
     inventory, empty_by_vnet, low_by_vnet = [], {}, {}
     vmss_by_name = {(lid(v['subscriptionId']), v['name']): k for k, v in c.vmss.items()}
     for sid, s in c.subnet.items():
@@ -124,6 +125,9 @@ def check_subnets(c, F):
         v = s['_vnet']
         dele = [d['properties']['serviceName'] for d in sp.get('delegations') or []]
         o, nic_without_nsg = _subnet_owners(c, sp)
+        owners = [row for row in lustre_rows if not row.get('_readError') and
+              lid((row.get('properties') or {}).get('filesystemSubnet')) == lid(sid)]
+        o['lustre'] = [row['id'] for row in owners]
         vmss_without_nsg = [nm for nm in o['vmssCustomer']
                             if not any(ep.get('nicNsg') for ep in c.vmss_eps.get(vmss_by_name.get((lid(v['subscriptionId']), nm), ''), []))]
         has_nsg = bool(c.subnet_nsg.get(sid))
@@ -137,6 +141,12 @@ def check_subnets(c, F):
                'routeTable': ((sp.get('routeTable') or {}).get('id') or '').split('/')[-1] or None}
         inventory.append(rec)
         if has_nsg or s['name'].lower() in INFRA_SUBNETS or any(d.lower() in NSG_UNSUPPORTED_DELEGATIONS for d in dele):
+            continue
+        if owners:
+            F.add('S-N1', '低', v, SUBNET,
+                  f'子网 {v["name"]}/{s["name"]} 承载 Azure Managed Lustre，未关联 NSG；仅凭此配置不能判定公网可达。',
+                  rec, '结合区域和客户端边界核对 Lustre NSG 要求，保留文件系统子网内必需的 TCP 22、988、1019-1023 和服务依赖流量。',
+                  confirm=True, name=f'{v["name"]}/{s["name"]}', key=f'{sid}|lustre')
             continue
         if not sp.get('ipConfigurations') and not sp.get('serviceAssociationLinks'):
             label = s['name'] + (f'(委派 {",".join(dele)})' if dele else '')
@@ -179,6 +189,40 @@ def check_subnets(c, F):
               name=f'{v["name"]}（{len(lows) + len(empties)} 个子网）', rg=v['resourceGroup'], sub=v['subscriptionId'],
               members=[member(f'{v["name"]}/{n}', SUBNET, sub_name) for n in names], key=key)
     return inventory
+
+
+def check_lustre(F, inventory, coverage):
+    for row in (inventory or {}).get('rows') or []:
+        if row.get('_readError'):
+            coverage['notes'].append(f"{row['id']}：读取失败，未检查：{row['_readError']}")
+            continue
+        properties = row.get('properties') or {}
+        mode = (properties.get('rootSquashSettings') or {}).get('mode')
+        if mode == 'None':
+            required = lustre.policy(F.cfg)['requireRootSquash']
+            F.add('S-N10', '中' if required else '低', row, lustre.RESOURCE_TYPE,
+                  f"Azure Managed Lustre {row['name']} 的 root squash 模式为 None，客户端 root 身份不被映射。",
+                  {'rootSquashSettings': properties.get('rootSquashSettings'), 'requiredByCustomer': required},
+                  '确认客户端是否全部可信及 POSIX 权限边界，按工作负载选择 RootOnly 或 All；变更前验证作业兼容性。',
+                  confirm=True, key=f"{row['id'].lower()}|root-squash")
+        elif mode not in ('RootOnly', 'All'):
+            coverage['otherErrors'] += 1
+            coverage['notes'].append(f"{row['id']}：root squash 模式 {mode or '未返回'}，未检查。")
+        if lustre.policy(F.cfg)['requireCmk']:
+            encryption = properties.get('encryptionSettings') or {}
+            source = encryption.get('keyEncryptionKey')
+            key_url = source.get('keyUrl') if isinstance(source, dict) else None
+            if encryption.get('keyEncryptionKey') is not None and key_url:
+                continue
+            if properties.get('encryptionSettings') is None or 'keyEncryptionKey' not in encryption:
+                coverage['otherErrors'] += 1
+                coverage['notes'].append(f"{row['id']}：客户要求 CMK，但密钥配置未返回，未检查。")
+                continue
+            F.add('S-N10', '中', row, lustre.RESOURCE_TYPE,
+                  f"Azure Managed Lustre {row['name']} 未配置客户要求的 CMK。",
+                  {'encryptionSettings': encryption, 'requiredByCustomer': True},
+                  '核对客户 CMK 策略与托管身份、密钥访问及轮换方案；平台默认加密不等同于客户托管密钥。',
+                  key=f"{row['id'].lower()}|cmk")
 
 
 # ---------------------------------------------------------------- S-N2 NSG rules

@@ -16,6 +16,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+from ...core import lustre
 from ..common import Raw, enabled, load_scope, now
 
 ARM = 'https://management.azure.com'
@@ -210,6 +211,7 @@ def collect(ws, cfg, client, window, log=print):
     raw, calls = Raw(ws, PILLAR), _Calls(client)
     subs = load_scope(ws)
     active = enabled(subs)
+    lustre.collect_inventory(client, active, raw.save, 'S-N10')
     sub_ids = [s['id'] for s in active]
     arg_data, arg_errors = {}, {}
     for key, query in ARG_TYPES.items():

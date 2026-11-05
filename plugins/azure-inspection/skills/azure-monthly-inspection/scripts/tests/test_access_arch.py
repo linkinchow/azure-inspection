@@ -40,6 +40,17 @@ class RegionTests(unittest.TestCase):
 
 
 class ArchitectureTests(unittest.TestCase):
+    def test_lustre_hpc_component(self):
+        cfg = config.load(TEMPLATE)
+        with tempfile.TemporaryDirectory() as directory:
+            ws = io.Workspace(directory, '2026-09')
+            ws.create()
+            io.write_json(ws.raw('waf/scope.json'), {'subscriptions': [{'id': SUB, 'name': 'hpc-prod', 'state': 'Enabled'}]})
+            io.write_json(ws.raw('waf/operations/arg/resources.json'), {'rows': [
+                {'id': '/lustre/fs', 'type': 'microsoft.storagecache/amlfilesystems', 'subscriptionId': SUB, 'location': 'japaneast'}]})
+            text = '\n'.join(architecture.section(architecture.summary(ws, cfg), {}))
+            self.assertIn('Azure Managed Lustre HPC 文件系统 1 个', text)
+
     def test_section_from_inventory(self):
         cfg = config.load(TEMPLATE)
         with tempfile.TemporaryDirectory() as d:
@@ -59,6 +70,96 @@ class ArchitectureTests(unittest.TestCase):
             self.assertTrue(text.endswith('业务运行在 AKS 上。'))
             self.assertEqual(architecture.section(None, {}), [])
 
+
+
+class LustreNetworkTests(unittest.TestCase):
+    def test_network_analyzer_retains_inventory_and_unknown_coverage(self):
+        from azinspect.waf.security_network.analyze import analyze
+        from azinspect.waf.common import Raw
+        cfg = config.load(TEMPLATE)
+        with tempfile.TemporaryDirectory() as directory:
+            ws = io.Workspace(directory, '2026-09')
+            ws.create()
+            io.write_json(ws.raw('waf/scope.json'), {'subscriptions': [{'id': SUB, 'name': 'hpc-prod', 'state': 'Enabled'}]})
+            result = analyze(ws, cfg, log=lambda *_: None)
+            self.assertGreater(result['coverage']['S-N10']['otherErrors'], 0)
+            raw = Raw(ws, 'security_network')
+            raw.save('lustre/inventory.json', {'status': 403, 'rows': [], 'errors': [], 'error': 'Forbidden'})
+            result = analyze(ws, cfg, log=lambda *_: None)
+            self.assertEqual(result['coverage']['S-N10']['denied'], 1)
+            row = {'id': f'/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.StorageCache/amlFilesystems/fs',
+                   'name': 'fs', 'subscriptionId': SUB, 'resourceGroup': 'rg', 'sku': {'name': 'AMLFS-Durable-Premium-125', 'tier': 'Premium'},
+                   'location': 'eastus', 'zones': ['1'], 'properties': {'storageCapacityTiB': 8, 'rootSquashSettings': {'mode': 'RootOnly'}}}
+            raw.save('lustre/inventory.json', {'status': 200, 'rows': [row], 'errors': []})
+            result = analyze(ws, cfg, log=lambda *_: None)
+            self.assertEqual(result['inventory']['lustre']['rows'], [row])
+            self.assertEqual(result['findings'], [])
+            self.assertTrue(any('归属未检查' in note for note in result['coverage']['S-N1']['notes']))
+
+    def test_filesystem_subnet_not_empty_and_internal_ssh_not_public(self):
+        from azinspect.waf.security_network.checks import Draft, check_subnets, check_nsg
+        from azinspect.waf.security_network.network import Ctx, evaluate_exposures, public_paths
+        cfg = config.load(TEMPLATE)
+        base = f'/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.Network'
+        subnet_id = base + '/virtualNetworks/hpc/subnets/lustre'
+        filesystem = {'id': f'/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.StorageCache/amlFilesystems/fs',
+                      'name': 'fs', 'properties': {'filesystemSubnet': subnet_id.upper()}}
+        subnet = {'id': subnet_id, 'name': 'lustre', 'properties': {'addressPrefix': '10.0.0.0/24'}}
+        vnet = {'id': base + '/virtualNetworks/hpc', 'name': 'hpc', 'subscriptionId': SUB, 'resourceGroup': 'rg',
+                'properties': {'subnets': [subnet]}}
+        data = {'vnets': [vnet]}
+        context = Ctx(lambda key: data.get(key, []), {SUB: 'hpc-prod'})
+        draft = Draft(context, cfg)
+        inventory = check_subnets(context, draft, [filesystem])
+        self.assertEqual(inventory[0]['owners']['lustre'], [filesystem['id']])
+        self.assertEqual(len(draft.items), 1)
+        self.assertNotIn('空子网', draft.items[0]['finding'])
+        self.assertIn('不能判定公网可达', draft.items[0]['finding'])
+        nsg = {'id': base + '/networkSecurityGroups/lustre', 'name': 'lustre', 'subscriptionId': SUB, 'resourceGroup': 'rg',
+               'properties': {'securityRules': [{'name': 'required-ssh', 'properties': {'direction': 'Inbound', 'access': 'Allow',
+                    'priority': 100, 'protocol': 'Tcp', 'sourceAddressPrefix': '10.0.0.0/24',
+                    'destinationAddressPrefix': '10.0.0.0/24', 'destinationPortRange': '22'}}]}}
+        subnet['properties']['networkSecurityGroup'] = {'id': nsg['id']}
+        data['nsgs'] = [nsg]
+        context = Ctx(lambda key: data.get(key, []), {SUB: 'hpc-prod'})
+        draft = Draft(context, cfg)
+        check_subnets(context, draft, [filesystem])
+        check_nsg(context, draft, evaluate_exposures(context, public_paths(context)))
+        self.assertEqual(draft.items, [])
+
+    def test_root_squash_modes_missing_read_error_and_customer_cmk(self):
+        from azinspect.waf.security_network.checks import Draft, check_lustre
+        from azinspect.waf.security_network.network import Ctx
+        from azinspect.waf.common import coverage_entry
+        cfg = config.load(TEMPLATE)
+        context = Ctx(lambda key: [], {SUB: 'hpc-prod'})
+        rows = []
+        for index, mode in enumerate(('None', 'RootOnly', 'All', None, 'None')):
+            rows.append({'id': f'/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.StorageCache/amlFilesystems/fs{index}',
+                         'name': f'fs{index}', 'subscriptionId': SUB, 'resourceGroup': 'rg',
+                         'properties': {'rootSquashSettings': {'mode': mode}}})
+        rows[-1]['_readError'] = 'HTTP 403'
+        draft, coverage = Draft(context, cfg), coverage_entry()
+        check_lustre(draft, {'rows': rows}, coverage)
+        self.assertEqual(len(draft.items), 1)
+        self.assertEqual(draft.items[0]['severity'], '低')
+        self.assertTrue(draft.items[0]['needsConfirmation'])
+        self.assertTrue(any('未检查' in note for note in coverage['notes']))
+        self.assertTrue(any('403' in note for note in coverage['notes']))
+        cfg.managed_lustre = {'requireCmk': True, 'requireRootSquash': True}
+        draft, coverage = Draft(context, cfg), coverage_entry()
+        check_lustre(draft, {'rows': rows[:1]}, coverage)
+        self.assertEqual(len(draft.items), 1)
+        self.assertEqual(draft.items[0]['severity'], '中')
+        self.assertTrue(any('CMK' in note for note in coverage['notes']))
+        rows[0]['properties']['encryptionSettings'] = {'keyEncryptionKey': None}
+        draft = Draft(context, cfg)
+        check_lustre(draft, {'rows': rows[:1]}, coverage)
+        self.assertEqual(len(draft.items), 2)
+        rows[0]['properties']['encryptionSettings'] = {'keyEncryptionKey': {'keyUrl': 'https://example.vault.azure.net/keys/lustre/version'}}
+        draft = Draft(context, cfg)
+        check_lustre(draft, {'rows': rows[:1]}, coverage)
+        self.assertEqual(len(draft.items), 1)
 
 
 class SshExposureTests(unittest.TestCase):

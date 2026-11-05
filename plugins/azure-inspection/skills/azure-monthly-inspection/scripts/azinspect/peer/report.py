@@ -302,6 +302,18 @@ def markdown(ws, cfg, data, narrative, pngs, labels):
         s = summaries.get(t['typeKey']) or {}
         rows.append((type_name(t), s.get('standard') or std, compliance(t)[2], s.get('exceptions') or exc, s.get('alignment') or fix))
     lines += table(['资源类型', '标准做法', '完全符合标准的数量', '主要例外和原因', '对齐建议'], rows)
+    for resource_type in types:
+        filesystems = resource_type.get('filesystems') or []
+        if resource_type['typeKey'] != 'managed_lustre' or not filesystems:
+            continue
+        lines += ['', '### Azure Managed Lustre 文件系统清单', '',
+                  f'共 {len(filesystems)} 个文件系统（含无偏差资源），正文最多列出 20 个；完整清单及 ARM ID 见 Excel“Lustre 文件系统清单”。'
+                  '规格、容量与可用区差异不作为配置缺陷；配置读取失败的资源不参与相应属性比较，也不计为全部符合。', '']
+        lines += table(['文件系统', '订阅', '层级', '层级来源', 'SKU', '容量（TiB）', '区域', '可用区', '配置读取错误'],
+                       [(item.get('resourceName'), item.get('subscriptionName') or item.get('subscriptionId'),
+                         item.get('tier'), item.get('tierSource'), item.get('sku'), item.get('capacityTiB'),
+                         item.get('region'), '、'.join(item.get('zones') or []), item.get('configurationError') or '无读取错误')
+                        for item in filesystems[:20]])
     modules = narrative.get('moduleFixes') or default_modules(types)
     if modules:
         sec += 1
@@ -407,6 +419,20 @@ def write_excel(path, cfg, data, narrative, labels):
     for row in ad.iter_rows(min_row=4):
         row[5].number_format = '0%'
 
+    filesystems = [item for resource_type in types if resource_type['typeKey'] == 'managed_lustre'
+                   for item in resource_type.get('filesystems') or []]
+    if filesystems:
+        inventory = wb.create_sheet('Lustre 文件系统清单')
+        inventory.append(['Azure Managed Lustre 文件系统完整清单'])
+        inventory.append(['包含无偏差资源；空白字段表示未取得。配置读取失败的资源不参与相应属性比较，也不计为全部符合。'])
+        inventory.append(['文件系统', '订阅', '订阅 ID', '层级', '层级来源', 'SKU', '容量（TiB）', '区域', '可用区',
+                          '配置读取错误', '资源组', '完整 ARM ID'])
+        for item in filesystems:
+            inventory.append([item.get('resourceName'), item.get('subscriptionName'), item.get('subscriptionId'),
+                              item.get('tier'), item.get('tierSource'), item.get('sku'), item.get('capacityTiB'),
+                              item.get('region'), '、'.join(item.get('zones') or []), item.get('configurationError'),
+                              item.get('resourceGroup'), item.get('resourceId')])
+
     mo = wb.create_sheet('模板修正')
     mo.append(['需要修正的模板默认值'])
     mo.append([plain(narrative.get('moduleNote')) or '按标准方式创建的资源中出现的偏差，说明模板参数需要修正。'])
@@ -486,6 +512,8 @@ def _style(wb):
     widths = {'概览': {'A': 30, 'C': 60, 'D': 10, 'E': 10, 'H': 40, 'I': 40},
               '偏差明细': {'A': 11, 'B': 18, 'C': 18, 'D': 16, 'E': 26, 'F': 16, 'G': 16, 'H': 8, 'I': 60, 'J': 60, 'K': 22, 'L': 60, 'M': 32, 'N': 40, 'O': 40},
               '各属性采用情况': {'A': 22, 'B': 24, 'C': 44, 'G': 50}, '模板修正': {'A': 26, 'B': 40, 'C': 44, 'D': 60},
+              'Lustre 文件系统清单': {'A': 28, 'B': 24, 'C': 38, 'D': 24, 'E': 18, 'F': 30, 'G': 16, 'H': 22,
+                                    'I': 14, 'J': 50, 'K': 24, 'L': 100},
               '共同缺口': {'A': 22, 'B': 26, 'E': 60, 'F': 50}, '规律分析': {'A': 34, 'B': 16, 'C': 14, 'D': 18, 'E': 14}, '方法与局限': {'A': 10, 'B': 120}}
     for s in wb:
         s.sheet_view.showGridLines = False

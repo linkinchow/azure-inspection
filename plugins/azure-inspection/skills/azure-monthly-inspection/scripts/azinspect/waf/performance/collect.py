@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 from ...core.io import read_json
+from ...core import lustre
 from ..common import Raw, enabled, load_scope, now
 
 ARM = 'https://management.azure.com'
@@ -351,6 +352,8 @@ class Collector:
         self.save('ai/usages.json', pmap(usages, sorted({(a['subscriptionId'], a['location']) for a in ai})))
 
     def phase_storage(self):
+        inventory = lustre.collect_inventory(self.client, self.subs, self.save, 'P7')
+        lustre.collect_metrics(self.client, inventory['rows'], self.window, self.save, 'P7')
         accounts = self.rows('storage')
         ns = 'microsoft.storage/storageaccounts'
         self.batch_metrics('storage-tx', 'P7', accounts, ns, ['Transactions'], 'total', flt="ResponseType eq '*'", top=200)

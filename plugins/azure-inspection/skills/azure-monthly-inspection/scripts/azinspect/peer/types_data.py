@@ -1,6 +1,9 @@
 """Peer comparison for storage accounts, Key Vault, container registries, AI accounts and Log Analytics workspaces."""
 from __future__ import annotations
 
+import re
+
+from ..core import lustre
 from .context import created_by
 from .engine import TypeReport, std_root_cause
 from .types_platform import SN, _vendor_confirm
@@ -79,6 +82,62 @@ def storage_type(ctx):
         T.uniform_gaps.append({'attribute': '共享密钥访问', 'followedBy': shared, 'of': n,
                                'note': f'{n - shared}/{n} 个账户允许共享密钥访问，没有统一改为只用 Entra ID；建议先从 IaC 状态和备份账户开始关闭共享密钥。'})
     return T, {'network': '关闭公网/默认拒绝 + 私有终结点', 'tls': 'TLS1_2', 'softDelete': '开启', 'allowBlobPublicAccess': 'false'}
+
+
+def managed_lustre_type(ctx):
+    T = TypeReport(ctx, 'managed_lustre', 'Azure Managed Lustre')
+    settings = lustre.policy(ctx.cfg)
+    inventory = ctx.load('performance/lustre/inventory.json', {}) or {}
+    for resource in {item['id'].lower(): item for item in inventory.get('rows') or []
+                     if str(item.get('type') or '').lower() == lustre.RESOURCE_TYPE.lower()}.values():
+        item = T.basic(resource)
+        props = resource.get('properties') or {}
+        maintenance = props.get('maintenanceWindow') or {}
+        encryption = props.get('encryptionSettings')
+        item.update(rootSquash=(props.get('rootSquashSettings') or {}).get('mode'),
+                    maintenanceDay=maintenance.get('dayOfWeek'), maintenanceTime=maintenance.get('timeOfDayUTC'),
+                    cmk=(bool((encryption.get('keyEncryptionKey') or {}).get('keyUrl'))
+                         if isinstance(encryption, dict) else None),
+                    configurationError=resource.get('_readError'))
+        T.items.append(item)
+    if not T.items:
+        return T, {}
+    T.baseline_rationale = ('按已知配置与安全评审目标、每周 UTC 维护配置及客户明确要求核对；'
+                            '未取得的字段不参与对比。规格、容量、可用区差异按工作负载评审，不作为配置缺陷；单个文件系统不构成客户多数基线。')
+    T.attr('rootSquash', 'Root squash', 'RootOnly 或 All（按可信客户端需求确认）', lambda item: item['rootSquash'],
+           lambda item: item['rootSquash'] == 'None',
+           applies_fn=lambda item: not item['configurationError'] and item['rootSquash'] in ('None', 'RootOnly', 'All'),
+           rec='结合可信客户端与作业身份评审 root squash，确认兼容性后按访问要求配置 RootOnly 或 All',
+           feas='原地修改（需维护窗口或应用配合）')
+    T.attr('maintenance', '每周维护窗口', '已配置有效的每周 UTC 日期和时间',
+           lambda item: f'{item["maintenanceDay"]} {item["maintenanceTime"]} UTC',
+           lambda item: item['maintenanceDay'] not in ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+           or not isinstance(item['maintenanceTime'], str)
+           or not re.fullmatch(r'(?:[01]?[0-9]|2[0-3]):[0-5][0-9]', item['maintenanceTime']),
+           applies_fn=lambda item: not item['configurationError'] and item['maintenanceDay'] is not None and item['maintenanceTime'] is not None,
+           rec='与作业调度核对每周 UTC 维护时间并在配置模板中统一维护', feas='原地修改（需维护窗口或应用配合）')
+    if settings['requireCmk']:
+        T.attr('cmk', '客户管理密钥', '客户策略要求 CMK', lambda item: '已配置' if item['cmk'] else '未配置',
+               lambda item: not item['cmk'], applies_fn=lambda item: not item['configurationError'] and item['cmk'] is not None,
+               rec='按客户 CMK 策略核对密钥、托管身份与恢复流程；评估配置变更支持范围和迁移步骤',
+               feas='需供应商确认', confirm='平台管理加密默认有效；本项仅因客户明确要求 CMK 而评审，变更或重建迁移路径需向 Azure 支持确认')
+    T.insights.append('HSM/Blob 归档集成为可选；按作业恢复与数据留存需求评审，未配置不作为缺陷。')
+    unknown = sum(any(not attribute['applies'](item) for attribute in T.attrs) for item in T.items)
+    if unknown:
+        limitation = f'{unknown} 个文件系统有配置字段未取得，相应属性未检查，也不计入全部符合目标的资源。'
+        T.insights.append(limitation)
+        T.baseline_rationale += limitation
+    if inventory.get('status') != 200 or inventory.get('errors'):
+        limitation = 'Lustre 配置读取有失败或不完整记录，详见 raw/waf/performance/lustre/inventory.json。'
+        T.insights.append(limitation)
+        T.baseline_rationale += limitation
+    T.run(lambda item: std_root_cause(ctx, item, ['配置证据：raw/waf/performance/lustre/inventory.json']),
+          lambda item, deviation: deviation.update(resourceId=item['id'],
+                                                   linkedFindingIds=ctx.linked(item['id'].lower()),
+                                                   evidence=['raw/waf/performance/lustre/inventory.json']))
+    T.full_followers = [item['name'] for item in T.items
+                        if all(attribute['applies'](item) and not attribute['dev'](item) for attribute in T.attrs)]
+    return T, {}
 
 
 def kv_type(ctx):

@@ -91,6 +91,27 @@ class FakeCostApi:
 
 
 class SplitResourceQueryTests(unittest.TestCase):
+    def test_previous_batches_use_previous_groups_dates_and_residual(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(cost_collect, 'SPLIT_RESOURCE_GROUPS', 0):
+            ws = io.Workspace(d, '2026-09')
+            ws.create()
+            api = FakeCostApi()
+            collector = self.collector(ws, api)
+            current, rows = collector.records[(SUB['id'], 'curActual')]
+            collector.records[(SUB['id'], 'prevActual')] = (current, [row for row in rows if row['resourceGroup'] in ('rg-c', '')])
+            collector.run_resource_jobs([SUB], ('prevResources',))
+            record, previous = collector.records[(SUB['id'], 'prevResources')]
+            self.assertEqual(api.calls[-1], ['rg-c'])
+            self.assertEqual(record['query']['timePeriod'], collector.period.previous.cost_range())
+            self.assertAlmostEqual(sum(row['cost'] for row in previous), 19.5)
+            self.assertEqual(record['split']['unassignedCost'], 12.0)
+            self.assertTrue(ws.raw(f'cost/queries/{SUB["id"]}.prevResources.part001.json').exists())
+            self.assertNotIn((SUB['id'], 'curResources'), collector.records)
+            resumed = cost_collect.Collector(ws, FakeCostApi(), collector.period, [SUB], 'USD', reuse=reuse.Reuse(True))
+            resumed.records[(SUB['id'], 'prevActual')] = collector.records[(SUB['id'], 'prevActual')]
+            resumed.run_resource_jobs([SUB], ('prevResources',))
+            self.assertEqual(resumed.client.calls, [])
+
     def collector(self, ws, api, resume=False):
         period = ReportPeriod.build('2026-09', run_date=date(2026, 10, 15))
         c = cost_collect.Collector(ws, api, period, [SUB], 'USD', log=lambda *_: None, reuse=reuse.Reuse(resume))
