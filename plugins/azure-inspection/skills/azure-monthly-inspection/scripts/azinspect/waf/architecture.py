@@ -17,6 +17,7 @@ COMPONENTS = [
               'microsoft.documentdb/databaseaccounts')),
     ('缓存', ('microsoft.cache/redis', 'microsoft.cache/redisenterprise')),
     ('存储账户', ('microsoft.storage/storageaccounts',)),
+    ('Azure Managed Lustre HPC 文件系统', ('microsoft.storagecache/amlfilesystems',)),
     ('消息服务', ('microsoft.eventhub/namespaces', 'microsoft.servicebus/namespaces')),
     ('AI 服务', ('microsoft.cognitiveservices/accounts', 'microsoft.machinelearningservices/workspaces')),
     ('应用网关', ('microsoft.network/applicationgateways',)),

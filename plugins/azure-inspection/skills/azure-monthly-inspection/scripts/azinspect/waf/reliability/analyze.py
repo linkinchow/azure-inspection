@@ -7,11 +7,12 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
+from ...core import lustre
 from ..checks import all_of, count_text, node_os_channel, type_label
 from . import lifecycle
 from ..common import ADVISOR_NO_TEXT, Findings, Raw, advisor_problem, coverage_entry, enabled, env, load_scope, mixed_env, not_applicable, plain_error
 
-CHECKS = [f'R{i}' for i in range(1, 13)]
+CHECKS = [f'R{i}' for i in range(1, 13)] + ['R22']
 SEV_ORDER = {'高': 0, '中': 1, '低': 2}
 NONPROD = ('test', 'dev')
 SUBNET = 'Microsoft.Network/virtualNetworks/subnets'
@@ -969,10 +970,64 @@ def r12(run):
                     sub=x['sub'], key=f"{x['resourceId']}|{x['code']}")
 
 
+def managed_lustre(run):
+    inventory = run.raw.load('lustre/inventory.json')
+    telemetry = run.raw.load('lustre/metrics.json')
+    run.inventory['lustre'] = inventory or {'status': None, 'rows': []}
+    for check in ('R11', 'R22'):
+        lustre.apply_coverage(run.coverage[check], inventory)
+        failures = ([inventory] + (inventory.get('errors') or [])) if inventory else []
+        run.coverage[check]['denied'] += sum(failure.get('status') in (401, 403) for failure in failures)
+    for row in (inventory or {}).get('rows') or []:
+        if row.get('_readError'):
+            for check in ('R11', 'R22'):
+                run.coverage[check]['notes'].append(f"{row['id']}：读取失败，未检查：{row['_readError']}")
+            continue
+        properties = row.get('properties') or {}
+        health = properties.get('health') or {}
+        state = health.get('state') if isinstance(health, dict) else health
+        environment = run.env(run.subname(row['id']), row['name'], row.get('tags'), row.get('resourceGroup'))
+        if str(state).lower() in ('unavailable', 'degraded'):
+            run.add('R11', '中', row['id'], lustre.RESOURCE_TYPE, row['name'], environment,
+                    f"Azure Managed Lustre {row['name']} 健康状态为 {state}。", {'health': health},
+                    '核实文件系统健康详情和业务影响，确认服务是否恢复；不要把维护或扩容状态视为故障。',
+                    key=f"{row['id'].lower()}|health")
+        elif not state or str(state).lower() not in ('available', 'healthy'):
+            run.coverage['R11']['otherErrors'] += 1
+            run.coverage['R11']['notes'].append(f"{row['id']}：健康状态 {state or '未返回'}，未确认正常。")
+        hsm = properties.get('hsm')
+        metrics = ((telemetry or {}).get('resources') or {}).get(row['id'].lower()) or {}
+        totals = lustre.error_totals(metrics)
+        errors = {name: count for name, count in totals.items() if name != 'LustreClientEvictions' and count is not None and count > 0}
+        if errors:
+            run.add('R22', '中', row['id'], lustre.RESOURCE_TYPE, row['name'], environment,
+                    f"Azure Managed Lustre {row['name']} 在指标窗口记录到归档或导入错误。",
+                    {'errorCounts': errors, 'window': (telemetry or {}).get('window')},
+                    '核对归档和导入错误详情、最近成功导出时间及作业重试结果；确认数据是否完整可恢复，错误次数不等于丢失文件数。',
+                    '确认相关错误是否已处理及恢复点是否满足要求。', key=f"{row['id'].lower()}|hsm-errors")
+        if hsm and hsm.get('settings') and (not metrics or metrics.get('_errors') or totals['HSMActionErrors'] is None):
+            run.coverage['R22']['otherErrors'] += 1
+            run.coverage['R22']['notes'].append(f"{row['id']}：归档或导入错误指标未完整取得，未检查。")
+        archive = (hsm or {}).get('archiveStatus') or {}
+        archive_state = archive.get('status')
+        if str(archive_state).lower() in ('failed', 'failure'):
+            run.add('R22', '中', row['id'], lustre.RESOURCE_TYPE, row['name'], environment,
+                    f"Azure Managed Lustre {row['name']} 归档状态为 {archive_state}。", {'archiveStatus': archive},
+                    '核对归档错误与最近成功导出时间，确认 Blob 目标和恢复步骤；归档集成不等同于完整备份。',
+                    '确认恢复点和可重建数据范围。', key=f"{row['id'].lower()}|archive")
+        elif hsm is None:
+            run.coverage['R22']['otherErrors'] += 1
+            run.coverage['R22']['notes'].append(f"{row['id']}：未返回可选 HSM，归档恢复能力未检查。")
+        elif not archive_state:
+            run.coverage['R22']['otherErrors'] += 1
+            run.coverage['R22']['notes'].append(f"{row['id']}：归档状态未返回，未检查。")
+    run.inventory['lustreErrorMetrics'] = telemetry or {'resources': {}}
+
+
 # ====================================================================== entry point
 def analyze(ws, cfg, log=print):
     run = _Run(ws, cfg)
-    for check in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12):
+    for check in (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, managed_lustre):
         check(run)
     items = run.findings.items
     items.sort(key=lambda f: (SEV_ORDER[f['severity']], f['check'], f['subscriptionName'] or '', f['resourceName'] or ''))

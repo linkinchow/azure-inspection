@@ -18,6 +18,7 @@
 
 - **已实现**：已有脚本实现，并在实际巡检中验证过结果，随月度流程自动检查。
 - **已实现（APRL）**：来自 APRL 白名单查询（`scripts/azinspect/waf/aprl/rules.py`），说明和严重程度按本目录重新定级，问题文字里标注 APRL 编号。
+- **已实现（离线验证）**：已用合成数据测试采集、分析和报表，尚未在客户环境验证；Azure Managed Lustre 新增检查使用此标记。
 - **待补**：同一检查项中尚未自动检查的部分。
 
 除上表外，O2 告警检查另与 AMBA 推荐告警对比（只报“有部分告警但缺核心告警”的生产资源），04 的 Excel 附“推荐告警（AMBA）”页；03 另有“Landing Zone 对照”一节（不计入问题数）；01 的“当前闲置资源待确认”并入孤立资源查询。
@@ -47,6 +48,7 @@
 | R19 | 镜像仓库可用性 | 层级、异地复制、区域冗余、软删除 | 容器镜像仓库 | 生产仓库为 Basic 层或无冗余 | 中/低 | 已实现（APRL） |
 | R20 | AKS 备份与扩缩容 | AKS 备份、节点池自动扩缩容 | AKS | 生产集群无备份；节点池不能自动扩容或节点过少 | 低/中 | 已实现（APRL） |
 | R21 | 其他可靠性建议（APRL） | 白名单中不属于上述检查项的 APRL 建议（B 系列虚拟机、关键虚拟机使用标准盘） | APRL 查询 | 命中白名单规则 | 中/低 | 已实现（APRL） |
+| R22 | Azure Managed Lustre 归档与恢复 | 当前归档状态、窗口内 HSM/导入错误 | Lustre ARM 配置、Azure Monitor | 确认归档失败或发生归档/导入错误；HSM 未配置不作为故障 | 中 | 已实现（离线验证） |
 | R-APRL | APRL 其他建议 | 审核通过的 APRL 查询结果 | APRL（`external-rules.md`） | 见各条建议 | 按白名单 | M3 |
 
 ## 2. 安全（S-N 网络，S-I 身份与治理）
@@ -62,6 +64,7 @@
 | S-N7 | 传输加密 | 数据库强制 TLS、Redis 非 TLS 端口和明文协议、存储最低 TLS、HTTP 监听 | 资源配置、数据库参数 | 允许不加密连接 | 中/低 | 已实现 |
 | S-N8 | 私有终结点连接状态 | 连接是否“已断开”、目标资源是否存在、私有 DNS 是否仍指向它 | 私有终结点、私有 DNS、活动日志 | 目标已删除但终结点未清理；连接断开导致应用访问失败 | 低/中 | 已实现 |
 | S-N9 | 路由与防火墙 | 路由表默认路由指向、未关联的路由表、Azure Firewall 任意端口规则和威胁情报模式、VNet 对等地址同步 | 路由表、防火墙策略、VNet 对等 | 默认路由绕过防火墙；规则允许任意协议和端口；对等地址未同步 | 中 | 部分实现（APRL：非网络设备开启 IP 转发；识别为网络设备的不报，写进覆盖说明）；路由、防火墙规则和对等同步待补 |
+| S-N10 | Azure Managed Lustre 客户端权限与加密策略 | root squash、可信客户端例外、客户 CMK 要求 | Lustre ARM 配置 | 已确认关闭 root squash 时评审访问边界；仅在客户明确要求时检查 CMK；缺失字段不按关闭处理 | 低/中 | 已实现（离线验证） |
 | S-I1 | AKS API Server 访问 | 私有集群或来源 IP 限制 | AKS | 公网可访问且不限制来源 | 高 | 已实现 |
 | S-I2 | AKS 身份认证 | Entra 集成、本地账号 | AKS | 未集成 Entra ID 或本地账号未禁用 | 中 | 已实现 |
 | S-I3 | AKS 安全功能与补丁 | 网络策略引擎、Defender、Azure Policy、审计日志、节点镜像 | AKS | 网络策略引擎将停止支持；未导出审计日志；镜像长期未更新 | 中/低 | 已实现 |
@@ -100,10 +103,42 @@
 | P4 | 磁盘与 IO | 虚拟机级和磁盘级 IOPS、吞吐消耗；数据库 IO | Azure Monitor | 很多天打满；虚拟机有效数据不足 7 天的不判断 | 中/低 | 已实现 |
 | P5 | 数据库与缓存 | CPU、内存、连接数、存储、延迟及趋势 | Azure Monitor | 持续高负载；内存快速增长、预计短期内到 80% | 高/中/低 | 已实现 |
 | P6 | AI 服务限流与配额 | 429 比例、配额分配率 | Azure Monitor、配额 | 集中限流；配额已全部分配 | 中/低 | 已实现 |
-| P7 | 存储性能 | 限流、端到端延迟与服务端延迟 | Azure Monitor | 出现限流或延迟明显偏高 | 低 | 已实现 |
+| P7 | 存储性能 | 存储账户限流与延迟；Lustre 逐 MDT/OST 容量、inode、客户端驱逐 | Azure Monitor | 存储账户限流或延迟差明显；Lustre 按约定阈值持续容量/inode 压力，或观察到客户端驱逐 | 低/中/高 | 已实现；Lustre 离线验证 |
 | P8 | 部署位置与跨区域流量 | 计算与数据是否同区域、跨区域传输费用 | 资源位置、费用 | 关键调用跨区域 | 低 | 已实现 |
 | P9 | 入口与负载均衡健康 | 后端健康、可用性、5xx | Azure Monitor | 入口长期不可用或 5xx 偏高 | 中/低 | 已实现 |
 | P10 | Advisor 性能建议 | Advisor 性能类建议 | Advisor | 高影响建议未处理 | 低 | 已实现 |
+
+## Azure Managed Lustre 的数据与判定
+
+资源类型和指标命名空间为 `Microsoft.StorageCache/amlFilesystems`，配置读取固定使用稳定版 ARM API `2024-07-01`。各支柱分别读取所需配置，不依赖先运行性能支柱；缺失完整配置、指标、目标或样本时记为未检查或覆盖不完整。新规则通过 `rules` 标记参与跨月跟踪，不把首次增加的 Lustre 检查说成环境恶化。
+
+每个文件系统独立选择其支持的指标，记录计划指标、支持指标及每个时间段的实际请求结果。覆盖状态区分“未发出请求”“定义或聚合不支持”“请求或响应失败”“指标级错误”“已请求但无有效样本”“部分时间段不完整”和“有有效样本”；HTTP 200 不等于指标有效。逐目标配对和小时样本覆盖率仍需单独满足，不能只看成功请求数。
+
+HSM/导入错误属于可选指标，其聚合不支持或读取失败保留在指标证据与覆盖说明中，不据此单独判定已有效取得的容量/inode 指标失败，也不将错误或空样本算作零事件。相反，核心指标未发请求属于采集缺陷，不能归因为 Azure 没有遥测。
+
+| 内容 | 实现范围 |
+|---|---|
+| 文件系统清单 | 含无告警资源：完整 ARM ID、tier 与来源、完整 SKU、配置容量 TiB、区域、可用区；03/04/05 的 Excel 保留全量，正文限制数量；01 展示对应配置与已归属账单金额 |
+| 健康与恢复 | R11 读取已确认的健康降级/不可用；维护、扩容、过渡状态不自动当故障。R22 读取已确认的归档状态和 HSM/导入错误；恢复点、导出完整性及重建恢复演练需人工确认 |
+| 子网与权限 | S-N1 把 filesystemSubnet 关联到 Lustre；没有 NSG 不等于证明公网可达。S-N10 评审 root squash 和客户 CMK 策略，不套用 Blob 公网或 TLS 开关；保留文件系统子网内必需的 SSH、Lustre 协议和服务依赖流量 |
+| 运维 | O1 不要求安装代理；平台指标自动提供。O2 核对单独触发的容量/inode 指标告警及有效操作组，AND 多条件规则不视为独立覆盖。O3 核对 AmlfsAuditEvent 的有效日志目的地，保留期适用性人工确认，不要求不支持的 AllMetrics 导出。O4 列出每周 UTC 维护窗口，人工核对业务适用性 |
+| 性能 | P7 配对 MDT/OST 的 BytesUsed/BytesTotal 和 FilesUsed/FilesTotal，保留目标维度；逐目标检测持续压力，不能以全局平均掩盖热点。展示小时读写吞吐、最慢目标的小时平均延迟和客户端驱逐；无业务目标时不据通用吞吐/延迟阈值判定饱和 |
+| 成本 | 01 复用已有完整资源 ID 费用归属，不重复加总关联 Blob 等依赖费用；无法归属的费用保留原归属。只建议按作业峰值、留存及恢复要求评审，不从低平均吞吐判断闲置、不自动给出缩容动作或节省金额 |
+| 同类比较 | 05 比较已知 root squash、有效维护窗口及客户要求的 CMK；读取失败不计入符合数。容量、SKU 和可用区差异按用途评审，不直接判为偏差；单个文件系统不当作客户多数基线 |
+
+`rules.managedLustre` 的默认策略：`warningPct=85`、`criticalPct=95`、`sustainedHours=3`、`minCoveragePct=80`、`requireRootSquash=false`、`requireCmk=false`。85% 来自微软可调整的告警示例；95%、3 小时和 80% 为本插件巡检默认策略，不是微软硬性要求。使用率由同一目标和同一小时平均用量/总量计算；连续小时中断会重新计时。达到预警持续时间记“中”，达到严重阈值持续时间且为生产环境记“高”；驱逐记录默认“低”。低覆盖率不掩盖已观察到的问题，但阻止将未再发现的问题算作已解决。
+
+配置是当前快照，指标使用采集前 30 天，费用仍按报告月份。OST 已用容量包含元数据与开销；仅在已返回目标都能同一时刻完整配对时汇总观测容量，指标缺失不写成 0。客户端关联、加速网络、同区部署、实际网络路径和文件条带布局没有自动证据时只列人工核对项。
+
+微软来源（规则语义与 API 字段应随服务文档核对）：
+
+- [配置 API](https://learn.microsoft.com/azure/templates/microsoft.storagecache/2024-07-01/amlfilesystems)
+- [指标、维度与聚合](https://learn.microsoft.com/azure/azure-managed-lustre/monitor-file-system-reference)
+- [监控与可调整的告警阈值](https://learn.microsoft.com/azure/azure-managed-lustre/monitor-file-system)
+- [root squash](https://learn.microsoft.com/azure/azure-managed-lustre/root-squash-configure-settings)
+- [NSG 要求](https://learn.microsoft.com/azure/azure-managed-lustre/configure-network-security-group)
+- [性能建议](https://learn.microsoft.com/azure/azure-managed-lustre/optimize-performance)
+- [区域恢复](https://learn.microsoft.com/azure/azure-managed-lustre/amlfs-region-recovery)
 
 ## 需要客户补充才能检查的内容
 

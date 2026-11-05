@@ -1,10 +1,11 @@
 """Offline analysis for S-N1..S-N8: reads raw/waf/security_network only, writes findings/waf/security_network.json."""
 from __future__ import annotations
 
-from ..common import Findings, Raw, load_scope, mixed_env
+from ...core import lustre
+from ..common import Findings, Raw, coverage_entry, load_scope, mixed_env
 from . import private_endpoints
 from .checks import (Draft, check_amr, check_db_servers, check_edge, check_misc_paas, check_mongo, check_nsg, check_public_ips,
-                     check_redis, check_storage, check_subnets)
+                     check_redis, check_storage, check_subnets, check_lustre)
 from .collect import ARG_TYPES, PILLAR
 from .network import ADMIN_PORTS, Ctx, evaluate_exposures, lid, public_paths
 
@@ -134,9 +135,15 @@ def analyze(ws, cfg, log=print):
         return max(len((r.get('properties') or {}).get('privateEndpointConnections') or []), len(targets.get(lid(r['id']), [])))
 
     F = Draft(c, cfg)
+    lustre_inventory = raw.load('lustre/inventory.json')
+    lustre_coverage = coverage_entry()
+    lustre.apply_coverage(lustre_coverage, lustre_inventory)
+    failures = ([lustre_inventory] + (lustre_inventory.get('errors') or [])) if lustre_inventory else []
+    lustre_coverage['denied'] += sum(failure.get('status') in (401, 403) for failure in failures)
+    check_lustre(F, lustre_inventory, lustre_coverage)
     paths = public_paths(c)
     exposures = evaluate_exposures(c, paths)
-    subnet_inv = check_subnets(c, F)
+    subnet_inv = check_subnets(c, F, (lustre_inventory or {}).get('rows') or [])
     nsg_inv, mgmt_direct = check_nsg(c, F, exposures)
     pip_inv, vm_direct = check_public_ips(c, F, paths, exposures, mgmt_direct)
     paas = {
@@ -176,11 +183,19 @@ def analyze(ws, cfg, log=print):
              'method': '只读：ARM GET 与 Azure Resource Graph 查询；未调用 listKeys/连接串/数据面；未做端口扫描或连接测试；未修改任何配置。'}
     inventory = {'subnets': subnet_inv, 'nsgs': nsg_inv, 'publicIps': pip_inv, 'vmDirectPublicIps': vm_direct, **edge, 'paas': paas,
                  'counts': {k: len(c.rows(k)) for k in ARG_TYPES if k != 'subscriptions_visible'},
-                 'privateEndpoints': pe_summary}
+                 'privateEndpoints': pe_summary, 'lustre': lustre_inventory or {'status': None, 'rows': []}}
     summary = {'total': len(findings.items), 'perResourceFindingsBeforeConsolidation': len(F.items),
                'bySeverity': {s: sum(1 for f in findings.items if f['severity'] == s) for s in ('高', '中', '低')},
                'byCheck': dict(sorted(by_check.items()))}
-    data = findings.write(ws, window=manifest.get('window'), coverage=_coverage(index, c, pe_coverage), scope=scope, inventory=inventory,
+    coverage = _coverage(index, c, pe_coverage)
+    coverage['S-N10'] = lustre_coverage
+    lustre.apply_coverage(coverage['S-N1'], lustre_inventory)
+    coverage['S-N1']['denied'] += sum(failure.get('status') in (401, 403) for failure in failures)
+    for row in (lustre_inventory or {}).get('rows') or []:
+        if row.get('_readError') or not (row.get('properties') or {}).get('filesystemSubnet'):
+            coverage['S-N1']['otherErrors'] += 1
+            coverage['S-N1']['notes'].append(f"{row['id']}：文件系统子网未返回或读取失败（{row.get('_readError') or '未返回'}），归属未检查。")
+    data = findings.write(ws, window=manifest.get('window'), coverage=coverage, scope=scope, inventory=inventory,
                           limitations=['端口可达性为按 NSG、公网 IP 和负载均衡规则的离线判断，未做端口扫描或连接测试。'],
                           extra={'collectedAt': manifest.get('collectedAt') or meta.get('collectedAt'), 'summary': summary,
                                  'argErrors': meta.get('argErrors') or {}})

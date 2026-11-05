@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import collections
 
+from ...core import lustre
 from ..checks import only_text
 from ..common import advisor_problem, is_prod, mixed_env
 from .data import DATA_TYPES, DB_MONITORING_POOLS, short, sub_of
@@ -158,6 +159,105 @@ def check_data_resources(d, out, key_rows, aks_rows):
                 evidence={'items': [kitem(k) for k in self_side], 'byType': dict(bytype), 'selfHostedSignal': '、'.join(pmm_clusters) + f' 有 {pools} 节点池'},
                 members=[{'name': k['resourceName'], 'type': k['type'], 'subscription': k['subscriptionName']} for k in self_side], key='data-no-alert-self-hosted',
                 needs_confirmation='请确认自建监控是否覆盖全部相关数据库并配置了告警通知；Redis 是否有其他监控。')
+
+
+def lustre_alerts(d, row):
+    resource_id = row['id'].lower()
+    ancestors = {resource_id.split('/providers/')[0], '/subscriptions/' + sub_of(resource_id)}
+    groups = {group['id'].lower(): group for group in d.ags}
+    receivers = ('email', 'sms', 'webhook', 'voice', 'azureAppPush', 'itsm', 'logicApp', 'azureFunction',
+                 'automationRunbook', 'armRole', 'eventHub', 'incident')
+    hits = {'capacity': [], 'inodes': []}
+    for rule in d.alertrules:
+        properties = rule.get('properties') or {}
+        if rule['type'].lower() != 'microsoft.insights/metricalerts' or properties.get('enabled') is not True:
+            continue
+        scopes = {scope.lower().rstrip('/') for scope in properties.get('scopes') or []}
+        if resource_id not in scopes:
+            if not scopes.intersection(ancestors) or str(properties.get('targetResourceType') or '').lower() != lustre.RESOURCE_TYPE.lower():
+                continue
+            if str(properties.get('targetResourceRegion') or '').lower() != str(row.get('location') or '').lower():
+                continue
+        actions = [groups.get(str(action.get('actionGroupId') or '').lower()) for action in properties.get('actions') or []]
+        if not any(group and group.get('enabled') is True and any((group.get(key) or 0) > 0 for key in receivers) for group in actions):
+            continue
+        criteria = (properties.get('criteria') or {}).get('allOf') or []
+        if len(criteria) != 1:
+            continue
+        for criterion in criteria:
+            if str(criterion.get('metricNamespace') or '').lower() != lustre.RESOURCE_TYPE.lower():
+                continue
+            if criterion.get('timeAggregation') not in ('Average', 'Maximum'):
+                continue
+            if any(dimension.get('operator') != 'Include' or dimension.get('values') != ['*']
+                   for dimension in criterion.get('dimensions') or []):
+                continue
+            if criterion.get('operator') not in ('GreaterThan', 'GreaterThanOrEqual', 'GreaterOrLessThan'):
+                continue
+            if criterion.get('criterionType') != 'DynamicThresholdCriterion' and not lustre.number(criterion.get('threshold')):
+                continue
+            metric = criterion.get('metricName')
+            for kind, names in (('capacity', ('OSTBytesUsed', 'MDTBytesUsed')), ('inodes', ('OSTFilesUsed', 'MDTFilesUsed'))):
+                if metric in names:
+                    hits[kind].append(rule['id'])
+    return hits
+
+
+def check_lustre(d, out, key_rows, coverage):
+    from ..common import plain_error
+    for check in ('O1', 'O2', 'O3'):
+        lustre.apply_coverage(coverage[check], d.lustre_inventory)
+        failures = ([d.lustre_inventory] + (d.lustre_inventory.get('errors') or [])) if d.lustre_inventory else []
+        coverage[check]['denied'] += sum(failure.get('status') in (401, 403) for failure in failures)
+    coverage['O1']['notes'].append('Azure Managed Lustre 平台指标自动提供，无需安装代理；指标实时读取未在本支柱验证。')
+    coverage['O3']['notes'].append('Azure Managed Lustre 检查 AmlfsAuditEvent；指标 DS Export=No，不要求 AllMetrics 导出。')
+    evidence_ready = {}
+    for name in ('alertrules', 'actiongroups'):
+        snapshot = d.raw.load(f'arg/{name}.json') or {}
+        evidence_ready[name] = snapshot.get('status') == 200 and snapshot.get('rows') is not None
+        if not evidence_ready[name]:
+            coverage['O2']['denied'] += snapshot.get('status') in (401, 403)
+            label = {'alertrules': '告警规则', 'actiongroups': '操作组'}[name]
+            coverage['O2']['notes'].append(f"Azure Managed Lustre {label}：{plain_error(snapshot.get('status'), snapshot.get('error'))}，未检查。")
+    for row in key_rows:
+        if row['type'] != lustre.RESOURCE_TYPE.lower():
+            continue
+        context = {'subscription': row['subscriptionName'], 'resource_group': row['resourceGroup'],
+                   'resource_name': row['resourceName'], 'resource_type': lustre.RESOURCE_TYPE,
+                   'resource_id': row['id'], 'environment': row['environment']}
+        if row.get('readError'):
+            for check in ('O1', 'O2', 'O3'):
+                coverage[check]['notes'].append(f"{row['id']}：读取失败，未检查：{row['readError']}")
+            continue
+        if all(evidence_ready.values()):
+            hits = lustre_alerts(d, row)
+            row['lustreAlerts'] = hits
+            if not all(hits.values()):
+                out.add('O2', '中', f"Azure Managed Lustre {row['resourceName']} 的容量或 inode 告警缺少有效通知覆盖。",
+                        '按容量和 inode 使用量配置适用的指标告警，结合总量及目标维度确定阈值，并绑定启用且有接收渠道的值班操作组。',
+                        **context, evidence={'applicableAlerts': hits}, key=f"{row['id'].lower()}|capacity-inode-alerts")
+        else:
+            coverage['O2']['otherErrors'] += 1
+            coverage['O2']['notes'].append(f"{row['id']}：告警规则或操作组读取不完整，未检查。")
+        diagnostics = row['diagnosticSettings']
+        if row['diagnosticSettingsHttp'] != 200 or diagnostics is None:
+            coverage['O3']['otherErrors'] += 1
+            coverage['O3']['denied'] += row['diagnosticSettingsHttp'] in (401, 403)
+            coverage['O3']['notes'].append(f"{row['id']}：诊断设置 HTTP {row['diagnosticSettingsHttp']}，未检查。")
+            continue
+        audit = [setting for setting in diagnostics if setting.get('dest') and
+                 set(setting['logs']).intersection(('AmlfsAuditEvent', 'allLogs', 'audit'))]
+        row['lustreAuditLogging'] = bool(audit)
+        row['auditRetentionReview'] = {'settings': audit, 'workspaceRetention': [
+            {'id': monitor['id'], 'retentionInDays': monitor.get('retention')} for monitor in d.mon
+            if any((setting.get('workspaceId') or '').lower() == monitor['id'].lower() for setting in audit)],
+            'tableRetention': [table for table in d.wst if any(
+                (setting.get('workspaceId') or '').lower() == table['id'].lower() for setting in audit)],
+            'suitability': '按客户审计保留策略人工核对；未知值未检查'}
+        if not audit:
+            out.add('O3', '低', f"Azure Managed Lustre {row['resourceName']} 未将 AmlfsAuditEvent 审计日志发送到有效目的地。",
+                    '根据审计要求启用 AmlfsAuditEvent 并选择日志工作区、存储或事件中心，核对实际保留期；不要求导出 AllMetrics。',
+                    **context, evidence={'diagnosticSettings': diagnostics}, key=f"{row['id'].lower()}|audit-log")
 
 
 def check_edge(d, out, key_rows):

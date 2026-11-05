@@ -6,6 +6,7 @@ import json
 import re
 from datetime import timedelta
 
+from ...core import lustre
 from ..common import is_prod, mixed_env
 from .data import TYPE_LABEL, short
 from .monitoring import NO_CHANGE, members
@@ -23,6 +24,22 @@ PORTAL_DEPLOYMENT = re.compile(
     r'virtualnetworklink|firewallrules|restoremysql|createappgw|privatednszonegroup)')
 KEY_TYPES = ['microsoft.containerservice/managedclusters', 'microsoft.dbformysql/flexibleservers', 'microsoft.dbforpostgresql/flexibleservers',
              'microsoft.cache/redisenterprise', 'microsoft.documentdb/mongoclusters', 'microsoft.network/virtualnetworks']
+
+
+def check_lustre(d, inventory, coverage):
+    lustre.apply_coverage(coverage, d.lustre_inventory)
+    failures = ([d.lustre_inventory] + (d.lustre_inventory.get('errors') or [])) if d.lustre_inventory else []
+    coverage['denied'] += sum(failure.get('status') in (401, 403) for failure in failures)
+    inventory['lustreMaintenance'] = []
+    for row in d.lustre:
+        window = (row.get('properties') or {}).get('maintenanceWindow')
+        inventory['lustreMaintenance'].append({'id': row['id'], 'resourceName': row['name'], 'maintenanceWindow': window,
+                                              'cadence': '每周，UTC', 'readError': row.get('_readError'),
+                                              'suitability': '需按业务低峰人工核对' if window and not row.get('_readError') else '未检查'})
+        if not window or row.get('_readError'):
+            coverage['otherErrors'] += 1
+            coverage['notes'].append(f"{row['id']}：维护窗口未取得或读取失败（{row.get('_readError') or '未返回'}），未检查；不据此生成配置缺失问题。")
+    coverage['notes'].append('Azure Managed Lustre 每周 UTC 维护窗口仅列清单，业务适用性需人工确认。')
 
 
 def check_upgrades(d, out, aks_rows, inventory):

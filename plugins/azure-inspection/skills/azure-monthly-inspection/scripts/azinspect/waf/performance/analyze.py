@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 
-from ...core import appliance
+from ...core import appliance, lustre
 from ...core.io import read_json
 from ..common import ADVISOR_NO_TEXT, Findings, Raw, advisor_problem, env, is_prod, load_scope, mixed_env
 from .lib import Data, first, fmt, rg_of
@@ -844,6 +844,75 @@ class Analyzer:
                 f"{a['account']}：{a['shareCount']} 个共享，配额 {sum((s.get('quotaGiB') or 0) for s in a['shares'])} GiB，"
                 f"已用 {sum((s.get('usageBytes') or 0) for s in a['shares']) / 2**30:.2f} GiB" for a in shares) + '（预配过多属于成本问题，不是性能问题）。')
 
+    def p7_lustre(self):
+        inventory = self.raw.load('lustre/inventory.json')
+        telemetry = self.raw.load('lustre/metrics.json')
+        coverage = self.cov['P7']
+        lustre.apply_coverage(coverage, inventory, telemetry)
+        if inventory is not None and inventory.get('status') == 200:
+            coverage.setdefault('rules', []).extend(['lustre-capacity', 'lustre-client-evictions'])
+        settings = lustre.policy(self.cfg)
+        expected = max(1, int((lustre.timestamp(self.window['end']) - lustre.timestamp(self.window['start'])).total_seconds() / 3600))
+        rows = []
+        for resource in (inventory or {}).get('rows') or []:
+            resource_id = resource['id']
+            metrics = ((telemetry or {}).get('resources') or {}).get(resource_id.lower()) or {}
+            pressure = lustre.capacity_pressure(metrics, settings)
+            row = lustre.resource_summary(resource, metrics)
+            row.update({'subscriptionName': self.data.subname(resource_id), 'capacityTargets': pressure,
+                        'window': self.window, 'metricErrors': metrics.get('_errors') or {},
+                        'metricCoverage': metrics.get('_coverage') or {},
+                        'operationErrors': lustre.error_totals(metrics)})
+            rows.append(row)
+            reasons = Counter(item['state'] for name, item in row['metricCoverage'].items()
+                              if name not in lustre.OPTIONAL_METRICS and item['state'] != 'complete')
+            if reasons:
+                labels = {'not_requested': '未发出请求', 'unsupported': '定义或聚合不支持', 'request_error': '请求或响应失败',
+                          'metric_error': '指标级错误', 'empty_samples': '已请求但没有有效样本', 'partial': '部分时间段不完整'}
+                coverage['notes'].append(f"Lustre {resource['name']}：" + '；'.join(f'{labels.get(reason, reason)} {count} 项' for reason, count in sorted(reasons.items())) + '。')
+            if row['operationErrors']['LustreClientEvictions'] is None:
+                coverage['otherErrors'] += 1
+                coverage['notes'].append(f"Lustre {resource['name']}：客户端驱逐指标未取得，未检查。")
+            absent = lustre.missing_targets(metrics, pressure)
+            if absent:
+                coverage['otherErrors'] += len(absent)
+                coverage['notes'].append(f"Lustre {resource['name']}：{len(absent)} 项 MDT/OST 目标缺少配对用量，未检查。")
+            if not metrics or any(not any(item['kind'] == kind and item['unit'] == unit for item in pressure)
+                                  for kind in ('MDT', 'OST') for unit in ('Bytes', 'Files')):
+                coverage['otherErrors'] += 1
+                coverage['notes'].append(f"Lustre {resource['name']}：容量或 inode 指标不完整，未按零用量处理。")
+            for target in pressure:
+                target['coveragePct'] = round(min(100, target['samples'] / expected * 100), 2)
+                if target['coveragePct'] < settings['minCoveragePct']:
+                    coverage['otherErrors'] += 1
+                    coverage['notes'].append(f"Lustre {resource['name']} {target['kind']} {target['target']} {target['unit']}：小时样本覆盖 {target['coveragePct']}%。")
+                if target['sustainedHours'] < settings['sustainedHours']:
+                    continue
+                critical = target['criticalHours'] >= settings['sustainedHours']
+                environment = self.env_of(resource_id, resource['name'], resource.get('tags'))
+                severity = '高' if critical and is_prod(environment) else '中'
+                measure = '容量' if target['unit'] == 'Bytes' else 'inode'
+                self.add('P7', severity, resource_id, lustre.RESOURCE_TYPE, resource['name'], environment,
+                         f"Lustre {resource['name']} 的 {target['kind']} {target['target']} {measure}使用率连续 {target['sustainedHours']} 小时达到 {settings['warningPct']}%，小时平均使用率最高 {target['peakPct']}%。",
+                         {'target': target, 'policy': settings, 'window': self.window, 'sku': row['sku'], 'capacityTiB': row['capacityTiB']},
+                         '先确认作业峰值、数据保留和文件分布，针对该 MDT/OST 评审容量、inode 及文件布局；清理或归档前确认恢复要求，再评审扩容方案。' + UNCHANGED,
+                         '阈值为巡检策略；小时平均不代表分钟峰值，恢复和作业要求需业务方确认。',
+                         key=f"lustre-pressure|{resource_id.lower()}|{target['kind']}|{target['unit']}|{target['target']}")
+                self.F.items[-1]['acceptance'] = f"对应 MDT/OST 的容量与 inode 使用率低于约定阈值（当前预警 {settings['warningPct']}%），峰值作业有余量，并配置容量和 inode 告警。"
+                self.F.items[-1]['rule'] = 'lustre-capacity'
+            evictions = row['operationErrors']['LustreClientEvictions']
+            if evictions is not None and evictions > 0:
+                self.add('P7', '低', resource_id, lustre.RESOURCE_TYPE, resource['name'],
+                         self.env_of(resource_id, resource['name'], resource.get('tags')),
+                         f"Lustre {resource['name']} 在指标窗口记录到 {evictions:g} 次客户端驱逐。",
+                         {'evictions': evictions, 'window': self.window},
+                         '结合客户端网络、作业重试和同期延迟记录确认影响；检查已确认客户端的网络路径及 Lustre 客户端版本。' + UNCHANGED,
+                         '客户端归属和作业失败需业务方确认。', key=f'lustre-evictions|{resource_id.lower()}')
+                self.F.items[-1]['acceptance'] = '客户端驱逐的原因与业务影响已确认，异常已处理并监控是否再次发生。'
+                self.F.items[-1]['rule'] = 'lustre-client-evictions'
+        self.inv['managedLustre'] = rows
+        coverage['notes'].append('Lustre 按小时、按 MDT/OST 分别评估；吞吐和延迟仅供作业分析，不套用存储账户的限流或延迟差规则。')
+
     # ------------------------------------------------------------------ P8 placement
     def bandwidth(self):
         data = self.data.load('cost/bandwidth-month.json')
@@ -1190,6 +1259,7 @@ class Analyzer:
         self.p45_db()
         self.p6_ai()
         self.p7_storage()
+        self.p7_lustre()
         self.p8_placement()
         self.p9_edge()
         self.p10_advisor()
@@ -1205,6 +1275,7 @@ class Analyzer:
             '数据盘消耗百分比未按 LUN 拆分（取合并值）。',
             'AI 配额“用量”是部署容量占配额的比例，不是实际消耗。',
             'Azure Managed Redis 的 cacheLatency 是平台预览指标（微秒），不等于客户端观测到的延迟。',
+            'Azure Managed Lustre 使用小时粒度和逐 MDT/OST 指标；容量为当前配置快照，小时使用率不代表分钟峰值，未检查客户端挂载或文件条带配置。',
             '未做压测，也未连接客户的任何业务端点；未修改任何配置。']
         if disabled:
             self.limits.append(f'{len(disabled)} 个未启用的订阅无法读取，未检查。')

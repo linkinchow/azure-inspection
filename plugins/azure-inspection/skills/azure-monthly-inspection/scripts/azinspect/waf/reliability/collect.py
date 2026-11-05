@@ -13,6 +13,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
+from ...core import lustre
 from ..common import Raw, advisor_problem, enabled, load_scope, now
 
 WORKERS = 4
@@ -114,6 +115,13 @@ class _Collector:
 
     def rows(self, name):
         return (self.raw.load(f'arg/{name}.json') or {}).get('rows') or []
+
+    def lustre(self):
+        inventory = lustre.collect_inventory(self.c, self.subs, self.raw.save, 'R22')
+        integrated = [row for row in inventory['rows'] if not row.get('_readError') and
+                      ((row.get('properties') or {}).get('hsm') or {}).get('settings')]
+        lustre.collect_metrics(self.c, integrated, self.window, self.raw.save, 'R22',
+                               names=('HSMActionErrors', 'AutoImporterErrors', 'ManualImporterErrors'))
 
     # ------------------------------------------------------------------ Resource Graph
     def arg(self):
@@ -428,7 +436,7 @@ def _vnet_summary(d):
     return {'name': d['name'], 'addressSpace': d['properties'].get('addressSpace'), 'subnets': subnets}
 
 
-PHASES = ['arg', 'aks', 'storage', 'databases', 'backup', 'metrics', 'quota', 'advisor', 'health', 'front_door', 'activity', 'app_runtime']
+PHASES = ['arg', 'lustre', 'aks', 'storage', 'databases', 'backup', 'metrics', 'quota', 'advisor', 'health', 'front_door', 'activity', 'app_runtime']
 
 
 def collect(ws, cfg, client, window, log=print):

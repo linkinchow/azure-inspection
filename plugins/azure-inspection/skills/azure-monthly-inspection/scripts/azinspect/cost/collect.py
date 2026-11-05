@@ -3,7 +3,7 @@
 Per subscription, for the review month (cur) and the month before (prev):
   curActual / prevActual      ActualCost, Daily, by ServiceName + ResourceGroupName
   curAmortized                AmortizedCost, Monthly, by ServiceName
-  curResources                ActualCost, Monthly, by ResourceId + ServiceName
+    curResources / prevResources ActualCost, Monthly, by ResourceId + ServiceName
   curPricingModel             ActualCost, Monthly, by PricingModel (subscriptions with cost only)
   curResourceGroups           fallback when the combined Service+ResourceGroup grouping is rejected
   budgets                     existing budgets (GET; subscriptions with cost only)
@@ -23,7 +23,7 @@ from ..core.io import read_json, write_json
 from ..core.reuse import Reuse, signature
 
 API = '2025-03-01'
-CORE = ('curActual', 'prevActual', 'curAmortized', 'curResources')
+CORE = ('curActual', 'prevActual', 'curAmortized', 'curResources', 'prevResources')
 KINDS = CORE + ('curPricingModel', 'prevPricingModel', 'curResourceGroups', 'budgets')
 ARM = 'https://management.azure.com'
 COLLECTOR_VERSION = 3
@@ -50,6 +50,7 @@ def query_body(kind, period):
         'prevActual': ('ActualCost', 'Daily', ['ServiceName', 'ResourceGroupName']),
         'curAmortized': ('AmortizedCost', 'Monthly', ['ServiceName']),
         'curResources': ('ActualCost', 'Monthly', ['ResourceId', 'ServiceName']),
+        'prevResources': ('ActualCost', 'Monthly', ['ResourceId', 'ServiceName']),
         'curPricingModel': ('ActualCost', 'Monthly', ['PricingModel']),
         'prevPricingModel': ('ActualCost', 'Monthly', ['PricingModel']),   # reservation/savings plan purchases of last month
         'curResourceGroups': ('ActualCost', 'Daily', ['ResourceGroupName']),
@@ -181,9 +182,9 @@ class Collector:
             for future in concurrent.futures.as_completed([pool.submit(self.job, s, k) for s, k in jobs]):
                 future.result()
 
-    def resource_groups(self, sub):
-        """Resource groups with cost this month, from the subscription's own curActual read."""
-        _record, rows = self.records.get((sub['id'], 'curActual'), (None, []))
+    def resource_groups(self, sub, kind='curResources'):
+        """Resource groups from the subscription's matching month's actual-cost read."""
+        _record, rows = self.records.get((sub['id'], kind.replace('Resources', 'Actual')), (None, []))
         return sorted({r['resourceGroup'] for r in rows if r.get('resourceGroup')}, key=str.lower)
 
     @staticmethod
@@ -191,8 +192,8 @@ class Collector:
         return not record['result']['ok'] and (record['result'].get('error') or {}).get('httpStatus') in RETRY_STATUS
 
     def retry_one(self, sub, kind):
-        if kind == 'curResources' and len(self.resource_groups(sub)) > SPLIT_RESOURCE_GROUPS:
-            return self.resources_in_parts(sub, self.resource_groups(sub), max_attempts=1)
+        if kind in ('curResources', 'prevResources') and len(self.resource_groups(sub, kind)) > SPLIT_RESOURCE_GROUPS:
+            return self.resources_in_parts(sub, self.resource_groups(sub, kind), max_attempts=1, kind=kind)
         return self.job(sub, kind, max_attempts=1)
 
     def retry_throttled(self, kinds, clock=time.monotonic, sleep=time.sleep):
@@ -217,15 +218,15 @@ class Collector:
             left = still
         self.log(f'  补读：读到 {total - len(left)}/{total} 个' + (f'，{len(left)} 个仍未读到，记为读取失败' if left else ''))
 
-    def resources_in_parts(self, sub, groups, max_attempts=None):
+    def resources_in_parts(self, sub, groups, max_attempts=None, kind='curResources'):
         """Per-resource costs read in batches of resource groups; cost outside any resource group is the difference to the month total."""
         batches = [groups[i:i + RESOURCE_GROUP_BATCH] for i in range(0, len(groups), RESOURCE_GROUP_BATCH)]
 
         def one(numbered):
             n, batch = numbered
-            body = query_body('curResources', self.period)
+            body = query_body(kind, self.period)
             body['dataset']['filter'] = {'dimensions': {'name': 'ResourceGroupName', 'operator': 'In', 'values': batch}}
-            return self.fetch(sub, 'curResources', body, f'curResources.part{n:03d}', max_attempts)
+            return self.fetch(sub, kind, body, f'{kind}.part{n:03d}', max_attempts)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             parts = list(pool.map(one, enumerate(batches, 1)))
@@ -233,29 +234,30 @@ class Collector:
         ok = all(good(r) for r, _ in parts)
         rows = [row for _, rs in parts for row in rs]
         failed = next((r for r, _ in parts if not good(r)), None)
-        record = {'collectorVersion': COLLECTOR_VERSION, 'subscription': sub, 'queryKind': 'curResources', 'query': query_body('curResources', self.period),
+        record = {'collectorVersion': COLLECTOR_VERSION, 'subscription': sub, 'queryKind': kind, 'query': query_body(kind, self.period),
                   'split': {'resourceGroups': len(groups), 'batches': len(batches), 'batchSize': RESOURCE_GROUP_BATCH},
                   'result': {'ok': ok, 'pages': [], 'error': None if ok else (failed['result'].get('error') or failed.get('validation'))},
                   'validation': {'ok': True, 'rowCount': len(rows)} if ok else {'ok': False, 'error': 'some resource group batches failed'}}
-        cur, cur_rows = self.records.get((sub['id'], 'curActual'), (None, []))
+        cur, cur_rows = self.records.get((sub['id'], kind.replace('Resources', 'Actual')), (None, []))
         if ok and cur and cur['result']['ok'] and (cur.get('validation') or {}).get('ok'):
             rest = math.fsum(r['cost'] for r in cur_rows) - math.fsum(r['cost'] for r in rows)
             if abs(rest) >= 0.005:
                 rows.append({'subscriptionId': sub['id'], 'name': sub['name'], 'group': sub['group'], 'date': None, 'serviceName': UNASSIGNED_SERVICE,
                              'resourceGroup': None, 'resourceId': None, 'pricingModel': None, 'cost': rest, 'currency': self.currency})
             record['split']['unassignedCost'] = rest
-        self.records[(sub['id'], 'curResources')] = (record, rows if ok else [])
+        self.records[(sub['id'], kind)] = (record, rows if ok else [])
         return record
 
-    def run_resource_jobs(self, subs):
+    def run_resource_jobs(self, subs, kinds=('curResources',)):
         whole = []
         for s in subs:
-            groups = self.resource_groups(s)
-            if len(groups) > SPLIT_RESOURCE_GROUPS:
-                self.log(f'  订阅 {s["name"]} 有 {len(groups)} 个有费用的资源组，逐资源费用按每批 {RESOURCE_GROUP_BATCH} 个资源组分段读取')
-                self.resources_in_parts(s, groups)
-            else:
-                whole.append((s, 'curResources'))
+            for kind in kinds:
+                groups = self.resource_groups(s, kind)
+                if len(groups) > SPLIT_RESOURCE_GROUPS:
+                    self.log(f'  订阅 {s["name"]} {kind} 有 {len(groups)} 个有费用的资源组，逐资源费用按每批 {RESOURCE_GROUP_BATCH} 个资源组分段读取')
+                    self.resources_in_parts(s, groups, kind=kind)
+                else:
+                    whole.append((s, kind))
         self.run_jobs(whole)
 
     def snapshot(self, complete):
@@ -309,8 +311,8 @@ def collect(ws, cfg, client, period, log=print, reuse=None):
         subs.append({**s, 'group': cfg.business_line(s['name']) or '其他', 'stateAtCollection': s['state']})
     collector = Collector(ws, client, period, subs, cfg.currency, log, reuse)
     log(f'费用采集：{len(subs)} 个订阅，{period.current.label}（对比 {period.previous.label}）')
-    collector.run_jobs([(s, k) for s in subs for k in CORE if k != 'curResources'])
-    collector.run_resource_jobs(subs)   # after curActual: its resource groups decide which subscriptions are read in parts
+    collector.run_jobs([(s, k) for s in subs for k in CORE if k not in ('curResources', 'prevResources')])
+    collector.run_resource_jobs(subs, ('curResources', 'prevResources'))
     collector.retry_throttled(CORE)      # before the steps that depend on which subscriptions have cost
     supplemental = [(r['subscription'], 'curResourceGroups') for r, _ in list(collector.records.values()) if r.get('resourceGroupFallbackRequired')]
     if supplemental:

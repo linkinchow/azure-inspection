@@ -59,12 +59,16 @@ def coverage(d):
 def analyze(ws, cfg, log=print):
     d = Data(ws, cfg)
     out, inventory = Pending(), {}
+    cov, shared = coverage(d)
     rules = build_rules(d)
     aks_rows = build_aks_rows(d, rules)
     vm_rows = build_vm_rows(d, rules)
     key_rows = build_key_rows(d, rules)
+    monitoring.check_lustre(d, out, key_rows, cov)
+    change.check_lustre(d, inventory, cov['O4'])
     cov_type = coverage_by_type(key_rows, aks_rows, vm_rows)
     inventory.update(aks=aks_rows, vmsNonAks=vm_rows, monitoringCoverageByType=cov_type,
+                     lustre=d.lustre_inventory or {'status': None, 'rows': []},
                      keyResources=[{k: v for k, v in r.items() if k not in ('id', 'tags')} for r in key_rows],
                      azureMonitorWorkspaces=[{'name': m['name'], 'subscriptionName': d.subname(m['subscriptionId']), 'resourceGroup': m['resourceGroup']}
                                              for m in d.mon if m['type'] == 'microsoft.monitor/accounts'],
@@ -96,7 +100,6 @@ def analyze(ws, cfg, log=print):
 
     findings = Findings('operations')
     out.into(findings)
-    cov, shared = coverage(d)
     _notes(cov, d, vm_rows, inventory)
     limitations = ['只读巡检，未执行任何变更；未使用 kubectl，集群内自建监控只能从持久卷和节点池名称推断，未验证其告警配置。',
                    '“告警覆盖”只统计 Azure Monitor 规则（指标、日志查询、活动日志、Prometheus 告警），不含第三方监控平台。',

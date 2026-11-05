@@ -88,6 +88,7 @@ class CustomerConfig:
     network_appliance_names: str | None = None   # customer name rule for appliances on custom images
     extra_risky_ports: dict = field(default_factory=dict)
     public_storage_names: str | None = None
+    managed_lustre: dict = field(default_factory=dict)
     currency: str = 'USD'
     vm_detail_max_rows: int = 500   # 02 Markdown attaches the per-machine table up to this many machines
     reports: tuple = REPORTS        # report.include: the reports this customer gets
@@ -199,6 +200,25 @@ def load(path: str | Path) -> CustomerConfig:
         else:
             ports[int(port)] = str(label)
     public_storage = _pattern(rules.get('publicStorageAccounts'), 'rules.publicStorageAccounts', errors)
+    from .lustre import DEFAULT_POLICY, number
+    managed_lustre = rules.get('managedLustre', {})
+    if not isinstance(managed_lustre, dict):
+        errors.append('rules.managedLustre 必须是配置字典')
+        managed_lustre = {}
+    unknown = set(managed_lustre) - set(DEFAULT_POLICY)
+    if unknown:
+        errors.append('rules.managedLustre 不支持：' + '、'.join(sorted(unknown)))
+    lustre_policy = {**DEFAULT_POLICY, **managed_lustre}
+    for key in ('warningPct', 'criticalPct', 'minCoveragePct'):
+        if not number(lustre_policy[key]) or not 0 < lustre_policy[key] <= 100:
+            errors.append(f'rules.managedLustre.{key} 必须大于 0 且不超过 100')
+    if all(number(lustre_policy[key]) for key in ('warningPct', 'criticalPct')) and lustre_policy['warningPct'] >= lustre_policy['criticalPct']:
+        errors.append('rules.managedLustre.warningPct 必须小于 criticalPct')
+    if type(lustre_policy['sustainedHours']) is not int or not 1 <= lustre_policy['sustainedHours'] <= 720:
+        errors.append('rules.managedLustre.sustainedHours 必须是 1–720 的整数')
+    for key in ('requireRootSquash', 'requireCmk'):
+        if not isinstance(lustre_policy[key], bool):
+            errors.append(f'rules.managedLustre.{key} 必须是 true 或 false')
     detail_rows = report.get('vmDetailMaxRows', 500)
     if isinstance(detail_rows, bool) or not isinstance(detail_rows, int) or detail_rows < 0:
         errors.append('report.vmDetailMaxRows 必须是不小于 0 的整数')
@@ -226,6 +246,6 @@ def load(path: str | Path) -> CustomerConfig:
         region_labels={str(k).lower(): str(v) for k, v in (rules.get('regionLabels') or {}).items()},
         standard_tag=dict(rules.get('standardDeploymentTag') or {}),
         vendor_managed=_rules(rules.get('vendorManaged'), 'rules.vendorManaged'), stateful_vm_names=stateful, network_appliance_names=appliances, extra_risky_ports=ports,
-        public_storage_names=public_storage,
+        public_storage_names=public_storage, managed_lustre=managed_lustre,
         currency=str(report.get('currency') or 'USD'), vm_detail_max_rows=detail_rows,
         reports=tuple(x for x in REPORTS if x in chosen or x in {GROUPS[g] for g in groups}), groups=groups, path=path)

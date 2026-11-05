@@ -13,10 +13,12 @@ import collections
 import re
 from datetime import datetime, timezone
 
+from ...core import lustre
 from ...core.io import read_json
 from ..common import Raw, enabled, env, is_prod, load_scope
 
 TYPE_LABEL = {
+    'microsoft.storagecache/amlfilesystems': 'Azure Managed Lustre 高性能文件系统',
     'microsoft.containerservice/managedclusters': 'AKS 集群',
     'microsoft.dbformysql/flexibleservers': 'MySQL 灵活服务器',
     'microsoft.dbforpostgresql/flexibleservers': 'PostgreSQL 灵活服务器',
@@ -36,7 +38,7 @@ DATA_TYPES = ['microsoft.dbformysql/flexibleservers', 'microsoft.dbforpostgresql
               'microsoft.cache/redis', 'microsoft.cache/redisenterprise']
 DIAG_TYPES = {'microsoft.dbformysql/flexibleservers', 'microsoft.dbforpostgresql/flexibleservers', 'microsoft.cache/redis',
               'microsoft.cache/redisenterprise', 'microsoft.documentdb/mongoclusters', 'microsoft.network/applicationgateways',
-              'microsoft.cdn/profiles', 'microsoft.network/frontdoors'}
+              'microsoft.cdn/profiles', 'microsoft.network/frontdoors', 'microsoft.storagecache/amlfilesystems'}
 # Common names of self-hosted monitoring stacks (namespaces with persistent volumes, dedicated node pools)
 SELF_MONITORING_NAMESPACES = ('monitoring', 'logging', 'observability', 'prometheus', 'grafana', 'loki', 'elastic')
 SELF_MONITORING_POOLS = ('monitoring', 'logging', 'prometheus', 'grafana', 'loki', 'pmm', 'zabbix', 'dbmon')
@@ -101,6 +103,12 @@ class Data:
         self.mon = self.rows('monitoring')
         self.dcr = self.rows('dcr')
         self.targets = self.rows('targets')
+        self.lustre_inventory = self.raw.load('lustre/inventory.json')
+        self.lustre = (self.lustre_inventory or {}).get('rows') or []
+        targets = {row['id'].lower(): row for row in self.targets}
+        for row in self.lustre:
+            targets[row['id'].lower()] = dict(row, type=lustre.RESOURCE_TYPE.lower())
+        self.targets = list(targets.values())
         self.subreads = self.raw.load('subscription-reads.json') or []
         self.diag = self.raw.load('diagnostic-settings.json') or []
         self.diag_idx = {d['id'].lower(): d for d in self.diag}
@@ -353,7 +361,8 @@ def build_key_rows(d: Data, rules):
             if rec['self']['value'] is not None:
                 vals = (rec['self']['value'] or []) + ((rec.get('blobServices') or {}).get('value') or [])
                 diag_val = [{'name': x['name'], 'dest': short(x.get('workspaceId') or x.get('storageAccountId') or '') or ('eventHub' if x.get('eventHub') else None),
-                             'logs': [l[0] for l in x['logs'] if l[1]]} for x in vals]
+                             'logs': [l[0] for l in x['logs'] if l[1]],
+                             'retention': x.get('logRetention'), 'workspaceId': x.get('workspaceId')} for x in vals]
         sku = t.get('sku')
         rows.append({'resourceName': t['name'], 'type': t['type'], 'typeLabel': TYPE_LABEL.get(t['type'], t['type']),
                      'subscriptionName': d.subname(t['subscriptionId']), 'resourceGroup': t['resourceGroup'],
@@ -362,6 +371,14 @@ def build_key_rows(d: Data, rules):
                      'hasDiagnosticLogs': None if diag_val is None else any(x['logs'] for x in diag_val),
                      'alerts': alerts_for(rules, t['id'], t['type']), 'monthCostUSD': d.storage_cost.get(t['id'].lower()),
                      'sku': sku.get('name') if isinstance(sku, dict) else sku, 'id': t['id'], 'tags': t.get('tags')})
+        if t['type'] == lustre.RESOURCE_TYPE.lower():
+            rows[-1].update(tier=(sku or {}).get('tier') if isinstance(sku, dict) else None,
+                            storageCapacityTiB=(t.get('properties') or {}).get('storageCapacityTiB'),
+                            location=t.get('location'), zones=t.get('zones'),
+                            maintenanceWindow=(t.get('properties') or {}).get('maintenanceWindow'),
+                            readError=t.get('_readError'),
+                            platformMetrics='平台自动提供，无需代理；未验证实时指标读取',
+                            metricsDiagnosticExport='DS Export=No，不要求 AllMetrics 导出')
     seen = {r['id'].lower(): r for r in rows}
     for t in d.rows('vnetgw'):
         if t['id'].lower() in seen:   # a gateway is also a key resource above: one row, with its gateway type

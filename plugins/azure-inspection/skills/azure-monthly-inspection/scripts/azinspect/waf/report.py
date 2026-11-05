@@ -455,6 +455,20 @@ def recommendation_text(rec):
 
 # ---------------------------------------------------------------- Excel
 
+def lustre_rows(datasets):
+    from ..core.lustre import resource_summary
+    rows = {}
+    for data in datasets.values():
+        inventory = data.get('inventory') or {}
+        for resource in (inventory.get('lustre') or {}).get('rows') or []:
+            row = resource_summary(resource)
+            row['subscriptionName'] = resource.get('subscriptionName') or resource.get('subscriptionId')
+            rows.setdefault(resource['id'].lower(), row)
+    for resource in ((datasets.get('performance') or {}).get('inventory') or {}).get('managedLustre') or []:
+        rows[resource['resourceId'].lower()] = resource
+    return sorted(rows.values(), key=lambda row: row['resourceId'].lower())
+
+
 def write_excel(path, cfg, report, findings, by_check, datasets, checks, snapshot, scope_note, ssh_rows, tracked=None, chosen=None,
                 groups=None):
     wb, expected = Workbook(), {}
@@ -511,6 +525,28 @@ def write_excel(path, cfg, report, findings, by_check, datasets, checks, snapsho
                        notes_text(notes)])
     if scope_note:
         cv.append(['未检查', '未启用订阅', None, None, None, scope_note])
+    filesystems = lustre_rows(datasets)
+    if filesystems:
+        filesystem_sheet = wb.create_sheet('Lustre文件系统')
+        filesystem_sheet.append(['Azure Managed Lustre 文件系统配置与容量'])
+        filesystem_sheet.append(['配置为读取时快照；tier 缺失时按 SKU 名称识别并标注来源。容量指标按 OST 配对后的同一时刻汇总；读取不完整时不代表全文件系统用量，空白表示未取得。'])
+        filesystem_sheet.append(['订阅', '资源组', '文件系统', 'Tier', 'Tier来源', 'SKU', '配置容量TiB', '区域', '可用区',
+                                 '观测已用TiB', '观测总容量TiB', '容量观测时间UTC', '最繁忙目标容量使用率%', '最繁忙目标inode使用率%', '配置读取限制', '完整资源ID'])
+        targets = wb.create_sheet('Lustre目标容量')
+        targets.append(['Azure Managed Lustre MDT/OST 容量与 inode'])
+        targets.append(['按目标、按小时配对计算；Bytes 为字节，Files 为 inode 数量。覆盖率不足或缺失指标不按正常处理。'])
+        targets.append(['订阅', '文件系统', '目标类型', '目标编号', '度量', '小时样本', '样本覆盖率%', '最高小时使用率%',
+                        '连续预警小时', '连续严重小时', '最近已用', '最近总量', '观测时间UTC'])
+        for resource in filesystems:
+            filesystem_sheet.append([resource.get('subscriptionName'), resource.get('resourceGroup'), resource['resourceName'],
+                                     resource.get('tier'), resource.get('tierSource'), resource.get('sku'), resource.get('capacityTiB'),
+                                     resource.get('region'), '、'.join(resource.get('zones') or []), resource.get('observedUsedTiB'),
+                                     resource.get('observedTotalTiB'), resource.get('observedAt'), resource.get('worstBytesPct'),
+                                     resource.get('worstFilesPct'), resource.get('configurationError'), resource['resourceId']])
+            for target in resource.get('capacityTargets') or []:
+                targets.append([resource.get('subscriptionName'), resource['resourceName'], target['kind'], target['target'], target['unit'],
+                                target['samples'], target.get('coveragePct'), target['peakPct'], target['sustainedHours'], target['criticalHours'],
+                                target['lastUsed'], target['lastTotal'], target['observedAt']])
     lz_rows = ((datasets.get('landing_zone') or {}).get('inventory') or {}).get('landingZone')
     if lz_rows:
         lz = wb.create_sheet('Landing Zone 对照')
@@ -683,7 +719,7 @@ def coverage_growth(tracked):
 
 
 def markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows=None,
-             tracked=None, arch=None, limits=None, chosen_scope='', groups=None, coverage=None):
+             tracked=None, arch=None, limits=None, chosen_scope='', groups=None, coverage=None, filesystems=None):
     meta = meta_of(report, groups)
     c = Counter((f['group'], f['severity']) for f in findings)
     pending = sum(1 for f in findings if f.get('needsConfirmation'))
@@ -755,6 +791,16 @@ def markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_
         '生产或测试环境按订阅、资源名称和标签推断，请客户确认。',
         f'配置为 {cn_date(snapshot)}读取的状态；读取后客户如有调整，以实际为准。'] + list(narrative.get('limitations') or [])
     lines += [f'- {x}' for x in limits]
+    if filesystems:
+        lines += ['', '### Azure Managed Lustre 文件系统', '',
+                  '配置为当前快照，空白项未取得；tier 来源为 sku.tier 或 SKU 名称。逐目标容量与 inode、完整资源 ID 见 Excel“Lustre文件系统”和“Lustre目标容量”。', '',
+                  '|文件系统|Tier|SKU|配置容量 TiB|区域|可用区|', '|---|---|---|---|---|---|']
+        for resource in filesystems[:50]:
+            values = [resource['resourceName'], resource.get('tier'), resource.get('sku'), resource.get('capacityTiB'),
+                      resource.get('region'), '、'.join(resource.get('zones') or []) or None]
+            lines.append('|' + '|'.join(str(value).replace('|', '\\|').replace('\n', ' ') if value is not None else '未取得' for value in values) + '|')
+        if len(filesystems) > 50:
+            lines += ['', f'以上列出前 50 个，全部 {len(filesystems)} 个文件系统见 Excel。']
     lines += ['', '## Microsoft 官方参考', ''] + [f'- [{t}]({u})' for t, u in meta['links']]
     return format_and_check('\n'.join(lines) + '\n')
 
@@ -812,7 +858,7 @@ def build(ws, cfg, report, narrative=None, log=print):
                     mine.setdefault(key, []).extend(c[key])
     limits += [x for x in [failure_limit(coverage)] if x]
     md = markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows, tracked,
-                  arch, limits, chosen_scope=subscription_scope(ws, cfg, report), groups=groups, coverage=coverage)
+                  arch, limits, chosen_scope=subscription_scope(ws, cfg, report), groups=groups, coverage=coverage, filesystems=lustre_rows(datasets))
     (out / f'{md_stem}.md').write_text(md, encoding='utf-8')
     fdir = ws.month_dir('findings') / 'waf'
     result = verify(xlsx, expected, fdir / f'verification-{report}.json')

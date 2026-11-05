@@ -259,5 +259,303 @@ class CostReportTests(unittest.TestCase):
         self.assertIn('其余6个订阅未查询预算', text)
 
 
+class LustreCostTests(unittest.TestCase):
+    def paired_billing(self):
+        root = f'/subscriptions/{SUB}/resourceGroups/rg/providers/'
+        filesystem = root + 'Microsoft.StorageCache/amlFilesystems/'
+        bill = lambda resource, value, service='Storage': {'subscriptionId': SUB, 'resourceId': resource,
+                                                         'serviceName': service, 'cost': value, 'currency': 'USD'}
+        data = {'subscriptions': [{'id': SUB, 'name': 'One', 'group': '其他'}], 'index': [
+            {'subscriptionId': SUB, 'queryKind': kind, 'ok': True} for kind in
+            ('curActual', 'prevActual', 'curResources', 'prevResources')], 'rows': {
+                'prevActual': [bill(None, 80)],
+                'curActual': [bill(None, 100), bill(None, 20, 'Bandwidth')],
+                'prevResources': [bill(filesystem + 'old', 40), bill(filesystem + 'continuing', 25),
+                                  bill(root + 'Microsoft.Storage/storageAccounts/account', 15)],
+                'curResources': [bill(filesystem + 'new', 20), bill((filesystem + 'continuing').upper(), 30),
+                                 bill(filesystem + 'continuing', 20, 'Bandwidth'),
+                                 bill(filesystem + 'continuing/importJobs/job', 5),
+                                 bill(root + 'Microsoft.StorageCache/caches/cache', 10),
+                                 bill(root + 'Microsoft.Storage/storageAccounts/account', 35)]}}
+        return data
+
+    def test_paired_model_uses_billing_union_and_nonadditive_storage_child(self):
+        from azinspect.cost.model import build_lustre_costs
+        data = self.paired_billing()
+        result = build_lustre_costs(data, period.ReportPeriod.build('2026-10', date(2026, 11, 5)))
+        rows = {resource['name']: resource for resource in result['resources']}
+        self.assertEqual(set(rows), {'old', 'new', 'continuing'})
+        self.assertEqual((rows['old']['prevCostUSD'], rows['old']['curCostUSD']), (40, 0))
+        self.assertEqual((rows['new']['prevCostUSD'], rows['new']['curCostUSD']), (0, 20))
+        self.assertEqual((rows['continuing']['prevCostUSD'], rows['continuing']['curCostUSD']), (25, 50))
+        storage = result['storageBreakdown']
+        self.assertEqual((storage['prev'], storage['cur'], storage['delta']), (65, 50, -15))
+        self.assertEqual((storage['parentPrev'], storage['parentCur']), (80, 100))
+        self.assertEqual((storage['remainingPrev'], storage['remainingCur']), (15, 50))
+        self.assertAlmostEqual(storage['dailyChangeRate'], (50 / 31) / (65 / 30) - 1)
+        self.assertFalse(storage['additive'])
+
+    def test_missing_previous_resource_query_stays_unknown(self):
+        from azinspect.cost.model import build_lustre_costs
+        data = self.paired_billing()
+        data['index'] = [record for record in data['index'] if record['queryKind'] != 'prevResources']
+        data['rows'].pop('prevResources')
+        result = build_lustre_costs(data, period.ReportPeriod.build('2026-10', date(2026, 11, 5)))
+        self.assertIsNone(result['storageBreakdown']['prev'])
+        self.assertIsNone(result['storageBreakdown']['delta'])
+        self.assertTrue(all(resource['prevCostUSD'] is None for resource in result['resources']))
+
+    def test_comparison_view_retains_historical_billing_without_configuration(self):
+        from azinspect.cost.model import build_lustre_costs
+        from azinspect.cost import views
+        billing = build_lustre_costs(self.paired_billing(), period.ReportPeriod.build('2026-10', date(2026, 11, 5)))
+        continuing = next(resource for resource in billing['resources'] if resource['name'] == 'continuing')
+        data = {'status': 200, 'resources': [{'resourceId': continuing['resourceId'], 'name': 'Continuing',
+                                             'curCostUSD': 999, 'tier': 'Premium', 'capacityTiB': 8}]}
+        merged = views.lustre_comparison(data, {'lustreCosts': billing})
+        resources = {resource['name']: resource for resource in merged['resources']}
+        self.assertEqual(len(resources), 3)
+        self.assertEqual(resources['Continuing']['curCostUSD'], 50)
+        self.assertEqual(resources['Continuing']['tier'], 'Premium')
+        self.assertEqual(resources['old']['configurationStatus'], 'not_in_current_inventory')
+        self.assertNotIn('capacityTiB', resources['old'])
+        self.assertEqual(data['resources'][0]['curCostUSD'], 999)
+
+    def test_paired_markdown_and_excel_show_months_and_read_statuses(self):
+        from openpyxl import Workbook
+        from azinspect.cost.model import build_lustre_costs
+        from azinspect.cost import views
+        from azinspect.cost.report import lustre_markdown
+        billing = build_lustre_costs(self.paired_billing(), period.ReportPeriod.build('2026-10', date(2026, 11, 5)))
+        data = views.lustre_comparison({'status': 200, 'resources': []}, {'lustreCosts': billing})
+        text = '\n'.join(lustre_markdown(data, '10月', '9月'))
+        for expected in ('9月实际费用USD', '10月实际费用USD', '其中：Azure Managed Lustre（已包含）', '65.00', '50.00', '-15.00', '日均变化率', '仅上月有账单记录', '当前配置快照'):
+            self.assertIn(expected, text)
+        workbook = Workbook()
+        def sheet(name, title, note, columns):
+            result = workbook.create_sheet(name)
+            for values in ([title], [note], columns):
+                result.append(values)
+            return result
+        worksheet = views.lustre_sheet(sheet, data, '10月', '9月')
+        columns = {cell.value: cell.column for cell in worksheet[3]}
+        self.assertIn('9月实际费用USD', columns)
+        self.assertIn('9月读取情况', columns)
+        self.assertIn('10月读取情况', columns)
+        self.assertEqual(worksheet.max_row, 6)
+
+    def test_lustre_summary_rounds_only_at_display_time(self):
+        from azinspect.cost.model import build_lustre_costs
+        data = self.paired_billing()
+        root = f'/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.StorageCache/amlFilesystems/'
+        data['rows']['curResources'] = [{'subscriptionId': SUB, 'resourceId': root + name, 'serviceName': 'Storage',
+                                         'cost': value, 'currency': 'USD'} for name, value in (('one', 1.005), ('two', 2.005))]
+        data['rows']['curActual'] = [{'subscriptionId': SUB, 'serviceName': 'Storage', 'cost': 3.01, 'currency': 'USD'}]
+        result = build_lustre_costs(data, period.ReportPeriod.build('2026-10', date(2026, 11, 5)))
+        self.assertAlmostEqual(result['storageBreakdown']['cur'], 3.01)
+        resource = next(resource for resource in result['resources'] if resource['name'] == 'one')
+        self.assertEqual(resource['curCostUSD'], 1.005)
+
+    def test_partial_denied_and_failed_months_do_not_become_zero(self):
+        from azinspect.cost.model import build_lustre_costs
+        for status in ('partial', 'denied', 'error'):
+            with self.subTest(status=status):
+                data = self.paired_billing()
+                if status == 'partial':
+                    data['rows']['prevResources'][0]['cost'] += 10
+                else:
+                    query = next(record for record in data['index'] if record['queryKind'] == 'prevResources')
+                    query.update(ok=False, status=status, error={'httpStatus': 403 if status == 'denied' else 429})
+                result = build_lustre_costs(data, period.ReportPeriod.build('2026-10', date(2026, 11, 5)))
+                self.assertIsNone(result['storageBreakdown']['prev'])
+                self.assertIsNone(result['storageBreakdown']['delta'])
+                self.assertTrue(all(resource['prevCostUSD'] is None for resource in result['resources']))
+
+    def test_credit_is_preserved_without_misleading_percentage(self):
+        from azinspect.cost.model import build_lustre_costs
+        data = self.paired_billing()
+        data['rows']['prevResources'][1]['cost'] = -5
+        data['rows']['prevActual'][0]['cost'] -= 30
+        result = build_lustre_costs(data, period.ReportPeriod.build('2026-10', date(2026, 11, 5)))
+        resource = next(resource for resource in result['resources'] if resource['name'] == 'continuing')
+        self.assertEqual((resource['prevCostUSD'], resource['deltaUSD']), (-5, 55))
+        self.assertIsNone(resource['changeRate'])
+        self.assertIsNone(resource['dailyChangeRate'])
+
+    def test_storage_breakdown_does_not_change_totals_services_or_charts(self):
+        from azinspect.cost import model, charts
+        data = self.paired_billing()
+        data.update(complete=True, currency='USD', coverage={kind: {'attempted': 1} for kind in data['rows']})
+        for rows in data['rows'].values():
+            for record in rows:
+                record.update(name='One', group='其他')
+        report_period = period.ReportPeriod.build('2026-10', date(2026, 11, 5))
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = io.Workspace(directory, '2026-10')
+            workspace.save_raw('cost/cost-data.json', data)
+            result = model.build(workspace, report_period)
+        self.assertEqual((result['totals']['prev'], result['totals']['cur']), (80, 120))
+        self.assertEqual({service['name'] for service in result['services']}, {'Storage', 'Bandwidth'})
+        self.assertEqual(sum(service['cur'] for service in result['services']), 120)
+        chart = charts.chart_data(result, {'forecast': {'subscriptions': []}, 'region': {'overall': {'byLocation': []}}}, report_period)
+        self.assertEqual({name for name, delta in chart['services']}, {'Storage', 'Bandwidth'})
+
+    def test_previous_resource_read_does_not_invalidate_current_configuration_steps(self):
+        from azinspect.cost.pipeline import step_signature
+        data = self.paired_billing()
+        without_previous = {**data, 'index': [record for record in data['index'] if record['queryKind'] != 'prevResources']}
+        self.assertEqual(step_signature('resources', '2026-10', [SUB], data),
+                         step_signature('resources', '2026-10', [SUB], without_previous))
+
+    def test_cost_only_collects_lustre_without_waf_or_usage_reads(self):
+        from azinspect.cost import resources, views
+
+        resource_id = f'/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.StorageCache/amlFilesystems/fs'
+        resource = {'id': resource_id, 'name': 'fs', 'subscriptionId': SUB, 'resourceGroup': 'rg',
+                    'type': 'Microsoft.StorageCache/amlFilesystems', 'properties': {'storageCapacityTiB': 8}}
+
+        class Client:
+            def __init__(self, status):
+                self.status, self.queries = status, []
+
+            def arg(self, query, subs, check, label=None):
+                self.queries.append(query)
+                if 'amlfilesystems' in query.lower():
+                    return ([resource], 200, None) if self.status == 200 else ([], self.status, 'HTTP 403')
+                return [], 200, None
+
+            def get(self, url, check, label):
+                return 200, resource, None
+
+            def request(self, *args, **kwargs):
+                raise AssertionError('No metric or dependency calls are required for cost-only Lustre')
+
+        for status in (200, 403):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                workspace = io.Workspace(directory, '2026-09')
+                client = Client(status)
+                resources.collect(workspace, client, period.ReportPeriod.build('2026-09', date(2026, 10, 5)),
+                                  {'resources': [{'resourceId': resource_id, 'serviceName': 'Azure Managed Lustre', 'cost': 20}]},
+                                  [{'id': SUB, 'name': 'One', 'state': 'Enabled'}], log=lambda *_: None)
+                saved = views.load_lustre(workspace)
+                self.assertEqual(saved['status'], status)
+                self.assertFalse(workspace.raw('waf').exists())
+                if status == 200:
+                    self.assertEqual(saved['resources'][0]['curCostUSD'], 20)
+                    self.assertEqual(saved['resources'][0]['capacityTiB'], 8)
+                else:
+                    self.assertIn('不完整', views.lustre_coverage(saved))
+                self.assertEqual(sum('amlfilesystems' in query.lower() for query in client.queries), 1)
+
+    def test_resume_requires_lustre_outputs_and_successful_inventory(self):
+        from unittest.mock import Mock
+        from azinspect.core.reuse import Reuse
+        from azinspect.cost.pipeline import STEP_OUTPUTS, _step
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = io.Workspace(directory, '2026-09')
+            reuse = Reuse(True)
+            marker = workspace.raw('cost/_steps/resources.json')
+            old_outputs = [output for output in STEP_OUTPUTS['resources'] if 'lustre' not in output]
+            for output in old_outputs:
+                workspace.save_raw(output, {})
+            io.write_json(marker, reuse.stamp({'outputs': old_outputs}, 'same'))
+            run = Mock()
+            _step(workspace, reuse, 'resources', 'same', run, lambda *_: None)
+            run.assert_called_once()
+            workspace.save_raw('cost/resources/lustre.json', {})
+            workspace.save_raw('cost/resources/lustre/inventory.json', {'status': 403, 'errors': []})
+            run.reset_mock()
+            _step(workspace, reuse, 'resources', 'same', run, lambda *_: None)
+            run.assert_called_once()
+            workspace.save_raw('cost/resources/lustre/inventory.json', {'status': 200, 'errors': []})
+            run.reset_mock()
+            _step(workspace, reuse, 'resources', 'same', run, lambda *_: None)
+            run.assert_not_called()
+
+    def test_saved_raw_view_and_excel_keep_unknown_cost_blank(self):
+        from openpyxl import Workbook, load_workbook
+        from azinspect.cost import views
+        from azinspect.cost.report import lustre_markdown
+
+        resource_id = f'/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.StorageCache/amlFilesystems/fs'
+        data = {'status': 200, 'errors': [], 'snapshotAt': '2026-10-05T00:00:00Z',
+                'resources': [{'resourceId': resource_id, 'name': 'fs', 'subscriptionName': 'One', 'skuName': 'Lustre-SKU',
+                               'capacityTiB': 8, 'curCostUSD': None}]}
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = io.Workspace(directory, '2026-09')
+            self.assertIsNone(views.load_lustre(workspace)['status'])
+            workspace.save_raw('cost/resources/lustre.json', data)
+            saved = views.load_lustre(workspace)
+            workbook = Workbook()
+
+            def sheet(name, title, note, columns):
+                result = workbook.create_sheet(name)
+                for values in ([title], [note], columns):
+                    result.append(values)
+                return result
+
+            worksheet = views.lustre_sheet(sheet, saved, '9月')
+            path = Path(directory) / 'lustre.xlsx'
+            workbook.save(path)
+            reopened = load_workbook(path)
+            columns = {cell.value: cell.column for cell in reopened[worksheet.title][3]}
+            self.assertIsNone(reopened[worksheet.title].cell(4, columns['9月实际费用USD']).value)
+            self.assertEqual(reopened[worksheet.title].cell(4, 4).value, resource_id)
+            self.assertEqual(reopened[worksheet.title].cell(4, columns['配置容量TiB']).value, 8)
+            reopened.close()
+            text = '\n'.join(lustre_markdown(saved, '9月'))
+            self.assertIn('Lustre-SKU', text)
+            self.assertIn('费用未知', text)
+            self.assertIn('未取得成本月份', text)
+            self.assertIn('暂不估算节省金额', text)
+            self.assertNotIn('删除', text)
+            self.assertNotIn('暂停', text)
+            self.assertIn('未检查', '\n'.join(lustre_markdown({'status': None, 'resources': []}, '9月')))
+        self.assertIn('不完整', views.lustre_coverage({'status': 403, 'resources': []}))
+
+    def test_inventory_costs_use_full_arm_ids_and_keep_unknowns(self):
+        from copy import deepcopy
+        from azinspect.cost.resources import collect_lustre
+
+        resource_id = f'/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.StorageCache/amlFilesystems/shared'
+        other_id = resource_id.replace(SUB, 'bbbbbbbb-1111-2222-3333-444444444444')
+        unknown_id = resource_id.replace('/shared', '/unknown')
+        resources = [{'id': rid, 'name': rid.split('/')[-1], 'subscriptionId': rid.split('/')[2],
+                      'resourceGroup': 'rg', 'type': 'Microsoft.StorageCache/amlFilesystems', 'location': 'eastus',
+                      'sku': {'name': 'AMLFS-Durable-Premium-125'}, 'properties': {'storageCapacityTiB': 8}}
+                     for rid in (resource_id, other_id, unknown_id)]
+
+        class Client:
+            def arg(self, query, subs, check, label):
+                self.subs = subs
+                return resources, 200, None
+
+            def get(self, url, check, label):
+                resource = next(item for item in resources if item['id'] == url.split('?')[0].removeprefix('https://management.azure.com'))
+                return 200, resource, None
+
+        model = {'resources': [{'resourceId': resource_id.upper(), 'cost': 12.5}, {'resourceId': resource_id, 'cost': -2.5},
+                               {'resourceId': other_id, 'cost': 33}, {'resourceId': '', 'cost': 7}]}
+        original = deepcopy(model)
+        client = Client()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = io.Workspace(Path(directory), '2026-09')
+            result = collect_lustre(workspace, client, period.ReportPeriod.build('2026-09', date(2026, 10, 5)), model,
+                                    [{'id': SUB, 'name': 'One', 'state': 'Enabled'},
+                                     {'id': other_id.split('/')[2], 'name': 'Two', 'state': 'Enabled'},
+                                     {'id': 'disabled', 'name': 'Disabled', 'state': 'Disabled'}])
+            rows = {item['resourceId']: item for item in result['resources']}
+            self.assertEqual(rows[resource_id]['curCostUSD'], 10)
+            self.assertEqual(rows[other_id]['curCostUSD'], 33)
+            self.assertIsNone(rows[unknown_id]['curCostUSD'])
+            self.assertEqual(rows[resource_id]['capacityTiB'], 8)
+            self.assertIn('未采集', rows[resource_id]['telemetryNote'])
+            self.assertTrue(workspace.raw('cost/resources/lustre/inventory.json').exists())
+            self.assertTrue(workspace.raw('cost/resources/lustre.json').exists())
+            self.assertNotIn('disabled', client.subs)
+        self.assertEqual(model, original)
+
+
 if __name__ == '__main__':
     unittest.main()
