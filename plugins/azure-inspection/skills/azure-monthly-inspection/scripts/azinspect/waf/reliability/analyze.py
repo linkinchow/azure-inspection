@@ -178,6 +178,13 @@ class _Run:
         return next(e['cluster'] for e in self.clusters if e['cluster']['name'] == name)
 
 
+def system_pool_fix(subnet_short):
+    """R2's advice for a system pool with fewer nodes than configured; R1 is named only when it found this cluster's subnet short."""
+    first = ('先解决节点子网 IP 不足（见 R1）' if subnet_short
+             else '先查明节点没有起来的原因（如子网 IP 不足、配额不足，或被人为缩容）并解决')
+    return first + '，让系统节点池至少恢复到 2 台、分布在不同可用区；恢复后在系统节点池保留 CriticalAddonsOnly 污点，避免业务 Pod 挤占。'
+
+
 # ====================================================================== R1 AKS network capacity
 def r1(run):
     run.cover(['R1', 'R1-R2', 'R1-R9'], 'R1')
@@ -283,7 +290,7 @@ def r2(run):
             if actual == 0 or (actual is not None and p.get('count') is not None and actual < p.get('count')):
                 run.add('R2', '高', cl['id'], POOL, f"{cl['name']}/{pool['name']}", ce,
                         f"系统节点池 {pool['name']} 配置节点数为 {p.get('count')}，但对应 VMSS 实际只有 {actual} 台节点（VMSS 容量 {row['vmssCapacity']}），系统组件（CoreDNS、metrics-server 等）只能挤在用户节点池上或无法调度。",
-                        row, '先解决节点子网 IP 不足（见 R1），让系统节点池至少恢复到 2 台、分布在不同可用区；恢复后在系统节点池保留 CriticalAddonsOnly 污点，避免业务 Pod 挤占。',
+                        row, system_pool_fix(any(f['check'] == 'R1' and cl['name'] in f['finding'] for f in run.findings.items)),
                         '确认系统 Pod 当前运行在哪些节点上，以及是否有人为把系统池缩到 0。', key=f"{cl['id']}/{pool['name']}")
         if sys_pools and 0 < total_actual < 2:
             names = ', '.join(p['name'] for p in sys_pools)
@@ -828,6 +835,7 @@ def r10(run):
 
 # ====================================================================== R11 resource health
 # Resource types queried from healthresources and the inventory (arg/<name>.json) that lists the resources still existing
+ARG_HEALTH_TYPES = ('microsoft.compute/virtualmachines', 'microsoft.compute/virtualmachinescalesets')   # read from healthresources
 HEALTH_INVENTORY = {'microsoft.compute/virtualmachines': 'vms', 'microsoft.compute/virtualmachinescalesets': 'vmss',
                     'microsoft.containerservice/managedclusters': 'aks', 'microsoft.dbformysql/flexibleservers': 'mysql',
                     'microsoft.dbforpostgresql/flexibleservers': 'postgres', 'microsoft.cache/redis': 'redis',
@@ -878,6 +886,13 @@ def r11(run):
         else:
             current.append(r)
     run.inventory['R11']['notInInventory'] = dict(stale)
+    # resources in the inventory without any health record this month: a problem on them last month is not resolved
+    # (tracking reads 'unseen' as not checked), e.g. a scale set with no instances
+    seen = {r['rid'].lower() for r in h} | {x['id'].lower() for x in per if x.get('availabilityState')}
+    unseen = sorted({rid.rstrip('/').split('/')[-1] for rtype in ARG_HEALTH_TYPES if rtype in existing for rid in existing[rtype] if rid not in seen}
+                    | {x['id'].rstrip('/').split('/')[-1] for x in per if not x.get('availabilityState')})
+    if unseen:
+        run.coverage['R11']['unseen'] = unseen
     if stale:
         counts = '、'.join(f'{k} {v:,} 条' for k, v in stale.most_common())
         text = (f'资源健康数据里还有 {sum(stale.values()):,} 条已删除资源的残留状态记录（{counts}），'

@@ -96,6 +96,12 @@ def _failed(c):
     return (c.get('denied') or 0) + (c.get('otherErrors') or 0)
 
 
+def join_notes(parts):
+    """Sentences joined with '；', each but the last without its closing '。'."""
+    parts = [str(x) for x in parts if x]
+    return '；'.join([x.rstrip('。') for x in parts[:-1]] + parts[-1:])
+
+
 def check_note(fs, cov, note=None):
     """The check table's 主要发现: a check with failed reads never reads as 未发现问题."""
     base = note or (default_check_note(fs) if fs else None)
@@ -111,10 +117,10 @@ def check_note(fs, cov, note=None):
             if not parts or (cov.get('overReport') and not over and not fs):   # nothing listed to point at
                 what = '可能漏报或多报' if cov.get('incomplete') and cov.get('overReport') else '可能漏报' if cov.get('incomplete') else '可能多报，请核对'
                 parts = [f'涉及其他订阅的部分{what}']
-            return f'{base or "所选订阅中未发现问题"}；' + '；'.join(parts) + '（见“检查范围与限制”）'
+            return f'{(base or "所选订阅中未发现问题").rstrip("。")}；' + '；'.join(parts) + '（见“检查范围与限制”）'
         return base or '未发现问题'
     if base:
-        return f'{base}；部分读取失败，结果可能不完整'
+        return f'{base.rstrip("。")}；部分读取失败，结果可能不完整'
     if not (cov.get('succeeded') or 0):
         return '读取失败，未能检查（见 Excel“检查覆盖”页）'
     return '部分读取失败，未能完整检查（见 Excel“检查覆盖”页）'
@@ -198,7 +204,9 @@ def apply_narrative(findings, narrative):
         if o.get('severity') not in ORDER or not str(o.get('reason') or '').strip():
             raise NarrativeError(f'severityOverrides 需要有效的 severity 和 reason：{o}')
         f = find(o['findingId'], 'severityOverrides')
-        if f:
+        if f and f['severity'] == o['severity']:   # the plugin already says so (e.g. after an upgrade): nothing to adjust
+            warnings.append(f'severityOverrides：{o["findingId"]} 已经是{o["severity"]}，这条覆盖可以删掉')
+        elif f:
             f['originalSeverity'], f['severity'] = f['severity'], o['severity']
             f['severityReason'] = o['reason']
     for o in narrative.get('findingTextOverrides') or []:
@@ -488,7 +496,7 @@ def write_excel(path, cfg, report, findings, by_check, datasets, checks, snapsho
         names = list(dict.fromkeys(str(m['name']) for m in members(f)))
         need = f.get('needsConfirmation')
         if f.get('severityReason'):
-            need = '；'.join(x for x in [need, f'严重程度由{f["originalSeverity"]}调整为{f["severity"]}：{f["severityReason"]}'] if x)
+            need = join_notes([need, f'严重程度由{f["originalSeverity"]}调整为{f["severity"]}：{f["severityReason"]}'])
         fl.append([f['id'], f['group'], f['checkName'], f['severity'], f.get('subscriptionName'), f.get('resourceGroup'), f.get('resourceName'),
                    f.get('resourceType'), env_text(f.get('environment')), f['finding'], f['recommendation'],
                    f.get('acceptance') or ACCEPTANCE.get(f['check']), need, f.get('difference'), f.get('rootCause'), f.get('alignment'),
@@ -624,7 +632,8 @@ def month_status(tracked, fid):
 
 TRACKING_HELP = ('“已解决”：对应检查本月已执行，问题不再出现。“本月未检查”：不能判断是否解决，原因见“未检查原因”列——'
                  '读取失败（对应检查本月读取失败）；不在本月范围（所在的订阅或支柱本月按贵司选择没有检查）；'
-                 '范围不完整（相关资源可能在本月没有检查的订阅中，例如专线线路）。')
+                 '范围不完整（相关资源可能在本月没有检查的订阅中，例如专线线路）；'
+                 '本月没有该资源的读数（例如没有实例的规模集本月没有健康记录）。')
 
 
 def gone_row(r):
@@ -652,7 +661,9 @@ def month_sentence(tracked, report):
         why = Counter(r.get('notChecked') or '读取失败' for r in tracked['rows'] if r['status'] == '本月未检查' and report_of(r['check']) == report)
         reasons = ([f'{n} 项是对应检查本月读取失败' for k, n in why.items() if k == '读取失败']
                   + [f'{n} 项所在的订阅或支柱本月按贵司选择没有检查' for k, n in why.items() if k == '不在本月范围']
-                  + [f'{n} 项涉及本月没有检查的订阅中的相关资源（如专线线路）' for k, n in why.items() if k == '范围不完整'])
+                  + [f'{n} 项涉及本月没有检查的订阅中的相关资源（如专线线路）' for k, n in why.items() if k == '范围不完整']
+                  + [f'{n} 项的资源本月没有读数（如没有实例的规模集没有健康记录）' for k, n in why.items() if k == '本月没有该资源的读数']
+                  + [f'{n} 项（{k}）' for k, n in why.items() if k not in ('读取失败', '不在本月范围', '范围不完整', '本月没有该资源的读数')])
         text += f'“本月未检查”中{"，".join(reasons)}，{"都" if len(reasons) > 1 else ""}不能判断是否已解决。'
     if s['severityChanged']:
         text += f'另有 {len(s["severityChanged"])} 项严重程度有变化，见 Excel“与上月相比”列。'

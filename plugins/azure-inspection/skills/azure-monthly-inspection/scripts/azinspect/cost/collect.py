@@ -19,7 +19,7 @@ import json
 import math
 import time
 
-from ..core.io import read_json, write_json
+from ..core.io import Workspace, read_json, write_json
 from ..core.reuse import Reuse, signature
 
 API = '2025-03-01'
@@ -37,6 +37,12 @@ RETRY_WAIT_SECONDS = 60
 # could run for hours and was lost when interrupted. Date ranges are not used: every resource would appear once per range.
 SPLIT_RESOURCE_GROUPS = 100
 RESOURCE_GROUP_BATCH = 50
+# A subscription whose per-resource cost read many pages last month is split by resource group even with few groups:
+# one query of hundreds of pages ran for many hours and an interruption meant reading it all again. Batches aim at about
+# PAGES_PER_BATCH pages each, assuming last month's pages spread evenly over the groups.
+SPLIT_PAGES = 50
+PAGES_PER_BATCH = 20
+BYTES_PER_PAGE = 2 * 1024 * 1024   # estimate from last month's saved query when it has no page record (collected before 0.10.8)
 UNASSIGNED_SERVICE = '未归属资源组的费用'
 
 
@@ -100,7 +106,18 @@ def normalized(record, currency):
     return rows
 
 
-def fetch_pages(client, url, body, kind, max_attempts=None):
+def progress_log(log, label, clock=time.monotonic, every=600):
+    """Callback for fetch_pages: a line every `every` seconds while one query keeps paging (some read for hours)."""
+    last = [clock()]
+
+    def tick(pages):
+        if clock() - last[0] >= every:
+            last[0] = clock()
+            log(f'  {label}：已读 {pages} 页，仍在读取')
+    return tick
+
+
+def fetch_pages(client, url, body, kind, max_attempts=None, progress=None):
     """All pages of one query. A successful page without a cost table is an error, never 'empty'."""
     pages, error, seen = [], None, set()
     while url:
@@ -121,6 +138,8 @@ def fetch_pages(client, url, body, kind, max_attempts=None):
             error = {'httpStatus': status, 'message': 'Successful budgets response missing value array; not treated as empty', 'queriedAt': now()}
             break
         pages.append({'url': url, 'httpStatus': status, 'queriedAt': now(), 'headers': [], 'body': data})
+        if progress:
+            progress(len(pages))
         url = data.get('nextLink') if kind == 'budgets' else data['properties'].get('nextLink')
     return {'ok': error is None, 'pages': pages, 'attempts': [], 'error': error}
 
@@ -133,6 +152,7 @@ class Collector:
         self.started = now()
         self.optional_scope = []
         self.read = {}            # good reads of this run by file: a retried split query reads only the failed batches
+        self.batch = {}           # subscription id -> resource groups per batch, for subscriptions read in parts
         self.retry_end = None     # deadline shared by the retry rounds
 
     def fetch(self, sub, kind, body, name, max_attempts=None):
@@ -147,7 +167,7 @@ class Collector:
         reused = record is not None
         if not reused:
             record = {'collectorVersion': COLLECTOR_VERSION, 'subscription': sub, 'queryKind': kind, 'query': body, 'url': url, 'startedAt': now()}
-            record['result'] = fetch_pages(self.client, url, body, kind, max_attempts)
+            record['result'] = fetch_pages(self.client, url, body, kind, max_attempts, progress_log(self.log, f'{sub["name"]} {name}'))
             record['completedAt'] = now()
             if kind == 'curActual' and not record['result']['ok'] and (record['result']['error'] or {}).get('httpStatus') == 400:
                 detail = json.dumps(record['result']['error']).lower()
@@ -191,8 +211,8 @@ class Collector:
         return not record['result']['ok'] and (record['result'].get('error') or {}).get('httpStatus') in RETRY_STATUS
 
     def retry_one(self, sub, kind):
-        if kind == 'curResources' and len(self.resource_groups(sub)) > SPLIT_RESOURCE_GROUPS:
-            return self.resources_in_parts(sub, self.resource_groups(sub), max_attempts=1)
+        if kind == 'curResources' and sub['id'] in self.batch:
+            return self.resources_in_parts(sub, self.resource_groups(sub), max_attempts=1, batch=self.batch[sub['id']])
         return self.job(sub, kind, max_attempts=1)
 
     def retry_throttled(self, kinds, clock=time.monotonic, sleep=time.sleep):
@@ -217,9 +237,9 @@ class Collector:
             left = still
         self.log(f'  补读：读到 {total - len(left)}/{total} 个' + (f'，{len(left)} 个仍未读到，记为读取失败' if left else ''))
 
-    def resources_in_parts(self, sub, groups, max_attempts=None):
+    def resources_in_parts(self, sub, groups, max_attempts=None, batch=RESOURCE_GROUP_BATCH):
         """Per-resource costs read in batches of resource groups; cost outside any resource group is the difference to the month total."""
-        batches = [groups[i:i + RESOURCE_GROUP_BATCH] for i in range(0, len(groups), RESOURCE_GROUP_BATCH)]
+        batches = [groups[i:i + batch] for i in range(0, len(groups), batch)]
 
         def one(numbered):
             n, batch = numbered
@@ -234,7 +254,8 @@ class Collector:
         rows = [row for _, rs in parts for row in rs]
         failed = next((r for r, _ in parts if not good(r)), None)
         record = {'collectorVersion': COLLECTOR_VERSION, 'subscription': sub, 'queryKind': 'curResources', 'query': query_body('curResources', self.period),
-                  'split': {'resourceGroups': len(groups), 'batches': len(batches), 'batchSize': RESOURCE_GROUP_BATCH},
+                  'split': {'resourceGroups': len(groups), 'batches': len(batches), 'batchSize': batch,
+                            'pages': sum(len(r['result']['pages']) for r, _ in parts)},
                   'result': {'ok': ok, 'pages': [], 'error': None if ok else (failed['result'].get('error') or failed.get('validation'))},
                   'validation': {'ok': True, 'rowCount': len(rows)} if ok else {'ok': False, 'error': 'some resource group batches failed'}}
         cur, cur_rows = self.records.get((sub['id'], 'curActual'), (None, []))
@@ -247,13 +268,29 @@ class Collector:
         self.records[(sub['id'], 'curResources')] = (record, rows if ok else [])
         return record
 
+    def previous_pages(self, sid):
+        """Pages last month's per-resource cost query read for this subscription (0 when unknown)."""
+        prev = Workspace(self.ws.root, self.period.previous.key)
+        record = (read_json(prev.raw('cost/query-pages.json')) if prev.raw('cost/query-pages.json').exists() else {}).get(sid) or {}
+        if 'curResources' in record:
+            return record['curResources']
+        files = sorted(prev.raw('cost/queries').glob(f'{sid}.curResources*.json')) if prev.raw('cost/queries').exists() else []
+        return sum(f.stat().st_size for f in files) // BYTES_PER_PAGE
+
     def run_resource_jobs(self, subs):
         whole = []
         for s in subs:
             groups = self.resource_groups(s)
+            pages = self.previous_pages(s['id']) if len(groups) > 1 else 0
             if len(groups) > SPLIT_RESOURCE_GROUPS:
+                self.batch[s['id']] = RESOURCE_GROUP_BATCH
                 self.log(f'  订阅 {s["name"]} 有 {len(groups)} 个有费用的资源组，逐资源费用按每批 {RESOURCE_GROUP_BATCH} 个资源组分段读取')
-                self.resources_in_parts(s, groups)
+            elif pages > SPLIT_PAGES:
+                self.batch[s['id']] = max(1, math.ceil(len(groups) * PAGES_PER_BATCH / pages))
+                self.log(f'  订阅 {s["name"]} 上月逐资源费用约 {pages} 页，本月按每批 {self.batch[s["id"]]} 个资源组分段读取'
+                         '（中断后只补读没完成的批次）')
+            if s['id'] in self.batch:
+                self.resources_in_parts(s, groups, batch=self.batch[s['id']])
             else:
                 whole.append((s, 'curResources'))
         self.run_jobs(whole)
@@ -288,6 +325,11 @@ class Collector:
                                 '计价方式金额不等于 RI/SP 覆盖率；实际费用与分摊费用相同不能证明没有承诺。',
                                 '查询成功但为空与无权限、失败分开记录；不同分组方式的月度合计不能相加。']}
         write_json(self.ws.raw('cost/cost-data.json'), {**meta, 'rows': all_rows})
+        pages = {}   # next month decides from this whether to split a subscription's per-resource query
+        for (sid, kind), (record, _rows) in self.records.items():
+            if kind == 'curResources':
+                pages.setdefault(sid, {})[kind] = (record.get('split') or {}).get('pages') or len(record['result']['pages'])
+        write_json(self.ws.raw('cost/query-pages.json'), pages)
         return meta
 
 

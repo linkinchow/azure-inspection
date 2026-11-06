@@ -52,6 +52,17 @@ def span(values, unit=''):
     return f'{lo}{unit}' if lo == hi else f'{lo}–{hi}{unit}'
 
 
+def unhealthy_note(gateway, backends, days):
+    """'gw 的后端 b 在 30 天中有 2 天出现不健康实例。' for backends unhealthy now and then (not reported as a problem)."""
+    parts = [f"{u['backend']} 在 {days} 天中有 {u.get('daysWithUnhealthy') or 0} 天出现不健康实例" for u in backends]
+    return f'{gateway} 的后端 ' + '；'.join(parts) + '。'
+
+
+def platform_note(read, total):
+    """P2's note on the AKS platform metrics (node CPU, memory, disk); other metrics left unread are listed apart."""
+    return (f'已读取全部 {total} 个集群' if read == total else f'已读取 {read}/{total} 个集群') + '的 AKS 节点 CPU、内存和磁盘平台指标（最粗 12 小时粒度，汇总为日；节点状况等其他指标的读取情况另列）。'
+
+
 class Analyzer:
     def __init__(self, ws, cfg, log=print):
         self.ws, self.cfg, self.log = ws, cfg, log
@@ -112,16 +123,23 @@ class Analyzer:
         label_check = {str(c.get('target') or '').split('/')[0]: c.get('check') for c in calls if '/' in str(c.get('target') or '')}
         for label, check in sorted(label_check.items()):
             results = (self.raw.load(f'metrics/{label}.json') or {}).get('results') or {}
-            unread = sorted(rid.rstrip('/').split('/')[-1] for rid, v in results.items()
-                            if isinstance(v, dict) and str(v.get('_error') or '').startswith('HTTP')
-                            and not str(v['_error']).startswith(('HTTP 401', 'HTTP 403')))   # no permission: counted as denied
-            if not unread:
-                continue
+            unread_ids = [rid for rid, v in results.items() if isinstance(v, dict) and str(v.get('_error') or '').startswith('HTTP')
+                          and not str(v['_error']).startswith(('HTTP 401', 'HTTP 403'))]   # no permission: counted as denied
+            unread = sorted(rid.rstrip('/').split('/')[-1] for rid in unread_ids)
+            day = lambda s: str(s)[5:10]  # noqa: E731 - '2026-10-26T00:00:00Z' -> '10-26'
+            partial = sorted(rid.rstrip('/').split('/')[-1] + ' 缺 ' + '、'.join(f'{day(a)} 至 {day(b)}' for a, b in v['_partial'])
+                             for rid, v in results.items() if isinstance(v, dict) and v.get('_partial'))
             for k, checks in mapping.items():
-                if check in checks:
-                    self.cov[k]['otherErrors'] = self.cov[k].get('otherErrors', 0) + len(unread)
-                    self.cov[k]['notes'].append(f'{label}：{len(unread)} 个资源重试和拆分后仍未读到，未检查：'
+                if check not in checks or not (unread or partial):
+                    continue
+                self.cov[k]['otherErrors'] = self.cov[k].get('otherErrors', 0) + len(unread) + len(partial)
+                if unread:
+                    why = '指标后端限流，' if all('throttl' in str(results[r].get('_error')).lower() for r in unread_ids) else ''
+                    self.cov[k]['notes'].append(f'{label}：{len(unread)} 个资源重试和拆分后仍未读到（{why}按资源计入“其他错误”，尝试和成功按调用次数计），未检查：'
                                                 + '、'.join(unread[:10]) + ('等' if len(unread) > 10 else '') + '。')
+                if partial:
+                    self.cov[k]['notes'].append(f'{label}：{len(partial)} 个资源只读到部分时段（按资源计入“其他错误”），判断可能不完整：'
+                                                + '、'.join(partial[:10]) + ('等' if len(partial) > 10 else '') + '。')
         arg = [c for c in calls if c.get('check') == 'ARG']
         self.cov['P8']['attempted'] += len(arg)
         self.cov['P8']['succeeded'] += sum(1 for c in arg if c.get('status') == 200)
@@ -281,7 +299,8 @@ class Analyzer:
         for c, apic in apisrv:
             self.p2_apiserver(c, apic)
         ci = [r['cluster'] for r in clusters if r['containerInsights']]
-        self.cov['P2']['notes'].append(f'已读取全部 {len(aks)} 个集群的 AKS 平台指标（平台指标最粗 12 小时粒度，汇总为日）。'
+        read = sum(1 for c in aks if not self.data.series('aks-nodepool', c['id'], 'node_cpu_usage_percentage')[1])
+        self.cov['P2']['notes'].append(platform_note(read, len(aks)) +
                                        f'启用 Container Insights（Pod 级历史）的集群 {len(ci)} 个' + (f'：{", ".join(ci)}' if ci else '')
                                        + f'；其余 {len(aks) - len(ci)} 个集群没有按命名空间的等待/OOM 历史。')
         at_max = [f"{r['cluster']}/{p['pool']}" for r in clusters for p in r['pools'] if p.get('atMaxCountNow')]
@@ -985,7 +1004,7 @@ class Analyzer:
                          f'确认后端设置 {backends} 对应的监听器是否仍在使用：不用则删除监听器/规则/后端设置；仍在使用则检查后端服务端口、证书和健康探测配置。' + UNCHANGED,
                          '该监听器是否仍有业务流量需确认', key=f'appgw-dead-backend|{rid}')
             elif unhealthy:
-                self.cov['P9']['notes'].append(f"{r['name']}：后端偶发不健康 {unhealthy}")
+                self.cov['P9']['notes'].append(unhealthy_note(r['name'], unhealthy, self.days))
         if single:
             items = [rec for _, rec, _ in single]
             busiest = max(items, key=lambda i: i['daysCUGE8'])

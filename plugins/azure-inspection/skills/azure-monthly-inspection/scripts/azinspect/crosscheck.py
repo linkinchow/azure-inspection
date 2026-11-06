@@ -387,7 +387,8 @@ def x12(ws, chosen=REPORTS):
     sources.append(('narrative/00.json', (_load(narrative / '00.json') or {}).get('immediate'), '改写说明文件中的版本号，再生成 00'))
     items, seen = [], set()
     for where, data, fix in sources:
-        found = {m for s in _strings(data) for m in AKS_TARGET.findall(s)}
+        # the highest version a text names is its target: "先升到 1.29，再升级到 1.30" goes through 1.29 to 1.30
+        found = {max(AKS_TARGET.findall(s), key=_minor_key) for s in _strings(data) if AKS_TARGET.findall(s)}
         found |= {str(a['baseline']['attributes'].get('version')) for a in aks if data is aks and (a.get('baseline') or {}).get('attributes', {}).get('version')}
         for v in sorted(found, key=_minor_key):
             if _minor_key(v) < _minor_key(floor) and (where, v) not in seen:

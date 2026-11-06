@@ -51,6 +51,20 @@ def check_claims(claims: dict, account: str, tenant: str, audience: str) -> None
         raise IdentityMismatch('令牌已过期，请重新登录只读账号后再运行。')
 
 
+TOKEN_ATTEMPTS = 3        # a token that worked before is tried again: az fails now and then during collections of hours
+TOKEN_RETRY_WAIT = 45     # seconds between the tries
+
+
+class TokenUnavailable(SystemExit):
+    """`az account get-access-token` failed (its exit code is kept; stderr may hold account details and is not shown)."""
+
+    def __init__(self, code, tries=1):
+        self.code_az, self.tries = code, tries
+        retried = f'，试了 {tries} 次' if tries > 1 else ''
+        super().__init__(f'无法取得只读账号的令牌（az 退出码 {code}{retried}）：请确认已用只读账号执行过 az login，'
+                         '且该账号能访问 tokenSubscription。')
+
+
 class TokenProvider:
     """Thread-safe token cache keyed by audience."""
 
@@ -67,10 +81,12 @@ class TokenProvider:
             raise SystemExit('找不到 Azure CLI（az），请先安装并用只读账号登录。')
         args = [az, 'account', 'get-access-token', '--subscription', subscription, '--resource', audience, '-o', 'json']
         assert args[1:3] == ['account', 'get-access-token'], 'only token acquisition is allowed'
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=180)
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=180)
+        except subprocess.TimeoutExpired:
+            raise TokenUnavailable('超时') from None
         if proc.returncode != 0:
-            # stderr may contain account details; do not echo it
-            raise SystemExit('无法取得只读账号的令牌：请确认已用只读账号执行过 az login，且该账号能访问 tokenSubscription。')
+            raise TokenUnavailable(proc.returncode)   # stderr may contain account details; do not echo it
         return json.loads(proc.stdout)['accessToken']
 
     def get(self, audience: str = ARM) -> str:
@@ -78,11 +94,26 @@ class TokenProvider:
             cached = self._cache.get(audience)
             if cached and cached[1] - time.time() > 300:
                 return cached[0]
-            token = self._runner(self.subscription, audience)
+            token = self._fetch(audience)
             claims = decode_claims(token)
             check_claims(claims, self.account, self.tenant, audience)
             self._cache[audience] = (token, float(claims['exp']))
             return token
+
+    def _fetch(self, audience):
+        """A token from az; once a token was obtained, a failure is tried again (TOKEN_ATTEMPTS, TOKEN_RETRY_WAIT apart).
+        A first failure stops at once: the account is not logged in or cannot reach tokenSubscription."""
+        for attempt in range(1, TOKEN_ATTEMPTS + 1):
+            try:
+                token = self._runner(self.subscription, audience)
+                self._worked = True
+                return token
+            except TokenUnavailable as e:
+                if not getattr(self, '_worked', False):
+                    raise
+                if attempt == TOKEN_ATTEMPTS:
+                    raise TokenUnavailable(e.code_az, attempt) from None
+                time.sleep(TOKEN_RETRY_WAIT)
 
     def identity(self) -> dict:
         """Non-secret facts about the ARM token, for the access check report."""

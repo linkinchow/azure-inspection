@@ -148,8 +148,8 @@ class ReadOnlyClient:
             except urllib.error.HTTPError as e:
                 status, raw = e.code, e.read()
                 if status == 429 or status >= 500:
-                    error = f'HTTP {status}'
-                    throttled += status == 429
+                    error = _error_text(status, raw) if raw else f'HTTP {status}'   # the server's reason, when it gives one
+                    throttled += status == 429 or 'throttl' in error.lower()   # e.g. 529 "The metrics backend reported 'Throttled'"
                     if attempt < max_attempts:   # no wait after the last attempt
                         pause = _retry_wait(e.headers, attempt)
                         waited += pause

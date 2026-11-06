@@ -44,6 +44,21 @@ def commitment_charges(rows, comparable):
     return {'prev': part('prevPricingModel'), 'cur': part('curPricingModel')}
 
 
+ORDER_KINDS = {'reservationorders': '预留订单', 'savingsplanorders': '节省计划订单'}
+
+
+def resource_place(rid):
+    """(resource group, readable name) of a cost row's resource ID; reservation and savings plan purchases have no
+    resource group and an ID ending in '/reservations/': they are named by their order."""
+    parts = str(rid).split('/')
+    lower = [p.lower() for p in parts]
+    for kind, label in ORDER_KINDS.items():
+        if kind in lower and lower.index(kind) + 1 < len(parts):
+            return '预留和节省计划购买', f'{label} {parts[lower.index(kind) + 1][:8]}…（购买）'
+    rg = parts[lower.index('resourcegroups') + 1] if 'resourcegroups' in lower and lower.index('resourcegroups') + 1 < len(parts) else '未归属'
+    return rg, next((p for p in reversed(parts) if p), rid)
+
+
 def build(ws, period):
     data = read_json(ws.raw('cost/cost-data.json'))
     if not data.get('complete'):
@@ -97,11 +112,9 @@ def build(ws, period):
         resources[(r['subscriptionId'], r.get('resourceId') or '无资源ID', r.get('serviceName') or '未归属')].append(float(r['cost']))
     resource_rows = []
     for (sid, rid, service), values in resources.items():
-        parts = rid.split('/')
-        lower = [p.lower() for p in parts]
+        rg_name, name = resource_place(rid)
         resource_rows.append({'subscriptionId': sid, 'subscriptionName': submap[sid]['name'], 'group': submap[sid]['group'],
-                              'resourceGroup': parts[lower.index('resourcegroups') + 1] if 'resourcegroups' in lower else '未归属',
-                              'resourceId': rid, 'resourceName': parts[-1] if rid != '无资源ID' else rid, 'serviceName': service, 'cost': math.fsum(values)})
+                              'resourceGroup': rg_name, 'resourceId': rid, 'resourceName': name, 'serviceName': service, 'cost': math.fsum(values)})
     resource_rows.sort(key=lambda r: (-r['cost'], r['subscriptionName'], r['resourceId']))   # ties do not depend on query order
     daily = defaultdict(lambda: {'prev': [], 'cur': []})
     for p, rs in [('prev', actual_prev), ('cur', actual_cur)]:
@@ -133,8 +146,8 @@ def build(ws, period):
     review = read_json(review_path) if review_path.exists() else None
     if review is not None:
         from .orphan import findings as orphan_findings
-        rows, counts, orphans = orphan_findings(ws, {s['id'].lower(): s['name'] for s in subs})
-        review['wasteFindings'] = review.get('wasteFindings', []) + rows
+        orphan_rows, counts, orphans = orphan_findings(ws, {s['id'].lower(): s['name'] for s in subs})   # `rows` is still needed below
+        review['wasteFindings'] = review.get('wasteFindings', []) + orphan_rows
         review.setdefault('wasteSummary', {}).setdefault('classificationCounts', {}).update(counts)
         review['orphanQueries'] = {'commit': orphans['commit'], 'failed': [r['key'] for r in orphans['results'] if r['status'] != 200]} if orphans else None
     tp, tc = total(actual_prev), total(actual_cur)

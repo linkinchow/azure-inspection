@@ -53,7 +53,7 @@ def daily_phrase(r, Lp):
     if text == '新增':
         return f'{Lp}没有这项费用'
     if text.startswith('新增'):
-        return f'{Lp}几乎没有这项费用（USD {amount(r["prev"])}）'
+        return f'{Lp}几乎没有这项费用（' + ('不到 USD 0.01' if r['prev'] < 0.005 else f'USD {amount(r["prev"])}') + '）'
     if text.endswith('倍'):
         return f'日均费用{text.replace("约", f"约为{Lp}的")}'
     return f'日均变化{text}'
@@ -630,11 +630,15 @@ def drivers_intro(drivers, Lp, Lc):
         return head + f'前 {up} 项增长和前 {down} 项下降均已拆分到具体资源。' + tail
 
     def why(p):
-        http = next((e.get('httpStatus') for e in (p.get('errors') or {}).values() if isinstance(e, dict)), None)
+        errors = [e for e in (p.get('errors') or {}).values() if isinstance(e, dict)]
+        if any(e.get('tooLarge') for e in errors):
+            return '数据量太大，按资源和计量拆分要读的页数太多，已停止'
+        http = next((e.get('httpStatus') for e in errors), None)
         return '接口限流' if http == 429 else f'查询失败（HTTP {http}）' if http else '查询失败'
     missed = '；'.join(f"{p['subscriptionName']} 的 {p['serviceName']}（{why(p)}）" for p in failed)
+    retry = any(why(p) == '接口限流' for p in failed)
     return (head + f'费用变化最大的 {len(pairs)} 项中 {len(pairs) - len(failed)} 项已拆分到具体资源；'
-            f'{missed}没有拆分成功，未列入下表，需要时可在下月或续采时补读。' + tail)
+            f'{missed}没有拆分成功，未列入下表' + ('，限流的可在续采时补读' if retry else '') + '。' + tail)
 
 
 def read_line(times, queried, Lp, Lc, snapshot):

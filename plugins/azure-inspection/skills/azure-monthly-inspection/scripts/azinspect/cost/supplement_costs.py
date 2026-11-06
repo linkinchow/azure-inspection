@@ -17,7 +17,7 @@ import time
 
 from ..core.io import write_json
 from ..core.reuse import Reuse, signature
-from .collect import COLLECTOR_VERSION
+from .collect import COLLECTOR_VERSION, progress_log
 
 API = '2025-03-01'
 ARM = 'https://management.azure.com'
@@ -26,6 +26,10 @@ ARM = 'https://management.azure.com'
 # for many minutes while others read at once). Each forecast is tried once; throttled ones are read again in turn after
 # the other queries.
 FORECAST_RETRY_SECONDS = 20 * 60   # time limit of the retry round
+# A change breakdown that keeps paging is stopped and reported as too large to split (seen on a large tenant: hundreds
+# of pages over many hours for a small change, with throttling only a small part of that time). Per query, prev and cur each.
+DRIVER_MAX_PAGES = 50
+DRIVER_MAX_SECONDS = 30 * 60
 FORECAST_WAIT_SECONDS = 60         # pause after a turn in which every forecast was still throttled
 DRIVER_GROUPINGS = [
     ['ResourceId', 'MeterCategory', 'MeterSubcategory', 'Meter', 'UnitOfMeasure'],
@@ -71,12 +75,13 @@ def qty_of(row):
 class Runner:
     """Runs one Cost Management query (all pages), saves it, keeps a small index for coverage."""
 
-    def __init__(self, ws, client, subs, currency, reuse=None):
+    def __init__(self, ws, client, subs, currency, reuse=None, log=None):
         self.ws, self.client, self.subs, self.currency = ws, client, {s['id']: s for s in subs}, currency
         self.reuse = reuse or Reuse(False)
+        self.log = log
         self.index = {}
 
-    def run(self, qid, sid, kind, endpoint, body, extra=None, max_attempts=None):
+    def run(self, qid, sid, kind, endpoint, body, extra=None, max_attempts=None, max_pages=None, max_seconds=None):
         url = f'{ARM}/subscriptions/{sid}/providers/Microsoft.CostManagement/{endpoint}?api-version={API}'
         rel = f'cost/supplement/queries/{qid}.json'
         sig = signature('cost-supplement', COLLECTOR_VERSION, qid, kind, url, body)
@@ -84,7 +89,13 @@ class Runner:
         if saved is not None:
             return self._index(qid, sid, kind, saved['result']['pages'], None)
         pages, error, seen = [], None, set()
+        tick = progress_log(self.log, f'{self.subs[sid]["name"]} {qid.split(".")[0]}') if self.log else None
+        started = time.monotonic()
         while url:
+            if (max_pages and len(pages) >= max_pages) or (max_seconds and time.monotonic() - started >= max_seconds):
+                error = {'message': f'stopped after {len(pages)} pages ({time.monotonic() - started:.0f} s): too large to split',
+                         'tooLarge': True, 'pages': len(pages)}
+                break
             if url in seen or len(seen) >= 500:
                 error = {'message': 'Duplicate nextLink or pagination limit reached'}
                 break
@@ -99,6 +110,8 @@ class Runner:
                 error = {'httpStatus': status, 'message': 'Successful response missing cost table; not treated as empty'}
                 break
             pages.append({'httpStatus': status, 'queriedAt': now(), 'body': data})
+            if tick:
+                tick(len(pages))
             url = props.get('nextLink') or None
         rec = {'queryId': qid, 'kind': kind, 'endpoint': endpoint, 'subscription': {k: self.subs[sid][k] for k in ('id', 'name', 'group')},
                'query': body, 'extra': extra or {}, 'result': {'ok': error is None, 'pages': pages, 'error': error}, 'completedAt': now()}
@@ -372,11 +385,14 @@ def task_drivers(run, model, period):
     for rank, (kind, p) in enumerate(pairs if dims else [], 1):
         sid, svc, tag = p['subscriptionId'], p['serviceName'], f'{kind}{rank:02d}'
         for m in ('prev', 'cur'):
-            run.run(f'drivers.{tag}.{sid}.{m}', sid, f'drivers-{m}', 'query', driver_body(windows[m], svc, dims), {'serviceName': svc, 'pairKind': kind})
+            it = run.run(f'drivers.{tag}.{sid}.{m}', sid, f'drivers-{m}', 'query', driver_body(windows[m], svc, dims), {'serviceName': svc, 'pairKind': kind},
+                         max_pages=DRIVER_MAX_PAGES, max_seconds=DRIVER_MAX_SECONDS)
+            if (it.get('error') or {}).get('tooLarge'):   # the other month would be as large: not read
+                break
         e = {'rank': rank, 'kind': kind, 'subscriptionId': sid, 'subscriptionName': p['subscriptionName'], 'group': p['group'], 'serviceName': svc,
              'model': {k: p[k] for k in ('prev', 'cur', 'delta', 'prevDaily', 'curDaily', 'dailyChangeRate')}}
-        its = {m: run.index[f'drivers.{tag}.{sid}.{m}'] for m in ('prev', 'cur')}
-        if not all(it['ok'] for it in its.values()):
+        its = {m: run.index[f'drivers.{tag}.{sid}.{m}'] for m in ('prev', 'cur') if f'drivers.{tag}.{sid}.{m}' in run.index}
+        if len(its) < 2 or not all(it['ok'] for it in its.values()):
             e.update(status='failed', decomposition=None, errors={m: it['error'] for m, it in its.items() if not it['ok']})
             out.append(e)
             continue
@@ -413,7 +429,7 @@ def collect(ws, cfg, client, period, model, log=print, reuse=None):
     comparable = model['comparableSubscriptionIds']
     ref = {(r['subscriptionId'], r['queryKind'][:4] if r['queryKind'].startswith('prev') else 'cur'): r['totalCost']
            for r in cd['index'] if r['queryKind'] in ('prevActual', 'curActual') and r['ok']}
-    run = Runner(ws, client, cd['subscriptions'], cfg.currency, reuse)
+    run = Runner(ws, client, cd['subscriptions'], cfg.currency, reuse, log)
     region = task_region(run, comparable, ref, period)
     write_json(ws.raw('cost/supplement/region.json'), region)
     left = forecast_first_pass(run, comparable, period)

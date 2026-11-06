@@ -88,10 +88,12 @@ def _writes(permissions) -> bool:
 
 
 def _credentials(permissions) -> bool:
-    """Can this role fetch credentials or keys (AKS kubeconfig, storage keys, secrets)? A wildcard counts as writing instead."""
-    actions = [a.lower() for p in permissions or [] for a in p.get('actions') or []]
-    return any(a.endswith('/action') and ('credential' in a or '/listkeys/' in a or '/listsecrets/' in a or '/regeneratekey' in a)
-               for a in actions)
+    """Can this role fetch credentials, keys or secrets (AKS kubeconfig, storage and Cosmos DB keys, web app settings,
+    Key Vault secret values)? A wildcard counts as writing instead."""
+    actions = [a.lower() for p in permissions or [] for a in (p.get('actions') or []) + (p.get('dataActions') or [])]
+    words = ('credential', '/listkeys/', '/listsecrets/', '/regeneratekey', '/readonlykeys/', '/listconnectionstrings/',
+             '/config/list/', '/secrets/getsecret/')
+    return any(a.endswith('/action') and any(w in a for w in words) for a in actions)
 
 
 # roles that can write only quota or support requests: named apart from roles that change resources
@@ -195,6 +197,11 @@ def _narrative(ws, report):
     return read_json(path) if path.exists() else {}
 
 
+def calls_stage(part, pillars):
+    """Call log name: a run of chosen WAF pillars keeps its own file instead of overwriting the last run's."""
+    return f'collect-{part}' + (f'-{"-".join(p.strip() for p in pillars.split(",") if p.strip())}' if pillars else '')
+
+
 def cmd_collect(args) -> int:
     """Collects what the reports chosen in customer.yaml (report.include) need. Exit code 1 when a WAF pillar failed.
     An interrupted `--part all` lists the parts still to collect: users tend to rerun only cost and waf, and 05 then
@@ -246,7 +253,7 @@ def cmd_collect(args) -> int:
             print(f'费用采集中断。重跑时加 --resume，已成功读取的查询会直接复用：\n  {command} --part cost --resume')
         raise
     finally:
-        ws.save_calls(f'collect-{args.part}', client.calls)
+        ws.save_calls(calls_stage(args.part, args.pillars), client.calls)
     missing = {}
     if ('cost', 'full') in plan:
         from .cost.collect import unread

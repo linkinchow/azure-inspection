@@ -16,6 +16,11 @@ REC_DB = ('为生产数据库/缓存建立统一的 Azure Monitor 指标告警�
           '同时为关键 MySQL/PG 开启错误日志/慢查询诊断日志；' + NO_CHANGE)
 
 
+
+def collected_text(workspace):
+    """'已采集 Container Insights（工作区 x）'; without the workspace name when it was not read."""
+    return '已采集 Container Insights' + (f'（工作区 {workspace}）' if workspace else '')
+
 def members(items, rtype):
     return [{'name': i['resourceName'], 'type': rtype, 'subscription': i.get('subscriptionName')} for i in items]
 
@@ -75,7 +80,7 @@ def check_aks(d, out, aks_rows, rules):
                 members=members(rows, AKS_TYPE), key=f'aks-vendor-{name}', needs_confirmation=f'请确认 {name} 控制台的监控与告警是否已通知到贵方运维。')
     for r in [r for r in prod if (r['containerInsights'] or r['managedPrometheus']) and not r['alertRulesTargeting']]:
         recording = [ru['name'] for ru in rules if r['id'].lower() in ru['scopes'] and ru['kind'] == 'prometheus-recording']
-        out.add('O2', '中', f"生产集群 {r['resourceName']} 已采集 Container Insights（工作区 {r['containerInsightsWorkspace']}）和托管 Prometheus 指标，"
+        out.add('O2', '中', f"生产集群 {r['resourceName']} {collected_text(r['containerInsightsWorkspace'])}和托管 Prometheus 指标，"
                 f"但只配置了 {len(recording)} 个 Prometheus 记录规则组，没有任何告警规则，数据有了却不会主动通知。",
                 '在该集群启用 AKS 推荐的 Prometheus 告警规则组（集群级、节点级、Pod 级）并绑定运维值班操作组；' + NO_CHANGE,
                 subscription=r['subscriptionName'], resource_group=r['resourceGroup'], resource_name=r['resourceName'], resource_type=AKS_TYPE,

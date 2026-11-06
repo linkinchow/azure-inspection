@@ -109,6 +109,27 @@ def norm_values(values):
     return out
 
 
+SPLIT_ATTEMPTS = 3   # tries of a metric batch of several resources before it is split in half
+WINDOW_PARTS = 3     # a single resource still failing (too large or 5xx) is read again in this many shorter windows
+
+
+def http_error(status, error):
+    """'HTTP 529', or 'HTTP 529: <server's reason>' without repeating the status."""
+    return f'HTTP {status}' if not error or str(error) == f'HTTP {status}' else f'HTTP {status}: {error}'
+
+
+def windows(start, end, parts):
+    """[(start, end)] of `parts` equal spans, as 'YYYY-MM-DDTHH:MM:SSZ'; [] when the window is not a pair of timestamps."""
+    from datetime import datetime
+    fmt = '%Y-%m-%dT%H:%M:%SZ'
+    try:
+        a, b = (datetime.fromisoformat(str(x).replace('Z', '+00:00')).replace(tzinfo=None) for x in (start, end))
+    except ValueError:
+        return []
+    cuts = [a + (b - a) * i / parts for i in range(parts + 1)]
+    return [(cuts[i].strftime(fmt), cuts[i + 1].strftime(fmt)) for i in range(parts)]
+
+
 class Collector:
     def __init__(self, ws, cfg, client, window, log):
         self.ws, self.cfg, self.client, self.log = ws, cfg, client, log
@@ -166,16 +187,49 @@ class Collector:
             if errs:
                 cur.setdefault('_errors', {}).update(errs)
 
-        def run_batch(sub, region, rids, mnames):
+        def run_batch(sub, region, rids, mnames, span=None):
+            start, end = span or (self.start, self.end)
             params = {'api-version': '2024-02-01', 'metricnamespace': namespace, 'metricnames': ','.join(mnames),
-                      'starttime': self.start, 'endtime': self.end, 'interval': interval, 'aggregation': aggregation}
+                      'starttime': start, 'endtime': end, 'interval': interval, 'aggregation': aggregation}
             if flt:
                 params['filter'] = flt
             if top:
                 params['top'] = str(top)
             url = (f'https://{region}.metrics.monitor.azure.com/subscriptions/{sub}/metrics:getBatch?'
                    + urllib.parse.urlencode(params, quote_via=urllib.parse.quote))
-            return self.client.request('POST', url, check, f'{label}/{sub}/{region}', body={'resourceids': rids})
+            # few tries each: a failing batch is read again in halves, a single resource in shorter windows (the metrics
+            # backend throttles heavy queries for minutes, so waiting through six tries each costs much and helps little)
+            return self.client.request('POST', url, check, f'{label}/{sub}/{region}', body={'resourceids': rids}, max_attempts=SPLIT_ATTEMPTS)
+
+        def by_window(sub, region, rid):
+            """One resource read in WINDOW_PARTS shorter windows, series joined by their dimensions. Windows that still fail
+            are listed under '_partial' (the windows read are kept); False when no window could be read."""
+            parts, missed, spans = [], [], windows(self.start, self.end, WINDOW_PARTS)
+            for span in spans:
+                st, data, err = run_batch(sub, region, [rid], names, span)
+                calls.append({'sub': sub, 'region': region, 'n': 1, 'metrics': names, 'window': span, 'status': st, 'error': err})
+                if st != 200:
+                    missed.append(list(span))
+                    continue
+                parts.append(next((v.get('value') for v in data.get('values') or [] if (v.get('resourceid') or '').lower() == rid.lower()), None) or [])
+            if not parts:
+                return False
+            joined = {}
+            for values in parts:
+                for name, series in norm_values(values).items():
+                    if name == '_errors':
+                        continue
+                    for s in series:
+                        key = (name, tuple(sorted(s['dims'].items())))
+                        joined.setdefault(key, {'dims': s['dims'], 'data': []})['data'].extend(s['data'])
+            out = {}
+            for (name, _), s in joined.items():
+                out.setdefault(name, []).append(s)
+            res.pop(rid.lower(), None)
+            merge(rid, out)
+            if missed:
+                res[rid.lower()]['_partial'] = missed
+            return True
 
         def skipped(rid):
             res[rid.lower()] = {'_error': 'skipped: metrics denied (403) earlier for this subscription'}
@@ -198,7 +252,7 @@ class Collector:
                         else:
                             res.setdefault(r.lower(), {}).setdefault('_errors', {})[n] = f'HTTP {st2}: {e2}'
                 else:
-                    res[r.lower()] = {'_error': f'HTTP {st}: {err}'}
+                    res[r.lower()] = {'_error': http_error(st, err)}
                     if st == 403:
                         self.denied.add((sub, check))
 
@@ -218,6 +272,8 @@ class Collector:
                 half = len(rids) // 2
                 job((sub, region, rids[:half]))
                 job((sub, region, rids[half:]))
+                return
+            if (too_large or (st or 0) >= 500) and by_window(sub, region, rids[0]):
                 return
             if st == 200:
                 got = set()
@@ -241,9 +297,14 @@ class Collector:
                 arm_path(sub, rids)
             else:
                 for r in rids:
-                    res[r.lower()] = {'_error': f'HTTP {st}: {err}'}
+                    res[r.lower()] = {'_error': http_error(st, err)}
 
         pmap(job, jobs)
+        unread = sum(1 for v in res.values() if str(v.get('_error') or '').startswith('HTTP') and not str(v['_error']).startswith(('HTTP 401', 'HTTP 403')))
+        partial = sum(1 for v in res.values() if v.get('_partial'))
+        if unread or partial:
+            self.log(f'  {label}：' + '，'.join(x for x in [f'{unread} 个资源重试和拆分后仍未读到' if unread else '',
+                                                        f'{partial} 个资源只读到部分时段' if partial else ''] if x) + '，分析时计为读取失败')
         self.save(f'metrics/{label}.json', {'label': label, 'namespace': namespace, 'metrics': names, 'aggregation': aggregation,
                                             'interval': interval, 'filter': flt, 'window': [self.start, self.end],
                                             'calls': calls, 'results': res})

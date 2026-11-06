@@ -84,8 +84,13 @@ def driver_auto_text(p):
     parts = sorted([x for x in parts if abs(x[0]) >= 1], key=lambda x: -abs(x[0]))[:3]
     text = '；'.join(f'{label} USD {signed_amount(v)}' for v, label in parts) or '各项变化都很小'
     res = p.get('resources') or {}
-    if res.get('newCount'):
-        text += f'；新增 {res["newCount"]} 个资源'
+    n, new_cost = res.get('newCount'), res.get('newCost') or 0
+    cost = '合计不到 USD 0.01' if new_cost < 0.005 else f'合计 USD {new_cost:,.2f}'
+    if n and n <= 100:   # distinct billing resource IDs: also disks of replaced nodes, not only resources someone created
+        text += f'；本月新出现 {n} 个计费资源，{cost}'
+    elif n:   # rotating snapshots and disks, scale-set instances can count in the millions
+        text += (f'；本月新出现 {n:,} 个计费资源 ID（{cost}），数量很大时多为自动创建和删除的资源'
+                 '（如快照、磁盘、自动伸缩的实例），请按资源类型核对')
     return text + '（按账单拆分，业务原因待确认）'
 
 

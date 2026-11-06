@@ -7,7 +7,8 @@ month, and compares with the latest earlier month:
   retirement notices, APRL rules) was added to the check this month (new coverage, not a new problem);
 - 仍未处理: id in both months (severity changes are listed);
 - 已解决: id last month, absent now, and its check ran this month without a failed read;
-- 本月未检查: id last month, absent now, but its check failed (any read: what it did not see may still be there) or was
+- 本月未检查: id last month, absent now, but its check failed (any read: what it did not see may still be there), its
+  resources had no reading this month (coverage 'unseen', e.g. no health record), or it was
   not run this month, or its pillar or one of its
   resources' subscriptions was left out this month (customer.yaml) — never counted as resolved.
 A problem in a subscription that was left out last month is new coverage (新增检查项发现), not a new problem.
@@ -32,7 +33,7 @@ def current(ws):
     a pillar left out never counts as run, so its problems from last month are 本月未检查."""
     from .selection import load_groups
     groups = load_groups(ws)
-    findings, ran, failed, partial, rules, filled = {}, set(), set(), {}, set(), set()
+    findings, ran, failed, partial, rules, filled, unseen = {}, set(), set(), {}, set(), set(), {}
     base = ws.month_dir('findings') / 'waf'
     for pillar in PILLARS:
         path = base / f'{pillar}.json'
@@ -48,6 +49,8 @@ def current(ws):
                 failed.add(f'{pillar}:{check}')
             if c.get('filled'):   # subscriptions Resource Graph left out were read one by one (S-I11)
                 filled.add(f'{pillar}:{check}')
+            if c.get('unseen'):   # resources this check had no reading of this month
+                unseen.setdefault(f'{pillar}:{check}', set()).update(str(x).lower() for x in c['unseen'])
             if c.get('incomplete'):   # rules that could not see resources in subscriptions left out (APRL ids)
                 partial.setdefault(f'{pillar}:{check}', set()).update(c['incomplete'])
         for f in data['findings']:
@@ -57,7 +60,7 @@ def current(ws):
                                  'resource': f.get('resourceName'), 'finding': f['finding'][:200], 'members': _members(f),
                                  **({'rule': f['rule']} if f.get('rule') else {})}
             ran.add(f'{pillar}:{f["check"]}')
-    return findings, ran, failed, partial, rules, filled
+    return findings, ran, failed, partial, rules, filled, unseen
 
 
 def _key(f):
@@ -83,14 +86,16 @@ def _filled_row(f):
 
 
 def _fill_members(ws, month, before):
-    """Months recorded before members were kept: take them from that month's findings files when they are still there."""
+    """Months recorded before members were kept: take them from that month's findings files when they are still there.
+    Returns how many of last month's rows still have no members (compared by id only)."""
     if all('members' in f for f in before.values()):
-        return
+        return 0
     for path in (Workspace(ws.root, month).month_dir('findings') / 'waf').glob('*.json'):
         data = read_json(path)
         for f in data.get('findings') or [] if isinstance(data, dict) else []:
             if f.get('id') in before and 'members' not in before[f['id']]:
                 before[f['id']]['members'] = _members(f)
+    return sum(1 for f in before.values() if 'members' not in f)
 
 
 def inspected(ws):
@@ -107,7 +112,7 @@ def previous_month(ws):
 
 
 def update(ws, log=print):
-    findings, ran, failed, partial, rules, filled = current(ws)
+    findings, ran, failed, partial, rules, filled, unseen = current(ws)
     subs = inspected(ws)
     write_json(ws.state_dir / 'months' / f'{ws.month}.json', {'month': ws.month, 'findings': findings, 'checksRun': sorted(ran),
                                                              'rulesRun': sorted(rules), 'subscriptions': subs})
@@ -119,7 +124,9 @@ def update(ws, log=print):
         return out
     prev = read_json(ws.state_dir / 'months' / f'{prev_month}.json')
     before, ran_before, rules_before = prev['findings'], set(prev.get('checksRun') or []), set(prev.get('rulesRun') or [])
-    _fill_members(ws, prev_month, before)
+    if _fill_members(ws, prev_month, before):
+        log(f'提醒：{prev_month} 的跟踪记录来自较早的版本，没有逐资源信息，需要从 {prev_month}/findings 补；该月的 findings 不在工作目录里，'
+            '这次只能按问题编号比较，换了编号的问题会算成新增和已解决。如有备份，先把它放回再生成')
     subs_before = prev.get('subscriptions')
     # this month reads fewer subscriptions than last month covered (also when last month did not record its scope)
     narrowed = subs is not None and bool((set(subs_before or []) | {s for f in before.values() for s in _subs(f)}) - set(subs))
@@ -179,10 +186,12 @@ def update(ws, log=print):
             continue
         outside = group_of(f['check']) not in groups or left_out(f, subs, narrowed)   # not in this month's pillars or subscriptions
         incomplete = any(rule in (f.get('finding') or '') for rule in partial.get(_key(f), ()))
-        if _key(f) in ran and _key(f) not in failed and not outside and not incomplete:
+        no_reading = bool(names(f)) and {n.lower() for n in names(f)} <= unseen.get(_key(f), set())
+        if _key(f) in ran and _key(f) not in failed and not outside and not incomplete and not no_reading:
             rows.append({**plain(f), 'id': fid, 'status': '已解决'})
         else:
-            why = '不在本月范围' if outside else '读取失败' if _key(f) in failed or _key(f) not in ran else '范围不完整'
+            why = ('不在本月范围' if outside else '读取失败' if _key(f) in failed or _key(f) not in ran
+                   else '本月没有该资源的读数' if no_reading else '范围不完整')
             rows.append({**plain(f), 'id': fid, 'status': '本月未检查', 'notChecked': why})
     # checks whose reading now covers more subscriptions than last month (left-out subscriptions filled): problems that
     # were always there read as new or wider, so 03 and 00 say so. Only the rows of the filled reading count: S-I11's

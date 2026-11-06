@@ -176,9 +176,14 @@ def coverage_entry() -> dict:
 
 def not_applicable(call: dict) -> bool:
     """A saved call whose answer means 'not applicable', not a failed read: Blob settings of a FileStorage account,
-    the retired classic administrators API (calls recorded before 0.10.7 skipped them)."""
+    the retired classic administrators API (calls recorded before 0.10.7 skipped them), a resource type an API does not
+    support (e.g. resource health of MongoDB vCore: 422 UnsupportedResourceType), Defender settings of a subscription
+    without the Microsoft.Security provider (404 Subscription Not Registered: S-I4 reports it as a problem)."""
     url, error = str(call.get('url') or ''), str(call.get('error') or '')
-    return '/classicadministrators' in url.lower() or (call.get('status', call.get('http')) == 400 and 'FeatureNotSupportedForAccount' in error)
+    status = call.get('status', call.get('http'))
+    return ('/classicadministrators' in url.lower() or (status == 400 and 'FeatureNotSupportedForAccount' in error)
+            or (status == 422 and error.startswith('UnsupportedResourceType'))
+            or (status in (401, 404) and 'not registered' in error.lower() and '/providers/microsoft.security/' in url.lower()))
 
 
 def tally(coverage: dict, check: str, status) -> None:

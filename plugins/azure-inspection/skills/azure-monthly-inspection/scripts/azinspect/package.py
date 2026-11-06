@@ -96,6 +96,14 @@ def analysis_problems(ws):
             for p, err in (read_json(path) if path.exists() else {}).items()]
 
 
+def remove_old(folder):
+    """The last package folder, removed before copying; a window or terminal open in it keeps it locked on Windows."""
+    try:
+        shutil.rmtree(folder)
+    except PermissionError as e:
+        raise SystemExit(f'包文件夹被占用，请关闭打开它的窗口或终端（当前目录在 {folder} 里的也算）后重试：{e.strerror or e}') from None
+
+
 def build(ws, cfg, period, allow_open=False, log=print):
     reports = ws.month_dir('reports')
     files = sorted(p for p in reports.iterdir() if p.is_file() and REPORT.match(p.name) and not p.name.startswith('~$'))
@@ -136,7 +144,7 @@ def build(ws, cfg, period, allow_open=False, log=print):
     root = ws.month_dir('package')
     folder, archive = root / name, root / f'{name}.zip'
     if folder.exists():
-        shutil.rmtree(folder)
+        remove_old(folder)
     (folder / 'charts').mkdir(parents=True)
     copied = []
     for src in files + [reports / rel for rel in sorted(charts)]:

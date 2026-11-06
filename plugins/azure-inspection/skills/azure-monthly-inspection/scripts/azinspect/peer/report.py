@@ -85,6 +85,12 @@ def ratio(h, n, p):
     return f'{h}/{n} 个（{pct(p)}%）'
 
 
+def labelled_ratio(label, h, n, p):
+    """'AI 7/7 个（100%）': a space after the label, which may end in a Latin letter."""
+    space = ' ' if str(label)[-1:].isascii() and str(label)[-1:].isalnum() else ''   # not after '）'
+    return f'{label}{space}{ratio(h, n, p)}'
+
+
 def table(header, rows):
     out = ['|' + '|'.join(header) + '|', '|' + '|'.join('---' for _ in header) + '|']
     for r in rows:
@@ -205,11 +211,11 @@ def default_conclusions(data, stats, standard_name, by_line=True):
     bm = hi['byMethod']
     if bm:
         ordered = sorted(bm.items(), key=lambda kv: -(kv[1]['pct'] or 0))
-        out.append('**偏差与创建方式有关。**有高风险偏差的资源：' + '，'.join(f'{method_label(k)}{ratio(v["highImpact"], v["resources"], v["pct"])}' for k, v in ordered) + '。')
+        out.append('**偏差与创建方式有关。**有高风险偏差的资源：' + '，'.join(labelled_ratio(method_label(k), v["highImpact"], v["resources"], v["pct"]) for k, v in ordered) + '。')
     bl = {k: v for k, v in hi['byLine'].items() if v['resources'] >= 5} if by_line else {}
     if bl:
         ordered = sorted(bl.items(), key=lambda kv: -(kv[1]['pct'] or 0))
-        out.append('**各业务线的情况不同。**有高风险偏差的资源：' + '，'.join(f'{k}{ratio(v["highImpact"], v["resources"], v["pct"])}' for k, v in ordered) + '。')
+        out.append('**各业务线的情况不同。**有高风险偏差的资源：' + '，'.join(labelled_ratio(k, v["highImpact"], v["resources"], v["pct"]) for k, v in ordered) + '。')
     sv = stats['standardVsOther']
     if sv['standard']['resources']:
         out.append(f'**{created_by(standard_name)}的资源也有偏差。**{sv["standard"]["resources"]} 个中 {sv["standard"]["deviating"]} 个与标准做法不同，'

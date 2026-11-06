@@ -23,10 +23,17 @@ def collect(ws, cfg, client, log=print, pillars=None):
     w, failed = window(), []
     if any(not p.endswith(':inventory') for p in pillars or PILLARS):   # the inventory alone reads no metrics or logs
         log(f'指标和活动日志时间窗：{w["start"][:10]} 至 {w["end"][:10]}（{w["days"]} 天）')
-    for pillar in pillars or PILLARS:
+    todo, done = list(pillars or PILLARS), []
+    for pillar in todo:
         name, _, mode = pillar.partition(':')   # 'operations:inventory': its resource inventory only (03's architecture overview)
         try:
             _module(name).collect(ws, cfg, client, w, log, **({'phases': ['arg']} if mode == 'inventory' else {}))
+            done.append(pillar)
+        except SystemExit:   # e.g. no token: the following pillars would fail too; say what is left to collect
+            left = [p.partition(':')[0] for p in todo if p not in done]
+            log(f'WAF 采集中断：已完成 {"、".join(done) or "无"}，未完成 {"、".join(left)}（{", ".join(failed) + " 失败；" if failed else ""}'
+                f'问题解决后补采：collect --part waf --pillars {",".join(dict.fromkeys(failed + left))}）')
+            raise
         except Exception as e:  # keep the other pillars running; the error is shown to the user
             failed.append(name)   # rerun as --pillars <name>: the plan narrows it to the inventory again
             log(f'{pillar} 采集失败：{type(e).__name__}: {e}')
