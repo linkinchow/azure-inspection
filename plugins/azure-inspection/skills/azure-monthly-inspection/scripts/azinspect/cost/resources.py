@@ -336,9 +336,12 @@ def collect(ws, client, period, model, subscriptions, log=print):
         w['top3'] = True
         top_type = next((x['DataType'] for x in (w.get('byDataType') or []) if x['BillableGB']), None)
         if top_type in breakdown_q:
-            rows = _table(ctx.call('logs', f'https://api.loganalytics.io/v1/workspaces/{w["customerId"]}/query',
-                                   {'query': breakdown_q[top_type], 'timespan': f'{ctx.tail_start}T00:00:00Z/{ctx.tail_end}T00:00:00Z'}))
-            if rows is not None:
+            rec = ctx.call('logs', f'https://api.loganalytics.io/v1/workspaces/{w["customerId"]}/query',
+                           {'query': breakdown_q[top_type], 'timespan': f'{ctx.tail_start}T00:00:00Z/{ctx.tail_end}T00:00:00Z'})
+            rows = _table(rec)
+            if rows is None:
+                w['topDataTypeBreakdownError'] = str(rec.get('error') or f"HTTP {rec.get('http')}")[:300]
+            else:
                 w['topDataTypeBreakdown'] = {'dataType': top_type, 'window': f'{ctx.tail_start}..{ctx.tail_end}（7天）',
                                              'rows': [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in x.items()} for x in rows]}
     ws_by_id = {w['resourceId'].lower(): w['name'] for w in ws_rows}

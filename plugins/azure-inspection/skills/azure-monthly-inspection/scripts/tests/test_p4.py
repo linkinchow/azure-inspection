@@ -508,8 +508,9 @@ class NodeOsChannelTests(unittest.TestCase):
     def test_channel_none_is_explained(self):
         # 03/04/05 wrote "节点操作系统自动更新通道为 None": Azure's value, read as a missing value
         from azinspect.waf.checks import node_os_channel
-        self.assertEqual(node_os_channel('None'), 'None（不自动更新）')
-        self.assertEqual(node_os_channel(None), '未设置（不自动更新）')
+        # 0.10.9: one wording for 'None' and unset (the same table read "未设置（不自动更新）" and "None（不自动更新）")
+        self.assertEqual(node_os_channel('None'), '不自动更新')
+        self.assertEqual(node_os_channel(None), '不自动更新')
         self.assertEqual(node_os_channel('NodeImage'), 'NodeImage')
 
 
@@ -596,10 +597,10 @@ class MetricUnreadCoverageTests(unittest.TestCase):
         # so last month's problems on them would read as resolved
         from types import SimpleNamespace
         from azinspect.waf.performance.analyze import Analyzer
-        calls = [{'check': 'P9', 'target': 'lb-dip/s/regiona', 'status': 529}, {'check': 'P9', 'target': 'lb-dip/s/regiona', 'status': 200},
-                 {'check': 'P9', 'target': 'lb-dip/s/regiona', 'status': 529}, {'check': 'P2', 'target': 'aks-nodepool/s/regiona', 'status': 200}]
+        calls = [{'check': 'P9', 'target': 'lb-vip/s/regiona', 'status': 529}, {'check': 'P9', 'target': 'lb-vip/s/regiona', 'status': 200},
+                 {'check': 'P9', 'target': 'lb-vip/s/regiona', 'status': 529}, {'check': 'P2', 'target': 'aks-nodepool/s/regiona', 'status': 200}]
         files = {'index.json': {'calls': calls},
-                 'metrics/lb-dip.json': {'label': 'lb-dip', 'results': {'/lb1': {'DipAvailability': []}, '/lb2': {'_error': 'HTTP 529: HTTP 529'},
+                 'metrics/lb-vip.json': {'label': 'lb-vip', 'results': {'/lb1': {'DipAvailability': []}, '/lb2': {'_error': 'HTTP 529: HTTP 529'},
                                                                          '/lb3': {'_error': 'not returned by getBatch'}}},
                  'metrics/aks-nodepool.json': {'label': 'aks-nodepool', 'results': {'/aks1': {'x': []}}}}
         a = object.__new__(Analyzer)

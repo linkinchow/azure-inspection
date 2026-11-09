@@ -9,6 +9,8 @@ the performance pillar reads arg/*.json and aks/*.json from here):
 """
 from __future__ import annotations
 
+import threading
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -100,6 +102,17 @@ WEB_API = '2023-12-01'
 def runtime_fields(config: dict) -> dict:
     """Keep only the stack version fields of a site's web config; everything else is dropped before saving."""
     return {k: config.get(k) for k in RUNTIME_FIELDS if config.get(k) not in (None, '')}
+
+
+ACTIVITY_DAYS = 2         # the activity log of one subscription is read in windows of this many days at once (pages are
+ACTIVITY_WORKERS = 8      # sequential; a busy subscription pages about a hundred times a day)
+ACTIVITY_MIN_HOURS = 2    # a window cut off at max_pages is split in half down to this; what is still cut off is reported
+# The API cannot filter on status (only time, resource group, resource, provider, correlation id): a busy subscription
+# pages through every event of the month, more than ten hours for one large subscription. Each subscription stops at
+# this limit, newest days first; the days not read are reported.
+ACTIVITY_MAX_SECONDS = 30 * 60
+ACTIVITY_PROGRESS_SECONDS = 10 * 60
+_clock = time.monotonic
 
 
 def pmap(fn, items):
@@ -397,22 +410,119 @@ class _Collector:
 
     # ------------------------------------------------------------------ activity log (failed operations)
     def activity(self):
-        flt = f"eventTimestamp ge '{self.window['start']}' and eventTimestamp le '{self.window['snapshot']}T23:59:59Z' and status eq 'Failed'"
-        sel = 'eventTimestamp,operationName,status,subStatus,resourceId,resourceGroupName,resourceProviderName,properties,caller,correlationId,level,resourceType'
+        sel = 'eventTimestamp,operationName,status,subStatus,resourceId,resourceGroupName,properties,caller,correlationId'   # what R12 reads
+        start = datetime.fromisoformat(self.window['start'].replace('Z', '+00:00'))
+        end = datetime.fromisoformat(f"{self.window['snapshot']}T23:59:59+00:00")
+        parts = max(1, -(-int((end - start).total_seconds()) // (ACTIVITY_DAYS * 86400)))
+        cuts = [(start + (end - start) * i / parts).replace(microsecond=0) for i in range(parts + 1)]
+        # the API accepts only ge/le on eventTimestamp ("lt" is a 400): windows end one second before the next starts
+        fmt = '%Y-%m-%dT%H:%M:%SZ'
+        spans = [(cuts[i].strftime(fmt), (cuts[i + 1] - timedelta(seconds=0 if i == parts - 1 else 1)).strftime(fmt))
+                 for i in range(parts)]
 
-        def one(s):
+        lock, started, timed, done = threading.Lock(), {}, set(), [0]
+
+        def deadline_of(s):
+            with lock:
+                return started.setdefault(s['id'], _clock()) + ACTIVITY_MAX_SECONDS
+
+        def unread_before(items, a, b):
+            """The part of [a, b] older than the earliest event read (the API returns newest first)."""
+            times = sorted(str(x.get('eventTimestamp') or '')[:19] for x in items or [] if x.get('eventTimestamp'))
+            low = (datetime.fromisoformat(times[0]) - timedelta(seconds=1)).strftime(fmt) if times else b
+            return [[a, low]] if low >= a else []
+
+        def read(s, a, b):
+            """(items, status, error, [ranges not read]). The API pages through all events newest first: a window cut
+            off at max_pages keeps what was read and goes on before the earliest event read; when nothing was read to
+            tell how far it got, it is read again in two halves. At the subscription's time limit it stops."""
+            flt = f"eventTimestamp ge '{a}' and eventTimestamp le '{b}' and status eq 'Failed'"
             url = (f"/subscriptions/{s['id']}/providers/Microsoft.Insights/eventtypes/management/values?api-version=2015-04-01"
                    f'&$filter={urllib.parse.quote(flt)}&$select={sel}')
-            items, st, e = self.c.get_all(url, 'R12', s['name'], max_pages=600)
+            deadline = deadline_of(s)
+            if _clock() >= deadline:
+                with lock:
+                    timed.add(s['id'])
+                return [], 200, None, [[a, b]]
+            items, st, e = self.c.get_all(url, 'R12', s['name'], max_pages=600, report_truncation=False, deadline=deadline)
+            if items is None or not str(e or '').startswith('truncated'):
+                return items, st, e, []
+            if _clock() >= deadline:
+                with lock:
+                    timed.add(s['id'])
+                return items, st, None, unread_before(items, a, b)
+            ta, tb = (datetime.strptime(x, fmt) for x in (a, b))
+            times = sorted(str(x.get('eventTimestamp') or '')[:19] for x in items if x.get('eventTimestamp'))
+            if times:
+                low = datetime.fromisoformat(times[0]) - timedelta(seconds=1)
+                if ta <= low <= ta + (tb - ta) * 3 / 4:   # it got at least a quarter of the way: go on from there, else halve
+                    rest = read(s, a, low.strftime(fmt))
+                    if rest[0] is None:
+                        return rest
+                    return items + rest[0], 200, None, rest[3]
+            if (tb - ta).total_seconds() < ACTIVITY_MIN_HOURS * 3600:
+                return items, st, e, unread_before(items, a, b)
+            mid = (ta + (tb - ta) / 2).replace(microsecond=0)
+            first = read(s, a, mid.strftime(fmt))
+            second = read(s, (mid + timedelta(seconds=1)).strftime(fmt), b)
+            if first[0] is None or second[0] is None:
+                return next(x for x in (first, second) if x[0] is None)
+            return first[0] + second[0], 200, None, first[3] + second[3]
+
+        jobs = [(s, span) for s in self.subs for span in reversed(spans)]   # newest days first: the limit cuts the oldest
+        log, stop, t0 = getattr(self, 'log', None), threading.Event(), _clock()
+
+        def job(j):
+            out = read(j[0], *j[1])
+            with lock:
+                done[0] += 1
+            return out
+
+        def progress():
+            while not stop.wait(ACTIVITY_PROGRESS_SECONDS):
+                pages = sum(1 for x in list(getattr(self.c, 'calls', None) or []) if x.get('check') == 'R12')
+                log(f'  可靠性 activity：活动日志已读 {pages} 页，{done[0]}/{len(jobs)} 段读完（同时读 {ACTIVITY_WORKERS} 段），'
+                    f'用时 {int((_clock() - t0) / 60)} 分钟；每个订阅最多读 {ACTIVITY_MAX_SECONDS // 60} 分钟')
+        watcher = threading.Thread(target=progress, daemon=True) if log else None
+        if watcher:
+            watcher.start()
+        try:
+            with ThreadPoolExecutor(ACTIVITY_WORKERS) as ex:
+                reads = dict(zip([(s['id'], span) for s, span in jobs], ex.map(job, jobs)))
+        finally:
+            stop.set()
+
+        def merged(ranges):
+            out = []
+            for a, b in sorted(ranges):
+                if out and datetime.strptime(a, fmt) - datetime.strptime(out[-1][1], fmt) <= timedelta(seconds=1):
+                    out[-1][1] = max(out[-1][1], b)
+                else:
+                    out.append([a, b])
+            return out
+
+        def one(s):
+            got = [reads[(s['id'], span)] for span in spans]
+            bad = next(((st, e) for items, st, e, _cut in got if items is None), None)
+            items = None if bad else [x for its, _st, _e, _cut in got for x in its]
+            st, e = bad if bad else (200, None)
+            cut = merged([w for *_x, ws in got for w in ws])
+            if cut:   # a failed read in the call log: the 200 answers alone would make it look complete
+                record = getattr(self.c, 'record', None)
+                if record:
+                    record('R12', s['name'], f"/subscriptions/{s['id']}/providers/Microsoft.Insights/eventtypes/management/values", None,
+                           ('truncated after time limit, not read: ' if s['id'] in timed else 'truncated after page limit, not read: ')
+                           + '; '.join(f'{a}..{b}' for a, b in cut))
             events = [{'t': x.get('eventTimestamp'), 'op': (x.get('operationName') or {}).get('value'),
                        'status': (x.get('status') or {}).get('value'), 'subStatus': (x.get('subStatus') or {}).get('value'),
                        'resourceId': x.get('resourceId'), 'rg': x.get('resourceGroupName'),
                        'statusCode': (x.get('properties') or {}).get('statusCode'),
                        'statusMessage': ((x.get('properties') or {}).get('statusMessage') or '')[:1500],
                        'caller': x.get('caller'), 'correlationId': x.get('correlationId')} for x in items or []]
-            return {'subscriptionId': s['id'], 'subscriptionName': s['name'], 'status': st, 'error': e, 'events': events if items is not None else None}
+            return {'subscriptionId': s['id'], 'subscriptionName': s['name'], 'status': st, 'error': e, 'events': events if items is not None else None,
+                    **({'truncated': cut} if cut else {}), **({'timeLimited': True} if s['id'] in timed else {}), 'readAt': now()}
 
-        self.raw.save('activity/failed-ops.json', pmap(one, self.subs))
+        self.raw.save('activity/failed-ops.json', [one(s) for s in self.subs])
 
 
 def _vnet_summary(d):

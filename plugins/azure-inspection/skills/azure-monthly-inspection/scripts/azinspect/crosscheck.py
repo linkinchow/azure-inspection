@@ -30,6 +30,26 @@ def _names(f):
     return {str(m['name']).lower() for m in f.get('members') or [] if m.get('name')} or {str(f.get('resourceName') or '').lower()}
 
 
+def _typed(f):
+    """{lower name: lower ARM type or None} of a finding's resources (a type without '/' such as '多种' is unknown)."""
+    ok = lambda t: str(t).lower() if t and '/' in str(t) else None  # noqa: E731
+    named = {str(m['name']).lower(): ok(m.get('type')) for m in f.get('members') or [] if m.get('name')}
+    return named or {str(f.get('resourceName') or '').lower(): ok(f.get('resourceType'))}
+
+
+def _type_of_id(rid):
+    """'microsoft.network/networksecuritygroups' from a resource ID, or None."""
+    parts = str(rid or '').lower().split('/providers/')[-1].split('/')
+    return f'{parts[0]}/{parts[1]}' if '/providers/' in str(rid or '').lower() and len(parts) > 1 else None
+
+
+def _same(f, name, rtype):
+    """The finding names this resource: same name and, when both types are known, same type (one name can be a
+    PostgreSQL server and a Redis cache, or an NSG and a load balancer)."""
+    t = _typed(f).get(str(name).lower(), False)
+    return t is not False and (t is None or not rtype or t == str(rtype).lower())
+
+
 def _pool_of(vmss):
     """AKS pool name from a VMSS name or resource id: .../aks-nodepool1-12345678-vmss -> nodepool1."""
     m = re.match(r'^aks-(.+?)-\d+-vmss$', str(vmss or '').rstrip('/').split('/')[-1], re.I)
@@ -130,7 +150,7 @@ def x4(ws):
     items = []
     for f in perf:
         if f['check'] in ('P4', 'P5'):
-            for n in sorted(_names(f) & set(low)):
+            for n in sorted(n for n in _names(f) & set(low) if _same(f, n, low[n].get('type'))):
                 items.append({'resource': low[n]['name'], 'subscription': low[n]['subscriptionName'], 'handled': n in excluded,
                               'evidence': f'01 列为低利用率；04 {f["id"]}（{f["severity"]}）：{f["finding"][:120]}',
                               'suggestion': '在 narrative/01.json 的 downsizeExclusions 加入 {"name", "reason"}：01 会移出降档候选并写明原因'})
@@ -157,7 +177,7 @@ def x5(ws, chosen=REPORTS, groups=None):
                 # only network interfaces and public IPs listed as exposed; idle NSGs are already a latent risk there
                 names = {str(m['name']).lower() for m in f.get('members') or []
                          if str(m.get('type') or '').lower() in EXPOSED_TYPES and m.get('name')}
-            for n in sorted(names & set(idle)):
+            for n in sorted(n for n in names & set(idle) if _same(f, n, _type_of_id(idle[n].get('resourceId')))):
                 items.append({'resource': idle[n]['name'], 'subscription': idle[n].get('subscriptionName'),
                               'evidence': f'01 列为闲置（{idle[n].get("category")}）；{f["id"]}：{f["finding"][:100]}',
                               'suggestion': '确认是否仍在使用；在用的从闲置清单说明中改为“需要确认用途”'
@@ -274,6 +294,17 @@ def x9(ws, chosen=REPORTS):
 FIGURE = re.compile(r'USD\s*\d[\d,]*(?:\.\d{2})?(?![\d.,]*\d)(?!\s*[万亿])|\d+\.\d+%')
 
 
+def _in_report(key, text):
+    """A figure from 00's conclusion in a detailed report: as written, or an amount shown without 'USD' in a table whose
+    column says USD (same digits, not part of a longer number)."""
+    if any(_same_figure(key, s) for s in FIGURE.findall(text)):
+        return True
+    if key.startswith('USD'):
+        digits = re.escape(key[3:])
+        return re.search(rf'(?<![\d.,]){digits}(?![\d]|[.,]\d)', text) is not None
+    return False
+
+
 def _same_figure(said, shown):
     """Whole figures only (2.5% is not in 12.5%); a percentage rounded from the shown one counts (14.8% for 14.82%)."""
     if said == shown:
@@ -303,7 +334,7 @@ def x10(ws, chosen=REPORTS):
         key = re.sub(r'\s+', '', figure)
         if any(_same_figure(key, s) for s in shown):
             continue
-        found = [code for code, text in details.items() if any(_same_figure(key, s) for s in FIGURE.findall(text))]
+        found = [code for code, text in details.items() if _in_report(key, text)]
         items.append({'resource': figure, 'evidence': '00 结论写了此数字，第 1 节表格中没有' + (f'；{"、".join(found)} 报告中有' if found else '；01–05 报告中也没有'),
                       'suggestion': '金额以表格为准改写 narrative/00.json 的 conclusion 并重新生成 00；引用的是明细报告里的其他数字的，核对无误即可'})
     return _result('X10', '汇总结论数字与表格一致', items, manual=True)

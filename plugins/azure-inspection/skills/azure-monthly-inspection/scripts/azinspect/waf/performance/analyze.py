@@ -52,6 +52,10 @@ def span(values, unit=''):
     return f'{lo}{unit}' if lo == hi else f'{lo}–{hi}{unit}'
 
 
+CACHE_TYPES = {'redis': 'Microsoft.Cache/Redis', 'redisenterprise': 'Microsoft.Cache/redisEnterprise',
+               'mongoclusters': 'Microsoft.DocumentDB/mongoClusters'}
+
+
 def unhealthy_note(gateway, backends, days):
     """'gw 的后端 b 在 30 天中有 2 天出现不健康实例。' for backends unhealthy now and then (not reported as a problem)."""
     parts = [f"{u['backend']} 在 {days} 天中有 {u.get('daysWithUnhealthy') or 0} 天出现不健康实例" for u in backends]
@@ -105,7 +109,9 @@ class Analyzer:
 
     # ------------------------------------------------------------------ coverage
     def coverage_from_index(self):
-        calls = (self.raw.load('index.json') or {}).get('calls') or []
+        from .collect import NOT_ANALYZED
+        calls = [c for c in (self.raw.load('index.json') or {}).get('calls') or []
+                 if str(c.get('target') or '').split('/')[0] not in NOT_ANALYZED]   # reads no check uses (collected before 0.10.9)
         mapping = {'P1': ('P1', 'P1/P4'), 'P2': ('P2',), 'P4': ('P1/P4', 'P4/P5'), 'P5': ('P5', 'P4/P5'), 'P6': ('P6',),
                    'P7': ('P7',), 'P8': ('P8',), 'P9': ('P9',)}
         for k, checks in mapping.items():
@@ -129,10 +135,14 @@ class Analyzer:
             day = lambda s: str(s)[5:10]  # noqa: E731 - '2026-10-26T00:00:00Z' -> '10-26'
             partial = sorted(rid.rstrip('/').split('/')[-1] + ' 缺 ' + '、'.join(f'{day(a)} 至 {day(b)}' for a, b in v['_partial'])
                              for rid, v in results.items() if isinstance(v, dict) and v.get('_partial'))
+            narrowed = sorted(rid.rstrip('/').split('/')[-1] for rid, v in results.items() if isinstance(v, dict) and v.get('_narrowed'))
             for k, checks in mapping.items():
-                if check not in checks or not (unread or partial):
+                if check not in checks or not (unread or partial or narrowed):
                     continue
-                self.cov[k]['otherErrors'] = self.cov[k].get('otherErrors', 0) + len(unread) + len(partial)
+                self.cov[k]['otherErrors'] = self.cov[k].get('otherErrors', 0) + len(unread) + len(partial) + len(narrowed)
+                if narrowed:
+                    self.cov[k]['notes'].append(f'{label}：{len(narrowed)} 个资源整份读取被指标后端限流，只读到 Ready 条件（按资源计入“其他错误”），'
+                                                '节点就绪情况已检查，内存、磁盘、进程数压力未检查：' + '、'.join(narrowed[:10]) + ('等' if len(narrowed) > 10 else '') + '。')
                 if unread:
                     why = '指标后端限流，' if all('throttl' in str(results[r].get('_error')).lower() for r in unread_ids) else ''
                     self.cov[k]['notes'].append(f'{label}：{len(unread)} 个资源重试和拆分后仍未读到（{why}按资源计入“其他错误”，尝试和成功按调用次数计），未检查：'
@@ -210,7 +220,7 @@ class Analyzer:
         if short:
             self.cov['P1']['notes'].append(f"{len(short)} 台虚拟机有效数据不足 {MIN_DAYS} 天（多为新建或自动伸缩的节点），没有判断是否满负荷或 IO 打满："
                                            f"{'、'.join(sorted(short)[:10])}{' 等' if len(short) > 10 else ''}。")
-        self.cov['P1']['notes'].append('AKS 节点所在的规模集已读取实例级 CPU 和可用内存；节点层面的饱和度在 P2 用 AKS 平台指标（工作集占可分配内存）判断。')
+        self.cov['P1']['notes'].append('规模集（含 AKS 节点）不在 P1 逐台判断；AKS 节点的饱和度在 P2 用 AKS 平台指标（工作集占可分配内存）判断。')
 
     def p1_finding(self, v, rec, sustained_cpu, sustained_mem, month):
         e = rec['environment']
@@ -642,12 +652,12 @@ class Analyzer:
                 for m in ('serverLoad', 'usedmemorypercentage', 'CpuPercent', 'MemoryPercent', 'StoragePercent'):
                     x = rec.get(m)
                     if x and ((x['avg'] or 0) >= 80 or (x['daysMaxGE95'] or 0) >= 7):
-                        self.add('P5', '中' if is_prod(e) else '低', rid, kind, r['name'], e,
+                        self.add('P5', '中' if is_prod(e) else '低', rid, CACHE_TYPES[kind], r['name'], e,
                                  f"{r['name']} 的 {m} 平均 {x['avg']}%，{x['daysMaxGE95']} 天日最高≥95%。", {m: x},
                                  '评估扩容或分片。' + UNCHANGED, None, key=f'{m}|{rid}')
                 evicted = rec.get('evictedkeys')
                 if evicted and (evicted['total'] or 0) > 0 and is_prod(e):
-                    self.add('P5', '中', rid, kind, r['name'], e, f"生产缓存 {r['name']} {self.days} 天内驱逐了 {evicted['total']:.0f} 个键。",
+                    self.add('P5', '中', rid, CACHE_TYPES[kind], r['name'], e, f"生产缓存 {r['name']} {self.days} 天内驱逐了 {evicted['total']:.0f} 个键。",
                              {'evictedkeys': evicted}, '内存不足导致驱逐，建议扩容或调整 TTL/maxmemory 策略。' + UNCHANGED, None, key=f'evicted|{rid}')
                 lat = rec.get('cacheLatency')
                 if kind != 'mongoclusters' and lat and lat.get('avg') is not None:

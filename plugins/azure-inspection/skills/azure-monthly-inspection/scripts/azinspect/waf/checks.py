@@ -144,7 +144,12 @@ def only_text(n: int, total: int, unit: str, what: str) -> str:
 
 def node_os_channel(value) -> str:
     """AKS node OS upgrade channel for customers: Azure's value 'None' means no automatic update, not a missing value."""
-    return {None: '未设置（不自动更新）', 'None': 'None（不自动更新）', 'Unmanaged': 'Unmanaged（由节点系统自行更新）'}.get(value, str(value))
+    return {None: '不自动更新', 'None': '不自动更新', 'Unmanaged': 'Unmanaged（由节点系统自行更新）'}.get(value, str(value))
+
+
+def node_os_text(value) -> str:
+    """'节点操作系统没有开启自动更新' or '节点操作系统自动更新通道为 X'."""
+    return '节点操作系统没有开启自动更新' if value in (None, 'None') else f'节点操作系统自动更新通道为 {node_os_channel(value)}'
 
 
 def all_of(n: int) -> str:

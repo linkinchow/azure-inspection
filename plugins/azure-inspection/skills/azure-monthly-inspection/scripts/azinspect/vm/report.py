@@ -17,7 +17,7 @@ from . import charts as vm_charts
 from . import scalesets
 from .prices import KEYS
 from .rules import IO
-from .table import combined_rows, portfolio_totals, price_and_saving
+from .table import azure_reference, combined_rows, plan_cost, portfolio_totals, price_and_saving
 
 STEM = '02_虚拟机利用率与规格优化'
 DETAIL_SHEET = 'VM建议指标价格总表'
@@ -73,6 +73,9 @@ def build(ws, cfg, narrative=None, log=print):
     read = lambda name: __import__('json').loads((fdir / name).read_text(encoding='utf-8'))
     vms, recs, pools, manifest = read('vms-analyzed.json'), read('recommendations.json'), read('pools.json'), read('collection-manifest.json')
     subscriptions = read('subscriptions.json')
+    from .rules import stale_keep
+    for note in stale_keep(recs, narrative.get('crossCheckNotes')):
+        log(f'02 说明文件：crossCheckNotes 里 {note} 写了 keep，但分析结果仍建议调整；请先重新运行 analyze 再 build')
     from .prices import price_catalog
     catalog = price_catalog(ws.raw('vm/prices'), read('summary.json')['priceAsOfDate'])
     from ..cost.commitments import load as load_commitments, vm_coverage
@@ -90,6 +93,7 @@ def build(ws, cfg, narrative=None, log=print):
     unified.sort(key=lambda r: (str(r['subscriptionName']).lower(), r['subscriptionId'].lower(), str(r['resourceGroup']).lower(), r['name'].lower(),
                                 r['vmId'].lower()))
     portfolio = portfolio_totals(unified)
+    portfolio['azureReference'] = azure_reference(commitments, subscriptions)
     write_json(fdir / 'rows.json', unified)
     write_json(fdir / 'price-summary.json', portfolio)
     wb, expected = Workbook(), {}
@@ -146,7 +150,8 @@ def build(ws, cfg, narrative=None, log=print):
                 calculation.cell(j, col, cost)
             else:
                 divisor = 12 if key == 'ri1' else 36 if key == 'ri3' else None
-                expression = f'={quote["retailPrice"]!r}/{divisor}' if divisor else f'={quote["retailPrice"]!r}*730'
+                hours = u.get('monthlyHours', 730) if key == 'payg' else 730   # on demand for the hours run; SP is committed for the month
+                expression = f'={quote["retailPrice"]!r}/{divisor}' if divisor else f'={quote["retailPrice"]!r}*{hours!r}'
                 formula(calculation, j, col, expression, cost)
             if cost is not None and u['currentMonthlyPAYG'] is not None:
                 formula(calculation, j, col + 1, f'=B{j}-{L(col)}{j}', u['currentMonthlyPAYG'] - cost)
@@ -157,13 +162,26 @@ def build(ws, cfg, narrative=None, log=print):
             if not u['running']:
                 calculation.cell(j, col, 0)
                 continue
-            value = u['costs'][key] if u['costs'][key] is not None else u['costs']['payg']
-            formula(calculation, j, col, f'=IF(ISNUMBER({source}{j}),{source}{j},C{j})', value)
+            # a commitment only where it costs less than on demand for the hours the machine runs
+            expression = (f'=IF(ISNUMBER({source}{j}),{source}{j},C{j})' if key == 'payg'
+                          else f'=C{j}' if u.get('planExcluded')   # already under RI/SP, or Spot: stays on demand
+                          else f'=IF(ISNUMBER({source}{j}),MIN({source}{j},C{j}),C{j})')
+            formula(calculation, j, col, expression, plan_cost(u, key))
     comparison = sheet('费用汇总', '当前总价与调整后五种方案', PRICE_NOTE + 'RI缺报价时按调整后按需价计入；所有节省都与当前规格按需列表价比较。',
                        ['方案', '每月总价USD', '每月节省USD', '每年总价USD', '每年节省USD', '说明'])
-    comparison.append(['当前规格：按需', None, None, None, None, '当前运行机器按每月730小时计算；已释放机器计算费为0'])
+    comparison.append(['当前规格：按需', None, None, None, None, '当前运行机器按观察窗口内实际运行的比例折算每月小时数（整周运行=730小时）；已释放机器计算费为0'])
     for plan in portfolio['plans']:
         comparison.append([plan['label'], None, None, None, None, plan['note']])
+    reference = portfolio.get('azureReference')
+    if reference and reference['read']:
+        comparison.append([])
+        comparison.append(['Azure购买建议（参照）', 'Azure建议数量', 'Azure建议节省USD（按过去30天，约等于每月）', '上表：只算RI/SP的每月节省USD', '上表：含降配的每月节省USD', AZURE_NOTE])
+        plans = {p['key']: p for p in portfolio['plans']}
+        for key, label in AZURE_LABELS.items():
+            p = reference['plans'][key]
+            comparison.append([label, azure_quantity(key, p), round(p['saving'], 2) if p['count'] else None,
+                               round(commitment_only(plans, key), 2), round(plans[key]['monthlySaving'], 2),
+                               '没有建议' if not p['count'] else ('只含计算节省计划，覆盖所有计算资源，不只虚拟机' if key.startswith('sp') else '只含虚拟机预留')])
     calculation.sheet_state = 'hidden'
     headers = ['订阅', '资源组', 'VM/机器', 'Region', '状态', '当前规格', '建议更换规格', '建议怎么处理',
                '更换前CPU平均%', '更换后CPU平均%（预计）', '更换前内存平均%', '更换后内存平均%（预计）',
@@ -240,7 +258,8 @@ def build(ws, cfg, narrative=None, log=print):
         ['SKU限制', '按机器所在订阅、区域和可用区检查目标规格是否可部署。'],
         ['VMSS/AKS', '同池运行节点须有共同且通过检查的目标，备注写VMSS名称及所有VM一起调整。'],
         ['指标箭头', '更换前是实测周平均；更换后是预计值。写不更换时两边相同。'],
-        ['按需与SP月费用', '官方每小时列表价×730，按全年稳定用量估算。'],
+        ['按需月费用', '官方每小时列表价×每月运行小时：观察窗口内整周运行的机器按730小时，只运行了一部分时间的（如自动扩缩的节点）按实际比例折算。'],
+        ['RI/SP月费用', 'RI订单价÷12或÷36，SP每小时承诺价×730：承诺按整月付费。汇总时只对承诺比按需便宜的机器计入RI/SP，其余仍按需。'],
         ['RI月费用', '1年订单公开列表价÷12；3年订单价÷36。未找到对应报价时显示无报价。'],
         ['停机与状态不明', '只有deallocated明确停计算收费。其他状态不当成停机，缺数据不购买承诺。'],
         ['变更前', '确认重要任务、故障接管、应用资源预留、库存和配额，先小范围调整；异常时恢复原配置。'],
@@ -346,6 +365,53 @@ def _mean(values):
     return sum(values) / len(values) if values else None
 
 
+AZURE_LABELS = {'ri1': '1年RI（虚拟机）', 'ri3': '3年RI（虚拟机）', 'sp1': '1年SP', 'sp3': '3年SP'}
+AZURE_NOTE = ('Azure按过去30天的实际用量和贵司价格计算，按现有规格，不含降配；上表按最近7天的运行情况和官网列表价估算。'
+              '“只算RI/SP”是降配后再买RI/SP比降配后按需多省的部分，可以和Azure的建议对照。'
+              '有自动扩缩的节点池时台数每周会变，官网列表价通常也高于贵司实际价格，购买RI/SP的数量以Azure建议为准。')
+
+
+def excluded_sentence(portfolio):
+    ex = portfolio.get('excluded') or {}
+    parts = ([f'{ex["covered"]}台巡检月一半以上费用已由RI/SP覆盖（保持现有承诺）'] if ex.get('covered') else []) + \
+            ([f'{ex["spot"]}台是Spot机器（不能用RI/SP）'] if ex.get('spot') else [])
+    return ('其中' + '，'.join(parts) + '，这些机器在RI/SP方案中仍按按需计算，不重复计算节省。') if parts else ''
+
+
+def commitment_only(plans, key):
+    """What the commitment alone saves in 02's plan: the plan's saving less the rightsizing saving (on demand after)."""
+    return plans[key]['monthlySaving'] - plans['payg']['monthlySaving']
+
+
+def azure_quantity(key, p):
+    if not p['count']:
+        return '-'
+    return f'{p["quantity"]:,.0f} 台' if key.startswith('ri') else f'每小时 USD {p["quantity"]:,.2f}'
+
+
+def azure_reference_lines(portfolio):
+    """Azure's own RI/SP recommendations next to the plans: the week behind the plans may not stand for the month."""
+    reference = portfolio.get('azureReference')
+    if not reference or not reference['read']:
+        why = '没有读取' if not reference else '读取失败'
+        return ['', f'**购买RI/SP前，请先看Azure自己的购买建议。**本次Azure的购买建议{why}（建议由01月度成本读取），无法对照。'
+                    '上表按最近7天的运行情况估算，有自动扩缩的节点池时台数每周会变，7天可能代表不了整月，RI/SP节省可能偏高；'
+                    '请在Azure门户“预留”或“节省计划”的购买页面查看按过去30天用量给出的建议数量。']
+    plans = {p['key']: p for p in portfolio['plans']}
+    rows = ['|方案|Azure建议数量|Azure建议节省USD（按过去30天，约等于每月）|上表：只算RI/SP的每月节省USD|上表：含降配的每月节省USD|', '|---|---:|---:|---:|---:|']
+    for key, label in AZURE_LABELS.items():
+        p = reference['plans'][key]
+        rows.append(f'|{label}|{azure_quantity(key, p)}|{fmt(p["saving"]) if p["count"] else "没有建议"}|'
+                    f'{fmt(commitment_only(plans, key))}|{fmt(plans[key]["monthlySaving"])}|')
+    partial = (f'部分订阅的建议没有读到（{reference["read"]}/{reference["tried"]} 次查询成功），Azure的建议金额可能偏低。'
+               if reference['read'] < reference['tried'] else '')
+    return ['', '**购买RI/SP的数量以Azure自己的购买建议为准。**Azure按过去30天的实际用量和贵司价格计算，只算稳定在用的部分；'
+                '上表按最近7天的运行情况和官网列表价估算，并包含降配。有自动扩缩的节点池时台数每周会变，7天可能代表不了整月；'
+                '官网列表价通常也高于贵司实际价格。所以上表的RI/SP节省可能偏高，适合用来比较降配后各种付费方式的差别。', '', *rows, '',
+            '“只算RI/SP”是降配后再买RI/SP、比降配后按需多省的部分，可以和Azure的建议对照；Azure的建议按现有规格计算，没有考虑降配；'
+            '节省计划只算计算节省计划（覆盖所有计算资源，不只虚拟机），不含数据库节省计划。' + partial]
+
+
 def detail_table(rows):
     """The per-machine table (same content as the Excel sheet), attached only up to cfg.vm_detail_max_rows machines."""
     def disk(u, start):
@@ -355,7 +421,7 @@ def detail_table(rows):
              '- **建议更换规格**：建议调整的写新SKU，其余写“不更换”。不更换按当前规格计算指标和价格。',
              '- **指标箭头**：更换前实测周平均 → 更换后预计周平均；不更换时两边相同。Cached/Uncached各自显示IOPS和吞吐消耗百分比。',
              '- **五列价格**：均按调整后规格报价；写“不更换”的仍按当前规格。每格为“每台月价（每月节省）”，单位USD。括号里的节省统一与当前规格按需列表价比较，已包含规格调整和所选RI/SP优惠。各列是互斥方案，不能相加。',
-             '- **月价计算**：按需/SP每小时列表价×730，1年RI订单价÷12，3年RI订单价÷36。未找到报价显示“无报价”；已停机机器不建议购买RI/SP。',
+             '- **月价计算**：按需为每小时列表价×每月运行小时（观察窗口内整周运行的按730小时，只运行了一部分时间的按实际比例折算）；SP每小时承诺价×730，1年RI订单价÷12，3年RI订单价÷36；RI/SP只对比按需便宜的机器计入汇总。未找到报价显示“无报价”；已停机机器不建议购买RI/SP。',
              '- **备注**：说明原因、VMSS或节点池名称；同VMSS所有VM一起调整，不单独改某一个节点。', '',
              '|订阅|资源组|VM/机器|Region|当前规格|建议更换规格|建议|CPU平均%：前→后（预计）|内存平均%：前→后（预计）|Uncached IOPS/吞吐%：前→后（预计）|Cached IOPS/吞吐%：前→后（预计）|调整后规格：按需月价（每月节省）|调整后规格：1年RI月价（每月节省）|调整后规格：3年RI月价（每月节省）|调整后规格：1年SP月价（每月节省）|调整后规格：3年SP月价（每月节省）|备注（含VMSS）|',
              '|---|---|---|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---|']
@@ -451,11 +517,14 @@ def markdown(cfg, rows, recs, subs, manifest, pools, total, portfolio, data, png
              '- 没有数据或权限不足的机器仍列在逐台明细中，明确写“暂不判断”，不把缺数据当成空闲；数量见 2.2。', '',
              '**先小范围调整，确认业务正常后再推广。**平均用量低不代表每个忙碌时刻都够用；业务团队需确认重要任务、故障接管和AKS资源需求。报告提供分析建议，实际调整需经业务负责人批准。', '',
              '### 当前费用与调整后五种方案', '',
-             f'**以下均按Azure官网公开列表价计算，单位USD，不是实际账单。**比较的是同一批{running}台运行机器的基础计算费用；{deallocated}台已释放机器计算费为0。每月按730小时估算。', '',
+             f'**以下均按Azure官网公开列表价计算，单位USD，不是实际账单。**比较的是同一批{running}台运行机器的基础计算费用；{deallocated}台已释放机器计算费为0。'
+             '按需按每台机器在观察窗口内实际运行的比例折算每月小时数（整周运行为730小时）；RI/SP按整月承诺计价，只对承诺比按需便宜的机器计入，其余仍按需。'
+             + excluded_sentence(portfolio), '',
              '|方案|每月总价USD|每月节省USD|每年总价USD|每年节省USD|说明|', '|---|---:|---:|---:|---:|---|',
              f'|当前规格：按需|{fmt(portfolio["currentMonthly"])}|0.00|{fmt(portfolio["currentAnnual"])}|0.00|当前运行机器的按需列表价|']
     for plan in portfolio['plans']:
         lines.append('|' + '|'.join(esc(v) for v in [plan['label'], fmt(plan['monthlyCost']), fmt(plan['monthlySaving']), fmt(plan['annualCost']), fmt(plan['annualSaving']), plan['note']]) + '|')
+    lines += azure_reference_lines(portfolio)
     ri1 = next(p for p in portfolio['plans'] if p['key'] == 'ri1')
     lines += ['', (f'RI方案中，{ri1["fallbackCount"]}台机器没有对应RI报价，这部分仍按调整后规格的按需价计入，每月USD {fmt(ri1["fallbackMonthly"])}；逐台明细中仍显示“无报价”。'
                    if ri1['fallbackCount'] else '') + '所有方案的节省均与当前规格按需列表价比较。RI/SP方案已包含规格调整的效果，各方案分别选择，不相加。', '']

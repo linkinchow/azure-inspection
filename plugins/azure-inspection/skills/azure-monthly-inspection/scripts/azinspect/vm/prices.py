@@ -137,6 +137,19 @@ def ensure_prices(client, directory: Path, needed, date: str, fetch: bool = True
     return price_catalog(directory, date)
 
 
+def queried_dates(directory, date: str):
+    """Days the price files usable for `date` were read (what the analysis actually used)."""
+    out = set()
+    for path in sorted(Path(directory).glob('*.json')):
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if _valid_cache(data, date) and data.get('queriedAt'):
+            out.add(str(data['queriedAt'])[:10])
+    return sorted(out)
+
+
 def price_catalog(directory: Path, date: str):
     """All genuine quotes keyed (region, lower SKU, OS basis, kind)."""
     records = {}

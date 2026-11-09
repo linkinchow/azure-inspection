@@ -23,6 +23,15 @@
       "checkedAt": "2026-10-30"
     },
     {
+      "product": "mysql",
+      "version": "8.4",
+      "label": "MySQL 8.4 LTS",
+      "end": "2032-04-30",
+      "source": "https://learn.microsoft.com/en-us/azure/mysql/concepts-version-policy",
+      "note": "Azure supports a major version until the MySQL community retires it and has not published its own 8.4 dates yet; 8.4 LTS reaches end of life on 2032-04-30 under Oracle's Lifetime Support Policy (Premier to 2029-04-30, Extended to 2032-04-30). Re-check when Azure lists 8.4 in its retirement table.",
+      "checkedAt": "2026-11-09"
+    },
+    {
       "product": "os-almalinux",
       "version": "8",
       "label": "AlmaLinux 8",

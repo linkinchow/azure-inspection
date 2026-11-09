@@ -86,12 +86,15 @@ def customer_note(record, vm, pool_name=None):
             result.append('未找到内存减半、CPU核数和所需功能不变的规格')
         else:
             result.append('没有找到容量更小且保留所需功能的规格')
+    elif record['status'] == '暂不调整：结合其他检查结果保持原规格':
+        result.append('结合其他检查结果保持原规格（RI/SP 按原规格计算）')   # the narrative note itself follows from the table
     elif record['status'] == '保持现状：平均利用率不低':
         result.append('CPU和内存平均利用率均不低于20%')
     elif record['status'] == '数据不足：暂不能判断':
         if not denied(record, vm):
             days = min(vm.get('metrics', {}).get(name, {}).get('validDays', 0) for name in ['Percentage CPU', 'Available Memory Percentage'])
-            result.append(f'CPU/内存只有{days}天有效数据，需补足7天' if days < 7 else 'CPU/内存采样不足，或规格/价格信息不完整')
+            result.append('观察的7天内没有CPU/内存读数，需确认监控指标是否正常' if days == 0 else
+                          f'CPU/内存只有{days}天有效数据，需补足7天' if days < 7 else 'CPU/内存采样不足，或规格/价格信息不完整')
         if any('未对该系列' in x for x in record.get('reasons', [])):
             result.append('该系列需要单独评估性能，暂不建议更换')
     else:

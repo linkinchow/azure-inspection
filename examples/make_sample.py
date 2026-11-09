@@ -360,6 +360,9 @@ VM_METRICS = {
     'shop-web-test-01': (3.1, 88, (2, 2, 1, 1)), 'pay-api-01': (24.5, 58, (6, 8, 4, 3)), 'pay-api-02': (23.8, 57, (6, 8, 4, 3)),
     'data-etl-01': (12.4, 84, (14, 21, 7, 5)), 'data-worker-01': (31.0, 62, (11, 16, 7, 5)), 'edge-fw-01': (4.2, 1, (2, 3, 1, 1)),
 }
+# samples per day where a machine did not run the whole week (autoscaled off part of each day); 1440 otherwise
+VM_DAILY_SAMPLES = {'shop-web-04': 600}
+NO_SAMPLES = {'shop-web-test-01'}   # running, but no readings in the window: 02 does not judge it and prices it as a whole month
 
 
 def caps(name):
@@ -371,8 +374,8 @@ def caps(name):
         ('AcceleratedNetworkingEnabled', 'True'), ('HyperVGenerations', 'V1,V2'), ('EncryptionAtHostSupported', 'True'))]
 
 
-def metric(avg, window_days):
-    daily = [{'timeStamp': d + 'T00:00:00Z', 'average': round(avg * (1 + .03 * ((i % 3) - 1)), 3), 'count': 1440} for i, d in enumerate(window_days)]
+def metric(avg, window_days, per_day=1440):
+    daily = [{'timeStamp': d + 'T00:00:00Z', 'average': round(avg * (1 + .03 * ((i % 3) - 1)), 3), 'count': per_day} for i, d in enumerate(window_days)]
     count = sum(x['count'] for x in daily)
     return {'average': sum(x['average'] * x['count'] for x in daily) / count, 'sampleCount': count, 'validDays': 7, 'daily': daily}
 
@@ -385,11 +388,11 @@ def vm_part(ws):
         state = 'PowerState/deallocated' if last else 'PowerState/running'
         cpu, avail, io = VM_METRICS.get(name, (None, None, (None,) * 4))
         metrics = {}
-        if state.endswith('running'):
+        if state.endswith('running') and name not in NO_SAMPLES:
             for mname, value in zip(('Percentage CPU', 'Available Memory Percentage', 'VM Uncached IOPS Consumed Percentage',
                                      'VM Uncached Bandwidth Consumed Percentage', 'VM Cached IOPS Consumed Percentage',
                                      'VM Cached Bandwidth Consumed Percentage'), (cpu, avail) + io):
-                metrics[mname] = metric(value, window_days)
+                metrics[mname] = metric(value, window_days, VM_DAILY_SAMPLES.get(name, 1440))
         rows.append({'id': vid, 'name': name, 'metricName': name, 'instanceId': None, 'metricResourceId': vid, 'kind': 'vm', 'subscriptionId': sid,
                      'subscriptionName': sub, 'resourceGroup': rg, 'region': region, 'size': size, 'state': state,
                      'createdAt': (first or '2025-06-01') + 'T00:00:00Z',
@@ -705,7 +708,9 @@ NARRATIVE = {
                      'recommendation': '确认数据访问频率后，为 90 天前的数据配置转 Cool 层规则', 'saving': None, 'owner': '数据平台负责人', 'status': '待业务确认',
                      'evidencePeriod': '9 月存储容量与当前配置'}]},
     '02': {'crossCheckNotes': [{'subscription': 'data-prod', 'namePrefix': 'data-etl-01',
-                                'note': '夜间批处理时数据盘带宽经常打满（见卓越运营与性能效率巡检报告 P4）；降配前先确认新规格的磁盘吞吐上限足够'}]},
+                                'note': '夜间批处理时数据盘带宽经常打满（见卓越运营与性能效率巡检报告 P4）；降配前先确认新规格的磁盘吞吐上限足够'},
+                               {'subscription': 'shop-prod', 'namePrefix': 'shop-search-01', 'keep': True,
+                                'note': '每周重建搜索索引时内存接近用满，客户确认暂不调整。'}]},
     '03': {
         'architecture': ['网店和支付都运行在日本东部：网店前端在 shop-aks 和 shop-web 虚拟机上，经应用网关对外；支付服务在 pay-api 虚拟机上，'
                          '数据库按业务分开。数据分析在美国东部的 data-prod 订阅。shared-network 订阅里的中心网络通过 VPN 网关连接办公网，'
@@ -744,7 +749,7 @@ NARRATIVE = {
         'conclusion': ['**最需要先处理的是支付数据库 pay-mysql-prod**：防火墙放行所有地址、没有强制加密，也没有高可用和异地备份。'
                        '问题主要集中在门户手工创建的资源上，按 Terraform 模块创建的同类资源大多已经符合推荐做法。',
                        '**9 月费用 USD {cur}，比 8 月增加 {change}**，增长最快的是 data-prod 的 Azure OpenAI（约 44%），来自工作日调用量增加。'
-                       '{vms} 台虚拟机调整规格预计每月节省 USD {resize}（Azure 官网公开列表价），降配稳定后再买 1 年预留实例，合计每月约节省 USD {ri1}。'],
+                       '{vms} 台虚拟机调整规格预计每月节省 USD {resize}（Azure 官网公开列表价）；按 Azure 的购买建议购买 1 年期虚拟机预留，每月约省 USD {ri1}。'],
         'customerQuestions': ['生产和测试环境的划分：本次按订阅和资源名称判断。', 'shopassets/exports 容器是否用于对外分发。',
                               '支付库的恢复时间目标和数据丢失容忍度。', '各资源的负责人和月度预算目标。'],
         'savingsPending': [{'item': 'datalakeraw 存储', 'status': '约 26 TiB 全部在 Hot 层，没有生命周期策略'},
@@ -759,9 +764,9 @@ def summary_narrative(ws):
     f = ws.month_dir('findings')
     totals = read_json(f / 'cost' / 'model.json')['comparableTotals']
     vm = read_json(f / 'vm' / 'summary.json')
-    ri1 = next(p for p in read_json(f / 'vm' / 'price-summary.json')['plans'] if p['key'] == 'ri1')
+    ri1 = read_json(f / 'vm' / 'price-summary.json')['azureReference']['plans']['ri1']   # Azure's own amount, as 00's table shows
     figures = {'cur': f'{totals["cur"]:,.2f}', 'change': f'{totals["changeRate"]:.2%}', 'vms': vm['recommendedVMCount'],
-               'resize': f'{vm["monthlyPotentialSavingsUSD"]:,.2f}', 'ri1': f'{ri1["monthlySaving"]:,.2f}'}
+               'resize': f'{vm["monthlyPotentialSavingsUSD"]:,.2f}', 'ri1': f'{ri1["saving"]:,.2f}'}
     return {**NARRATIVE['00'], 'conclusion': [p.format(**figures) for p in NARRATIVE['00']['conclusion']]}
 
 
@@ -792,7 +797,10 @@ def commitments_part(ws):
         {'kind': '预留实例', 'subscription': 'pay-prod', 'resourceType': 'VirtualMachines', 'sku': 'Standard_D4s_v5', 'region': 'japaneast',
          'term': 'P3Y', 'quantity': 2, 'costWithout': 357.12, 'costWith': 146.4, 'saving': 210.72, 'lookBack': 'Last30Days'},
         {'kind': '节省计划', 'subscription': 'shop-prod', 'resourceType': 'Compute_Savings_Plan', 'sku': '每小时承诺 0.95', 'region': None,
-         'term': 'P1Y', 'quantity': 0.95, 'costWithout': 1062.0, 'costWith': 873.4, 'saving': 188.6, 'coverage': 71.0, 'utilization': 99.1, 'lookBack': 'Last30Days'}]
+         'term': 'P1Y', 'quantity': 0.95, 'costWithout': 1062.0, 'costWith': 873.4, 'saving': 188.6, 'coverage': 71.0, 'utilization': 99.1, 'lookBack': 'Last30Days'},
+        # a database savings plan: 01 lists it, 02's reference leaves it out (virtual machines and compute only)
+        {'kind': '节省计划', 'subscription': 'pay-prod', 'resourceType': 'Database_Savings_Plan', 'sku': '每小时承诺 0.12', 'region': None,
+         'term': 'P1Y', 'quantity': 0.12, 'costWithout': 140.0, 'costWith': 118.3, 'saving': 21.7, 'coverage': 60.0, 'utilization': 98.0, 'lookBack': 'Last30Days'}]
     write_json(ws.raw('cost/commitments.json'), {
         'collectedAt': '2026-10-26T12:00:00+00:00', 'month': MONTH, 'subscriptionsQueried': len({p['subscriptionId'] for p in pricing}),
         'pricingByResource': pricing, 'pricingScope': 'machines',

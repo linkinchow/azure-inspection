@@ -19,7 +19,7 @@ LABELS = {
     'app-service-plans': '没有应用的应用服务计划', 'availability-set': '没有虚拟机的可用性集', 'sql-elastic-pool': '没有数据库的 SQL 弹性池',
     'network-security-groups': '未关联子网或网卡的 NSG', 'route-tables': '未关联子网的路由表',
     'load-balancers': '没有后端池和入站 NAT 规则的负载均衡', 'front-door-waf-policy': '未关联 Front Door 的 WAF 策略',
-    'traffic-manager-profiles': '没有终结点的流量管理器', 'application-gateways': '后端池没有目标的应用网关',
+    'traffic-manager-profiles': '没有终结点的流量管理器', 'application-gateways': '后端池没有目标的应用网关（可能仍有监听在用，需要确认用途）',
     'virtual-networks': '没有子网的虚拟网络', 'subnets': '没有连接设备的空子网', 'nat-gateways': '未关联子网的 NAT 网关',
     'ip-groups': '未被防火墙使用的 IP 组', 'private-dns-zones': '没有关联虚拟网络的私有 DNS 区域',
     'virtual-network-gateways': '没有连接的虚拟网络网关', 'ddos-protections': '没有保护任何虚拟网络的 DDoS 防护计划',

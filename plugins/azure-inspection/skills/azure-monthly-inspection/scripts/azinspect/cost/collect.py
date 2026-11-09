@@ -225,17 +225,21 @@ class Collector:
             return
         if self.retry_end is None:
             self.retry_end = clock() + RETRY_SECONDS
-        total = len(left)
+        total, turns, waited, started = len(left), 0, 0.0, clock()
         self.log(f'  {total} 个费用查询被限流或服务端出错，现在轮流补读（整个费用采集的补读合计最多 {RETRY_SECONDS // 60} 分钟）')
         while left and clock() < self.retry_end:
+            turns += 1
             still = []
             for sub, kind in left:
                 if clock() >= self.retry_end or self.retryable(self.retry_one(sub, kind)):
                     still.append((sub, kind))
             if len(still) == len(left):
-                sleep(max(0.0, min(RETRY_WAIT_SECONDS, self.retry_end - clock())))
+                pause = max(0.0, min(RETRY_WAIT_SECONDS, self.retry_end - clock()))
+                waited += pause
+                sleep(pause)
             left = still
-        self.log(f'  补读：读到 {total - len(left)}/{total} 个' + (f'，{len(left)} 个仍未读到，记为读取失败' if left else ''))
+        self.log(f'  补读：读到 {total - len(left)}/{total} 个，共 {turns} 轮、等待 {round(waited)} 秒、用时 {round(clock() - started)} 秒'
+                 + (f'，{len(left)} 个仍未读到，记为读取失败' if left else ''))
 
     def resources_in_parts(self, sub, groups, max_attempts=None, batch=RESOURCE_GROUP_BATCH):
         """Per-resource costs read in batches of resource groups; cost outside any resource group is the difference to the month total."""

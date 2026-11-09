@@ -143,6 +143,8 @@ def note_cell(nxt, cur, cur_label):
     """The 说明 cell of a subscription without a forecast, in plain Chinese (not the API's error text)."""
     m = re.match(r'HTTP (\d+)', str(nxt.get('reason') or ''))
     http = nxt.get('httpStatus') or (int(m.group(1)) if m else None)
+    if nxt.get('status') == 'skipped':
+        return f'{cur_label}无费用，未读取预测'
     if nxt.get('status') in ('success', 'empty', 'noForecastRows', None) or not http:
         return '预测接口未返回结果' if cur else f'{cur_label}无费用，预测接口未返回结果'
     failed = '预测接口限流（429），未读到' if http == 429 else f'预测读取失败（HTTP {http}）'

@@ -7,7 +7,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-from ..checks import all_of, count_text, node_os_channel, type_label
+from ..checks import all_of, count_text, node_os_text, type_label
 from . import lifecycle
 from ..common import ADVISOR_NO_TEXT, Findings, Raw, advisor_problem, coverage_entry, enabled, env, load_scope, mixed_env, not_applicable, plain_error
 
@@ -741,7 +741,7 @@ def r9(run):
         if old:
             oldest = max(old, key=lambda p: p['imageAgeDays'])
             item = run.add('R9', '中' if (oldest['imageAgeDays'] > 180 and not nonprod(ce)) else '低', cl['id'], CLUSTER, cl['name'], ce,
-                    f"集群 {cl['name']} 节点操作系统自动更新通道为 {node_os_channel(aup.get('nodeOSUpgradeChannel'))}，{len(old)} 个节点池的节点镜像超过 120 天未更新（最旧 {oldest['pool']} 为 {oldest['nodeImageVersion']}，约 {oldest['imageAgeDays']} 天），缺少内核和安全修复，且越久不升级、一次升级的变化越大。",
+                    f"集群 {cl['name']} {node_os_text(aup.get('nodeOSUpgradeChannel'))}，{len(old)} 个节点池的节点镜像超过 120 天未更新（最旧 {oldest['pool']} 为 {oldest['nodeImageVersion']}，约 {oldest['imageAgeDays']} 天），缺少内核和安全修复，且越久不升级、一次升级的变化越大。",
                     {'nodeOSUpgradeChannel': aup.get('nodeOSUpgradeChannel'), 'upgradeChannel': aup.get('upgradeChannel'), 'pools': old, 'envBasis': ce['basis']},
                     '把节点操作系统升级通道设为 NodeImage（或 SecurityPatch）并配置维护窗口，先在测试集群执行；同时规划 Ubuntu 22.04 到 24.04 的迁移（Kubernetes 1.35 起节点不再支持 22.04）。',
                     key=f"{cl['id']}|node-image")
@@ -929,9 +929,52 @@ def r11(run):
 
 
 # ====================================================================== R12 failed operations
+def read_periods(cut, start, end):
+    """(hours read, 'MM-DD HH:MM 至 HH:MM、…') from the ranges not read within [start, end]."""
+    from datetime import datetime, timedelta
+    p = lambda x: datetime.fromisoformat(str(x).replace('Z', '+00:00'))  # noqa: E731
+    got, at = [], p(start)
+    for a, b in sorted(cut or []):
+        if p(a) - at > timedelta(seconds=1):
+            got.append((at, p(a)))
+        at = max(at, p(b))
+    if p(end) - at > timedelta(seconds=1):
+        got.append((at, p(end)))
+    hours = sum((b - a).total_seconds() for a, b in got) / 3600
+    show = lambda a, b: a.strftime('%m-%d %H:%M') + ' 至 ' + (b.strftime('%H:%M') if a.date() == b.date() else b.strftime('%m-%d %H:%M'))  # noqa: E731
+    text = '、'.join(show(a, b) for a, b in got[:8]) + (f' 等 {len(got)} 段' if len(got) > 8 else '')
+    return hours, text
+
+
 def r12(run):
     run.cover(['R12'], 'R12')
     act = run.raw.load('activity/failed-ops.json') or []
+    # activity log reads cut off at the page limit: newest first, so earlier failed operations were not read
+    day = lambda x: str(x)[5:10]  # noqa: E731
+    for s in act:
+        cut = s.get('truncated')
+        old = not cut and str(s.get('error') or '').startswith('truncated')   # collected before 0.10.9: no failed read recorded
+        if not (cut or old):
+            continue
+        if old:
+            run.coverage['R12']['otherErrors'] += 1
+            times = sorted(e['t'] for e in s.get('events') or [] if e.get('t'))
+            text = (f"订阅 {s['subscriptionName']} 的失败操作记录分页太多，只读到最近的部分"
+                    + (f"（{day(times[0])} 至 {day(times[-1])}）" if times else '') + '，更早的失败操作没有读到，结果可能不完整。')
+        else:   # the ranges are the days not read (0.10.9: newest first, each subscription within a time limit)
+            from .collect import ACTIVITY_MAX_SECONDS
+            why = f'在 {ACTIVITY_MAX_SECONDS // 60} 分钟内没有读完' if s.get('timeLimited') else '分页太多'
+            start, end = run.window['start'], f"{run.window['snapshot']}T23:59:59Z"
+            # the log was read before the snapshot day ended: nothing after that moment exists to be read
+            read_at = s.get('readAt') or (run.raw.load('manifest.json') or {}).get('collectedAt')
+            if read_at:
+                at = str(read_at).replace('+00:00', 'Z')[:19] + 'Z'
+                end = min(end, at)
+            hours, got = read_periods(cut, start, end)
+            text = (f"订阅 {s['subscriptionName']} 的活动日志记录太多，{why}：{run.window.get('days') or 30} 天里只读到约 "
+                    f"{hours:.0f} 小时" + (f'（{got}）' if got else '') + '的失败操作，其余时段没有读到，结果可能不完整。')
+        run.coverage['R12']['notes'].append(text)
+        run.coverage['R12'].setdefault('limits', []).append(text)
     cnt, sample = Counter(), {}
     for s in act:
         for e in s.get('events') or []:
@@ -950,7 +993,8 @@ def r12(run):
     run.inventory['R12'] = {'window': f"{run.window.get('start')}..{run.window.get('snapshot')}",
                             'subscriptions': [{k: s.get(k) for k in ('subscriptionName', 'status', 'error', 'pages')} | {'events': None if s['events'] is None else len(s['events'])} for s in act],
                             'byCode': dict(by_code.most_common()), 'top': summary[:40]}
-    full = [x for x in summary if x['code'] == 'SubnetIsFull']
+    # by resource, not by failure count: the row's id follows its first resource, which must not change month to month
+    full = sorted((x for x in summary if x['code'] == 'SubnetIsFull'), key=lambda x: x['resourceId'].lower())
     if full:
         vmss = 'Microsoft.Compute/virtualMachineScaleSets'
         run.add('R12', '高', full[0]['resourceId'], vmss, ', '.join(x['resource'] for x in full),

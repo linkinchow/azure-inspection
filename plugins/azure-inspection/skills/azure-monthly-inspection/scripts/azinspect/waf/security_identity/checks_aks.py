@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from ..checks import node_os_text
 from .collect import safe_name
 from .context import is_prod, is_test, parse_dt
 
@@ -133,7 +134,7 @@ def _cluster(ctx, r, detail, cl, maintenance):
     channel = aup.get('nodeOSUpgradeChannel')
     if channel in (None, 'None', 'Unmanaged') or (oldest is not None and oldest > 90):
         ctx.add('S-I3', '低' if is_test(e) else '中',
-                finding=f'AKS 集群 {r["name"]} 的节点 OS 升级通道为 {channel}，最旧节点镜像已 {oldest} 天未更新，节点安全补丁可能长期未应用。',
+                finding=f'AKS 集群 {r["name"]} 的{node_os_text(channel)}，最旧节点镜像已 {oldest} 天未更新，节点安全补丁可能长期未应用。',
                 evidence={'nodeOSUpgradeChannel': channel, 'upgradeChannel': aup.get('upgradeChannel'), 'oldestNodeImageAgeDays': oldest,
                           'maintenanceConfigurations': [x.get('name') for x in (maintenance.get(r['id'].lower(), {}).get('value') or [])],
                           'pools': [{k: x[k] for k in ('name', 'nodeImageVersion', 'nodeImageAgeDays')} for x in pool_info]},

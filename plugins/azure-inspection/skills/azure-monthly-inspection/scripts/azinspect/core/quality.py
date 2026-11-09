@@ -66,7 +66,7 @@ def check_markdown(path: Path, banned: list[str] | None = None) -> list[str]:
             issues.append(f'第 {i - run + 1}–{i} 行连续 {run} 个列表项都只有单个字（说明文件里的文字可能被逐字拆开）')
         run = 0
     for word in banned if banned is not None else BANNED:
-        for m in re.finditer(re.escape(word), text):
+        for m in re.finditer(re.escape(word) + ('(?!率)' if word == '命中' else ''), text):   # 缓存命中率 is a metric name
             issues.append(f'内部用语“{word}”：…{text[max(0, m.start() - 15):m.end() + 15]}…'.replace('\n', ' '))
     confirms = len(CONFIRM.findall(text))
     if confirms > CONFIRM_MAX:

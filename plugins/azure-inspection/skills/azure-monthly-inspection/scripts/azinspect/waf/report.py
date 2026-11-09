@@ -102,8 +102,27 @@ def join_notes(parts):
     return '；'.join([x.rstrip('。') for x in parts[:-1]] + parts[-1:])
 
 
+def stale_failure_notes(notes, coverage):
+    """Checks whose narrative note speaks of failed reads while this month's reads of that check did not fail."""
+    return sorted(k for k, text in (notes or {}).items()
+                  if '读取失败' in str(text) and k in coverage and not _failed(coverage[k]))
+
+
+def _clean(cov):
+    return not (_failed(cov) or cov.get('incomplete') or cov.get('overReport'))
+
+
+def notes_without_findings(notes, findings, coverage=None):
+    """Checks with a narrative note but no problem and nothing to explain this month (written for another month)."""
+    have = {f['check'] for f in findings}
+    return sorted(k for k in (notes or {}) if k not in have and _clean((coverage or {}).get(k) or {}))
+
+
 def check_note(fs, cov, note=None):
-    """The check table's 主要发现: a check with failed reads never reads as 未发现问题."""
+    """The check table's 主要发现: a check with failed reads never reads as 未发现问题; a narrative note on a check
+    without problems is shown only when there is something to explain (failed reads, a narrowed scope)."""
+    if not fs and _clean(cov):
+        note = None
     base = note or (default_check_note(fs) if fs else None)
     if not _failed(cov):
         # rules that cannot see resources in subscriptions left out (customer.yaml scope): they may miss or over-report
@@ -129,7 +148,7 @@ def check_note(fs, cov, note=None):
 def failure_limit(coverage):
     """Scope note naming the checks with failed reads, or ''."""
     names = [CHECKS.get(k, k) for k, c in coverage.items() if _failed(c)]
-    return (f'{"、".join(dict.fromkeys(names))}有读取失败（无权限或接口报错），这些检查项的结果可能不完整，'
+    return (f'{"、".join(dict.fromkeys(names))}有读取失败（无权限、接口报错或分页太多没有读完），这些检查项的结果可能不完整，'
             '没有列出问题不代表没有问题，见 Excel“检查覆盖”页。') if names else ''
 
 
@@ -822,6 +841,12 @@ def build(ws, cfg, report, narrative=None, log=print):
                 if c.get(key):
                     mine.setdefault(key, []).extend(c[key])
     limits += [x for x in [failure_limit(coverage)] if x]
+    unused = [k for k in notes_without_findings(narrative.get('checkNotes'), findings, coverage) if report_of(k) == report]
+    if unused:
+        log(f'{report} 说明文件：checkNotes 里 {"、".join(unused)} 本月没有问题，这几条说明没有使用，请删除或按本月结果改写')
+    stale = stale_failure_notes(narrative.get('checkNotes'), coverage)
+    if stale:
+        log(f'{report} 说明文件：checkNotes 里 {"、".join(stale)} 写了“读取失败”，但本月这些检查没有读取失败，请按本月结果改写')
     md = markdown(cfg, report, findings, by_check, checks, narrative, snapshot, perf_window, readable, scope_note, pngs, alert_png, lz_rows, tracked,
                   arch, limits, chosen_scope=subscription_scope(ws, cfg, report), groups=groups, coverage=coverage)
     (out / f'{md_stem}.md').write_text(md, encoding='utf-8')

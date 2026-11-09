@@ -259,6 +259,12 @@ def _forecast(run, sid, period, attempts):
                    max_attempts=attempts)
 
 
+def with_cost(comparable, ref):
+    """Subscriptions with cost this month: the others are not forecast (a forecast of nothing; reading them only adds
+    throttled calls to the retry round)."""
+    return [sid for sid in comparable if (ref.get((sid, 'cur')) or 0) != 0]
+
+
 def forecast_first_pass(run, comparable, period):
     """Each subscription's forecast read once, without waiting when throttled (a saved read is reused under --resume).
     Returns the throttled subscriptions, for the retry round."""
@@ -267,32 +273,47 @@ def forecast_first_pass(run, comparable, period):
 
 def forecast_retry(run, left, period, log=print, clock=time.monotonic, sleep=time.sleep):
     """Throttled forecasts read again in turn, each once per turn, pausing after a turn in which all were still
-    throttled, until the time limit; what is left stays a failed read (HTTP 429)."""
+    throttled, until the time limit; what is left stays a failed read (HTTP 429). Returns {turns, waitedSeconds, read,
+    left}, also saved as raw/cost/supplement/forecast-retry.json (the calls of the round show no wait of their own)."""
     if not left:
-        return
-    total, left = len(left), list(left)
+        return None
+    total, left, turns, waited, started = len(left), list(left), 0, 0.0, clock()
+    said = started
     log(f'费用预测：{total} 个订阅被限流（429），现在轮流补读，最多 {FORECAST_RETRY_SECONDS // 60} 分钟')
     end = clock() + FORECAST_RETRY_SECONDS
     while left and clock() < end:
+        turns += 1
         still = []
         for sid in left:
             if clock() >= end or _forecast(run, sid, period, 1)['httpStatus'] == 429:
                 still.append(sid)
         if len(still) == len(left):
-            sleep(max(0.0, min(FORECAST_WAIT_SECONDS, end - clock())))
+            pause = max(0.0, min(FORECAST_WAIT_SECONDS, end - clock()))
+            waited += pause
+            sleep(pause)
         left = still
-    log(f'费用预测补读：读到 {total - len(left)}/{total} 个订阅' + (f'，{len(left)} 个仍被限流，记为读取失败' if left else ''))
+        if left and clock() - said >= 600:
+            said = clock()
+            log(f'  费用预测仍在补读：已读到 {total - len(left)}/{total} 个订阅，已用 {round((clock() - started) / 60)} 分钟')
+    stats = {'subscriptions': total, 'read': total - len(left), 'left': len(left), 'turns': turns, 'waitedSeconds': round(waited),
+             'elapsedSeconds': round(clock() - started)}
+    run.ws.save_raw('cost/supplement/forecast-retry.json', stats)
+    log(f'费用预测补读：读到 {total - len(left)}/{total} 个订阅，共 {turns} 轮、等待 {round(waited)} 秒、用时 {round(clock() - started)} 秒'
+        + (f'，{len(left)} 个仍被限流，记为读取失败' if left else ''))
+    return stats
 
 
-def task_forecast(run, comparable, period):
-    """Forecast summary from the reads of forecast_first_pass and forecast_retry."""
+def task_forecast(run, comparable, period, skipped=()):
+    """Forecast summary from the reads of forecast_first_pass and forecast_retry; `skipped`: not read (no cost this month)."""
     months = {'next': period.following}
     subs = []
     for sid in comparable:
         s = run.subs[sid]
         e = {'subscriptionId': sid, 'name': s['name'], 'group': s['group']}
         for key, month in months.items():
-            e[key] = summarize_forecast(run, f'forecast.{sid}.{key}', month.cost_range())
+            e[key] = ({'status': 'skipped', 'actualToDate': None, 'forecastRemainder': None, 'fullMonthEstimate': None,
+                       'reason': 'no cost this month: not read'} if sid in skipped
+                      else summarize_forecast(run, f'forecast.{sid}.{key}', month.cost_range()))
         subs.append(e)
 
     def totals(key):
@@ -432,11 +453,12 @@ def collect(ws, cfg, client, period, model, log=print, reuse=None):
     run = Runner(ws, client, cd['subscriptions'], cfg.currency, reuse, log)
     region = task_region(run, comparable, ref, period)
     write_json(ws.raw('cost/supplement/region.json'), region)
-    left = forecast_first_pass(run, comparable, period)
+    costly = with_cost(comparable, ref)
+    left = forecast_first_pass(run, costly, period)
     drivers = task_drivers(run, model, period)
     write_json(ws.raw('cost/supplement/drivers.json'), drivers)
     forecast_retry(run, left, period, log)
-    forecast = task_forecast(run, comparable, period)
+    forecast = task_forecast(run, comparable, period, skipped=set(comparable) - set(costly))
     write_json(ws.raw('cost/supplement/forecast.json'), forecast)
     log(f'区域、预测、变化原因：区域合计{"一致" if region["reconciliation"]["allOk"] else "有差异"}；'
         f'{forecast["overall"]["next"]["subscriptionsWithEstimate"]} 个订阅有预测；变化原因拆解 {drivers["coverage"]["reconciled"]}/{drivers["coverage"]["pairs"]} 项对上')

@@ -109,6 +109,9 @@ def norm_values(values):
     return out
 
 
+# Metric reads no check uses (saved by earlier versions): no longer read; their old calls are left out of the coverage.
+# The per-instance and per-backend-IP ones were the heaviest and were throttled on large tenants.
+NOT_ANALYZED = {'vmss-daily', 'vmss-instance-daily', 'aks-node', 'ai-tokens', 'ai-ptu', 'ai-calls', 'lb-dip'}
 SPLIT_ATTEMPTS = 3   # tries of a metric batch of several resources before it is split in half
 WINDOW_PARTS = 3     # a single resource still failing (too large or 5xx) is read again in this many shorter windows
 
@@ -167,10 +170,12 @@ class Collector:
         url = ARM + rid + '/providers/Microsoft.Insights/metrics?' + urllib.parse.urlencode(q, quote_via=urllib.parse.quote)
         return self.client.request('GET', url, check, rid.split('/')[-1])
 
-    def batch_metrics(self, label, check, items, namespace, names, aggregation, interval='P1D', flt=None, top=None, force_arm=False):
+    def batch_metrics(self, label, check, items, namespace, names, aggregation, interval='P1D', flt=None, top=None, force_arm=False,
+                      narrow=None):
         """metrics:getBatch (<=50 ids per subscription/region). A batch whose answer is too large (400 over 125 MB) or
         that keeps failing on the server side (5xx/529 after retries) is split in half and read again, down to single
-        resources, so only what still fails stays unread. A 400 with several metrics is retried metric by metric;
+        resources, then in shorter windows; a single resource none of whose windows could be read is read once more with
+        the `narrow` filter when given (fewer series, marked '_narrowed'), so only what still fails stays unread. A 400 with several metrics is retried metric by metric;
         'global' resources and a 403 use the per-resource ARM metrics GET; a second 403 stops that subscription."""
         res, calls, groups = {}, [], defaultdict(list)
         for it in items:
@@ -187,12 +192,12 @@ class Collector:
             if errs:
                 cur.setdefault('_errors', {}).update(errs)
 
-        def run_batch(sub, region, rids, mnames, span=None):
+        def run_batch(sub, region, rids, mnames, span=None, filter_=None):
             start, end = span or (self.start, self.end)
             params = {'api-version': '2024-02-01', 'metricnamespace': namespace, 'metricnames': ','.join(mnames),
                       'starttime': start, 'endtime': end, 'interval': interval, 'aggregation': aggregation}
-            if flt:
-                params['filter'] = flt
+            if filter_ or flt:
+                params['filter'] = filter_ or flt
             if top:
                 params['top'] = str(top)
             url = (f'https://{region}.metrics.monitor.azure.com/subscriptions/{sub}/metrics:getBatch?'
@@ -201,13 +206,15 @@ class Collector:
             # backend throttles heavy queries for minutes, so waiting through six tries each costs much and helps little)
             return self.client.request('POST', url, check, f'{label}/{sub}/{region}', body={'resourceids': rids}, max_attempts=SPLIT_ATTEMPTS)
 
-        def by_window(sub, region, rid):
+        def by_window(sub, region, rid, filter_=None, spans=None):
             """One resource read in WINDOW_PARTS shorter windows, series joined by their dimensions. Windows that still fail
             are listed under '_partial' (the windows read are kept); False when no window could be read."""
-            parts, missed, spans = [], [], windows(self.start, self.end, WINDOW_PARTS)
+            parts, missed = [], []
+            spans = spans if spans is not None else windows(self.start, self.end, WINDOW_PARTS)
             for span in spans:
-                st, data, err = run_batch(sub, region, [rid], names, span)
-                calls.append({'sub': sub, 'region': region, 'n': 1, 'metrics': names, 'window': span, 'status': st, 'error': err})
+                st, data, err = run_batch(sub, region, [rid], names, span, filter_)
+                calls.append({'sub': sub, 'region': region, 'n': 1, 'metrics': names, 'window': span, 'filter': filter_ or flt,
+                              'status': st, 'error': err})
                 if st != 200:
                     missed.append(list(span))
                     continue
@@ -275,6 +282,10 @@ class Collector:
                 return
             if (too_large or (st or 0) >= 500) and by_window(sub, region, rids[0]):
                 return
+            if (too_large or (st or 0) >= 500) and narrow and (by_window(sub, region, rids[0], narrow, [(self.start, self.end)])
+                                                                 or by_window(sub, region, rids[0], narrow)):
+                res[rids[0].lower()]['_narrowed'] = narrow
+                return
             if st == 200:
                 got = set()
                 for v in data.get('values') or []:
@@ -316,9 +327,6 @@ class Collector:
         self.batch_metrics('vm-daily', 'P1/P4', vms, 'microsoft.compute/virtualmachines', VM_METRICS, 'average,maximum,count')
         vmss = self.rows('vmss')
         ns = 'microsoft.compute/virtualmachinescalesets'
-        self.batch_metrics('vmss-daily', 'P1/P4', vmss, ns, VM_METRICS, 'average,maximum,count')
-        self.batch_metrics('vmss-instance-daily', 'P1', vmss, ns, ['Percentage CPU', 'Available Memory Percentage'],
-                           'average,maximum,count', flt="VMName eq '*'", top=1000)
         self.batch_metrics('vmss-instance-hourly-cpu', 'P2', vmss, ns, ['Percentage CPU'], 'average', interval='PT1H',
                            flt="VMName eq '*'", top=1000)
 
@@ -328,8 +336,6 @@ class Collector:
         self.batch_metrics('aks-nodepool', 'P2', aks, ns, ['node_cpu_usage_percentage', 'node_memory_working_set_percentage',
                                                            'node_disk_usage_percentage'],
                            'average,maximum,count', interval='PT12H', flt="nodepool eq '*'", top=500)
-        self.batch_metrics('aks-node', 'P2', aks, ns, ['node_cpu_usage_percentage', 'node_memory_working_set_percentage'],
-                           'average,maximum,count', interval='PT12H', flt="node eq '*'", top=1000)
         self.batch_metrics('aks-podphase', 'P2', aks, ns, ['kube_pod_status_phase'], 'average,maximum', interval='PT12H',
                            flt="phase eq '*' and namespace eq '*'", top=2000)
         self.batch_metrics('aks-autoscaler', 'P2', aks, ns, ['cluster_autoscaler_unschedulable_pods_count',
@@ -339,7 +345,7 @@ class Collector:
                                                             'etcd_database_usage_percentage'],
                            'average,maximum,minimum,count', interval='PT12H')
         self.batch_metrics('aks-nodecond', 'P2', aks, ns, ['kube_node_status_condition'], 'average,maximum', interval='PT12H',
-                           flt="condition eq '*' and status eq '*'", top=500)
+                           flt="condition eq '*' and status eq '*'", top=500, narrow="condition eq 'Ready' and status eq '*'")
         fields = ('count', 'minCount', 'maxCount', 'enableAutoScaling', 'vmSize', 'mode', 'osDiskType', 'osDiskSizeGB', 'maxPods',
                   'powerState', 'scaleSetPriority', 'availabilityZones', 'orchestratorVersion', 'provisioningState')
         out = []
@@ -385,12 +391,6 @@ class Collector:
         self.batch_metrics('ai-latency', 'P6', ai, ns, ['AzureOpenAITimeToResponse', 'TimeToResponse', 'AzureOpenAITTLTInMS',
                                                         'AzureOpenAINormalizedTTFTInMS', 'TimeToLastByte'],
                            'average,maximum', flt="ModelDeploymentName eq '*'", top=1000)
-        self.batch_metrics('ai-tokens', 'P6', ai, ns, ['TotalTokens', 'TokenTransaction', 'InputTokens', 'OutputTokens'],
-                           'total', flt="ModelDeploymentName eq '*'", top=1000)
-        self.batch_metrics('ai-ptu', 'P6', ai, ns, ['ProvisionedUtilization', 'AzureOpenAIProvisionedManagedUtilizationV2'],
-                           'average,maximum', flt="ModelDeploymentName eq '*'", top=1000)
-        self.batch_metrics('ai-calls', 'P6', ai, ns, ['TotalCalls', 'SuccessfulCalls', 'ClientErrors', 'ServerErrors',
-                                                      'BlockedCalls', 'Ratelimit', 'Latency'], 'total,average,maximum')
 
         def deployments(a):
             items, st, err = self.client.get_all(a['id'] + '/deployments?api-version=2024-10-01', 'P6', a['name'])
@@ -451,7 +451,6 @@ class Collector:
         lbs = [x for x in self.rows('lbs') if ((x.get('sku') or {}).get('name') or '').lower() == 'standard']
         ns = 'microsoft.network/loadbalancers'
         self.batch_metrics('lb', 'P9', lbs, ns, ['VipAvailability', 'DipAvailability'], 'average,minimum,count')
-        self.batch_metrics('lb-dip', 'P9', lbs, ns, ['DipAvailability'], 'average,minimum', flt="BackendIPAddress eq '*'", top=500)
         self.batch_metrics('lb-vip', 'P9', lbs, ns, ['VipAvailability'], 'average,minimum',
                            flt="FrontendIPAddress eq '*' and FrontendPort eq '*'", top=500)
 

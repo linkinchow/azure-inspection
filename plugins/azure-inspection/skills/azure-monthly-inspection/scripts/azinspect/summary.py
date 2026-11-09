@@ -35,6 +35,29 @@ def money(x):
     return f'{x:,.2f}'
 
 
+def azure_ri_row(prices):
+    """00 section 1: Azure's own one-year VM reservation recommendation (02's estimate prices every machine as on demand
+    at list price and stays in 02 and the cost section). None when not read or no recommendation."""
+    ref = (prices or {}).get('azureReference')
+    if not ref or not ref.get('read') or not ref['plans']['ri1']['count']:
+        return None
+    p = ref['plans']['ri1']
+    return ['按 Azure 建议购买 1 年期虚拟机预留', f'**每月约省 USD {money(p["saving"])}**（{p["quantity"]:,.0f} 台；Azure 按过去 30 天的实际用量和贵司价格计算，按现有规格；'
+                                         '建议先降配并观察稳定后，再按新的用量确认购买数量）']
+
+
+def azure_reference_note(prices):
+    """00: Azure's own RI/SP recommendations next to 02's plans (02 counts the last week as the month)."""
+    ref = (prices or {}).get('azureReference')
+    caution = '上表按最近 7 天的运行情况和官网列表价估算，并包含降配；有自动扩缩的节点池时台数每周会变，官网列表价通常也高于贵司实际价格，RI/SP 节省可能偏高'
+    if not ref or not ref.get('read'):
+        return [f'- {caution}。购买 RI/SP 前请先看 Azure 按过去 30 天用量给出的购买建议。']
+    parts = [f'1 年期{"虚拟机预留" if k == "ri1" else "计算节省计划"}每月约省 USD {money(ref["plans"][k]["saving"])}'
+             for k in ('ri1', 'sp1') if ref['plans'][k]['count']]
+    said = ('Azure 按过去 30 天的实际用量和贵司价格给出的建议：' + '，'.join(parts) + '（按现有规格，不含降配）。') if parts else 'Azure 没有给出虚拟机的 RI/SP 购买建议。'
+    return [f'- {said}{caution}，购买 RI/SP 的数量以 Azure 的建议为准。']
+
+
 def ws_of(d):
     return d['ws']
 
@@ -212,10 +235,8 @@ def markdown(cfg, period, d, n, pngs, scope):
             rows.append(row)
     if vm:
         rows.append(['VM 规格调整', f'{vm["recommendedVMCount"]} 台建议降配，**每月约节省 USD {money(vm["monthlyPotentialSavingsUSD"])}**（官网列表价）'])
-    plan_by = {p['key']: p for p in (prices or {}).get('plans', [])}
-    if 'ri1' in plan_by:
-        rows.append(['VM 降配后再购买 1 年 RI', f'VM 计算费用每月从 USD {money(prices["currentMonthly"])} 降到 USD {money(plan_by["ri1"]["monthlyCost"])}，'
-                                            f'**每月约节省 USD {money(plan_by["ri1"]["monthlySaving"])}**（官网列表价）'])
+    if azure_ri_row(prices):
+        rows.append(azure_ri_row(prices))
     for code, title in (('r03', report_title('03', d['groups'])), ('r04', report_title('04', d['groups']))):
         if d[code]:
             rows.append([title, f'发现 {d[code]["total"]} 项问题，其中高风险 {d[code]["bySeverity"].get("高", 0)} 项'])
@@ -261,7 +282,7 @@ def markdown(cfg, period, d, n, pngs, scope):
         rows += [[r['item'], r.get('current', ''), r.get('after', ''), r.get('saving', '')] for r in n.get('extraSavings') or []]
         lines += table(['方案', '当前每月 USD', '调整后每月 USD', '每月节省 USD'], rows, ['---', '---:', '---:', '---:'])
         notes = [p['note'] for p in prices['plans'] if p['key'] in ('ri1', 'sp1') and p.get('fallbackCount')]
-        lines += ['', '- 各 VM 方案需要选择一种，节省不能相加。'] + [f'- {x}。' for x in sorted(set(notes))] + \
+        lines += ['', '- 各 VM 方案需要选择一种，节省不能相加。'] + [f'- {x}。' for x in sorted(set(notes))] + azure_reference_note(prices) + \
                  [f'- VM 的 3 年 RI 和 SP 价格见附件{attachment_no(chosen, "02")}。', '- 建议先降配并观察稳定后，再按实际长期用量确定 RI 或 SP 的数量和期限。']
     if costs and n.get('savingsPending'):
         lines += ['', '### 需要贵司确认后才能估算节省的项目', ''] + table(['项目', '现状'], [[r['item'], r['status']] for r in n['savingsPending']], ['---', '---'])

@@ -16,11 +16,21 @@ def extra_note(vm, notes):
     out = []
     for n in notes or []:
         if vm.get('subscriptionName') == n.get('subscription') and str(vm.get('name', '')).startswith(n.get('namePrefix', '\0')):
-            out.append(n['note'])
+            out.append(str(n['note']).strip().rstrip('。；;'))   # joined with '；': no "。；"
     return out
 
 
 COVERED_SHARE = 0.5   # at least half of the month's amortized cost under RI/SP
+
+
+def plan_exclusion(share, vm):
+    """Why a running machine is left out of the RI/SP plans: 'covered' when RI/SP already paid at least half of its
+    review-month cost (its commitment stays as it is), 'spot' for Spot machines (RI/SP do not apply); else None."""
+    if share is not None and share >= COVERED_SHARE:
+        return 'covered'
+    if str((vm or {}).get('priority') or '').lower() == 'spot':
+        return 'spot'
+    return None
 
 
 def committed_share(record, coverage):
@@ -46,14 +56,17 @@ def combined_rows(vms, recommendations, pools, catalog, extra_notes=None, covera
         candidate = record.get('candidate') or {}
         effective_sku = record['targetSKU'] if changing else record['currentSKU']
         quotes = {k: quote_for(catalog, vm, effective_sku, k) for k in KEYS}
-        costs = {k: monthly(q) for k, q in quotes.items()}
+        hours = float(record.get('monthlyHours', 730))
+        # on demand is paid for the hours a machine runs; an RI or a savings plan is a commitment for the whole month
+        costs = {k: (monthly(q) * hours / 730 if k == 'payg' and q else monthly(q)) for k, q in quotes.items()}
         if deallocated:
             costs = {k: 0 if k == 'payg' else None for k in KEYS}
         elif not running:
             costs = {k: None for k in KEYS}
         current_io = {m: vm.get('metrics', {}).get(m, {}).get('average') for m, _, _ in IO}
         after_io = {m: candidate.get('projectedIO', {}).get(m) if changing else current_io[m] for m, _, _ in IO}
-        current_month = monthly(quote_for(catalog, vm)) if running else 0 if deallocated else None
+        current_quote = quote_for(catalog, vm)
+        current_month = (monthly(current_quote) * hours / 730 if current_quote else None) if running else 0 if deallocated else None
         pool_name = None
         if record.get('pool'):
             pool_name = pool_lookup.get(record['pool'].lower(), {}).get('name', record['pool'].split('/')[-1])
@@ -82,11 +95,21 @@ def combined_rows(vms, recommendations, pools, catalog, extra_notes=None, covera
             'currentIO': current_io, 'afterIO': after_io,
             'currentMonthlyPAYG': current_month, 'costs': costs, 'quotes': quotes,
             'monthlyRightsizingSavings': record['monthlySavingsUSD'], 'note': note, 'poolName': pool_name, 'committedShare': share,
+            'planExcluded': plan_exclusion(share, vm) if running else None,
             'state': '运行中' if running else '已释放计算资源' if deallocated else '未确认释放（' + str(record.get('state', 'Unknown')) + '）',
             'rawPowerState': record.get('state', 'Unknown'), 'deallocated': deallocated, 'osPriceBasis': os_price_basis(vm),
-            'licenseType': vm.get('licenseType'), 'metricsSource': vm.get('metricsSource'),
+            'licenseType': vm.get('licenseType'), 'metricsSource': vm.get('metricsSource'), 'monthlyHours': hours,
         })
     return rows
+
+
+def plan_cost(row, key):
+    """Monthly cost of one running machine under a plan: the commitment when it has a quote and costs less than on
+    demand for the hours the machine runs, else on demand. Machines already under RI/SP and Spot machines stay on demand."""
+    cost, payg = row['costs'][key], row['costs']['payg']
+    if key != 'payg' and row.get('planExcluded'):
+        return payg
+    return payg if cost is None else min(cost, payg)
 
 
 def portfolio_totals(rows):
@@ -94,17 +117,51 @@ def portfolio_totals(rows):
     if any(r['currentMonthlyPAYG'] is None or r['costs']['payg'] is None for r in running):
         raise ValueError('有运行中的机器缺少按需报价，不能汇总方案总价')
     baseline = math.fsum(r['currentMonthlyPAYG'] for r in running)
+    excluded = {k: sum(r.get('planExcluded') == k for r in running) for k in ('covered', 'spot')}
     plans = []
     for key in KEYS:
         missing = [r for r in running if r['costs'][key] is None]
-        amount = math.fsum(r['costs'][key] if r['costs'][key] is not None else r['costs']['payg'] for r in running)
+        # a commitment is bought only for machines that run enough for it to cost less than on demand
+        dearer = [r for r in running if r['costs'][key] is not None and r['costs'][key] > r['costs']['payg'] and not r.get('planExcluded')]
+        amount = math.fsum(plan_cost(r, key) for r in running)
         saving = baseline - amount
+        notes = ([f'{len(missing)}台无对应报价，仍按调整后按需价计算'] if missing else [])
+        notes += ([f'{len(dearer)} 台运行时间不足，承诺比按需贵，仍按按需计算'] if dearer and key != 'payg' else [])
+        if key != 'payg':
+            notes += ([f'{excluded["covered"]} 台已由 RI/SP 覆盖（巡检月一半以上费用），不再重复计算'] if excluded['covered'] else [])
+            notes += ([f'{excluded["spot"]} 台 Spot 机器不能用 RI/SP，按按需计算'] if excluded['spot'] else [])
         plans.append({'key': key, 'label': PLAN_LABELS[key], 'monthlyCost': amount, 'annualCost': amount * 12,
                       'monthlySaving': saving, 'annualSaving': saving * 12, 'fallbackCount': len(missing),
-                      'fallbackMonthly': math.fsum(r['costs']['payg'] for r in missing),
-                      'note': f'{len(missing)}台无对应报价，仍按调整后按需价计算' if missing else '全部运行机器均有对应报价'})
-    return {'currentMonthly': baseline, 'currentAnnual': baseline * 12, 'runningCount': len(running),
+                      'fallbackMonthly': math.fsum(r['costs']['payg'] for r in missing), 'onDemandCount': len(dearer) if key != 'payg' else 0,
+                      'note': '；'.join(notes) or '全部运行机器均有对应报价'})
+    return {'currentMonthly': baseline, 'currentAnnual': baseline * 12, 'runningCount': len(running), 'excluded': excluded,
             'deallocatedCount': sum(r.get('deallocated', False) for r in rows), 'plans': plans}
+
+
+AZURE_KEYS = {('预留实例', 'P1Y'): 'ri1', ('预留实例', 'P3Y'): 'ri3', ('节省计划', 'P1Y'): 'sp1', ('节省计划', 'P3Y'): 'sp3'}
+
+
+def azure_reference(commitments, subscriptions):
+    """Azure's own purchase recommendations for the subscriptions 02 covers, per plan: virtual machine reservations and
+    savings plans. 01 reads them (raw/cost/commitments.json): last 30 days of use, the customer's prices, current sizes.
+    The plans above count a whole week as a month; for autoscaled pools this one is the steadier guide to how much to buy.
+    None when they were not read (01 not run)."""
+    if not commitments or 'recommendationStatus' not in commitments:
+        return None
+    ids = {str(s.get('id') or s.get('subscriptionId')).lower() for s in subscriptions}
+    names = {s.get('name') or s.get('subscriptionName') for s in subscriptions}
+    statuses = [s for k, s in (commitments.get('recommendationStatus') or {}).items() if k.split('|')[0].lower() in ids]
+    plans = {key: {'saving': 0.0, 'count': 0, 'quantity': 0.0} for key in AZURE_KEYS.values()}
+    for r in commitments.get('recommendations') or []:
+        # virtual machine reservations and compute savings plans only (database savings plans and other reservations left out)
+        if r.get('subscription') not in names or r.get('resourceType') not in ('VirtualMachines', 'Compute_Savings_Plan'):
+            continue
+        key = AZURE_KEYS.get((r.get('kind'), r.get('term')))
+        if key:
+            plans[key]['saving'] += r.get('saving') or 0
+            plans[key]['count'] += 1
+            plans[key]['quantity'] += float(r.get('quantity') or 0)   # RI: machines; SP: hourly commitment in USD
+    return {'plans': plans, 'read': sum(1 for s in statuses if s.get('ok')), 'tried': len(statuses)}
 
 
 def money(value):

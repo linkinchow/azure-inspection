@@ -42,6 +42,16 @@ def number(text):
     return float(text.replace(',', ''))
 
 
+def plan_totals(rows):
+    """Monthly cost of the running machines under each plan, recomputed on its own: a commitment counts only where it has
+    a quote and costs less than on demand for the hours the machine runs."""
+    out = {}
+    for key in ['payg', 'ri1', 'ri3', 'sp1', 'sp3']:
+        out[key] = math.fsum(u['costs']['payg'] if u['costs'][key] is None or (key != 'payg' and u.get('planExcluded'))
+                             else min(u['costs'][key], u['costs']['payg']) for u in rows if u['running'])
+    return out
+
+
 def audit(ws, log=print):
     f = ws.month_dir('findings') / 'vm'
     vs, rs, cs, ps = (read_json(f / n) for n in ('vms-analyzed.json', 'recommendations.json', 'candidate-checks.json', 'pools.json'))
@@ -89,7 +99,7 @@ def audit(ws, log=print):
     for r in rs:
         if r['status'] == '建议试点调整':
             assert r['state'] == 'PowerState/running' and r['candidate']['passed'] and not r['candidate']['checks']
-            same(r['monthlySavingsUSD'], (r['currentPriceUSDHour'] - r['candidate']['priceUSDHour']) * 730)
+            same(r['monthlySavingsUSD'], (r['currentPriceUSDHour'] - r['candidate']['priceUSDHour']) * r.get('monthlyHours', 730))
             assert r['candidate']['sku'] == r['targetSKU']
         else:
             assert r['monthlySavingsUSD'] == 0
@@ -153,7 +163,8 @@ def audit(ws, log=print):
                 continue
             validate_quote(q, key)
             if q is not None:
-                same(cost, q['retailPrice'] / (12 if key == 'ri1' else 36) if key.startswith('ri') else q['retailPrice'] * 730)
+                hours = u.get('monthlyHours', 730) if key == 'payg' else 730
+                same(cost, q['retailPrice'] / (12 if key == 'ri1' else 36) if key.startswith('ri') else q['retailPrice'] * hours)
             if not pending and u['currentMonthlyPAYG'] is not None:
                 saving = u['currentMonthlyPAYG'] - cost
                 assert display == f'{shown(cost)}（{"省" if saving >= 0 else "增加"} {shown(abs(saving))}）', (u['name'], key, display)
@@ -215,9 +226,8 @@ def audit(ws, log=print):
     prices = read_json(f / 'price-summary.json')
     baseline = math.fsum(u['currentMonthlyPAYG'] for u in rows if u['running'])
     same(prices['currentMonthly'], baseline)
-    for key in ['payg', 'ri1', 'ri3', 'sp1', 'sp3']:
-        value = math.fsum(u['costs'][key] if u['costs'][key] is not None else u['costs']['payg'] for u in rows if u['running'])
-        assert f'{value:,.2f}' in md
+    for key, value in plan_totals(rows).items():
+        assert f'{value:,.2f}' in md, (key, value)
     result = {'status': 'success', 'subscriptionCount': len(subs), 'subscriptionWithVMCount': len({v['subscriptionId'] for v in vs}), 'instanceCount': len(vs),
               'runningCount': sum(r['state'] == 'PowerState/running' for r in rs), 'deallocatedCount': sum(r['state'] == 'PowerState/deallocated' for r in rs),
               'recommendedCount': sum(r['status'] == '建议试点调整' for r in rs), 'recommendedPoolCount': sum(p['status'] == '建议整池试点' for p in ps),

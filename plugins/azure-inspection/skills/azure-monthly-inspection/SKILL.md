@@ -3,7 +3,7 @@ name: azure-monthly-inspection
 description: Read-only monthly Azure inspection for a customer tenant, producing Chinese customer reports (cost review, VM rightsizing, reliability, security, operational excellence, performance, peer comparison, summary). Use when the user asks to run or prepare an Azure 月度巡检/成本巡检/WAF 巡检/健康检查 for a customer, set up a new customer for inspection, check read-only access, or quality-check inspection reports before delivery.
 license: MIT
 metadata:
-  version: 0.10.8
+  version: 0.10.9
 ---
 
 # Azure 月度巡检（只读）
@@ -21,7 +21,7 @@ metadata:
 
 ## 当前版本能做什么
 
-版本 0.10.8 可以：
+版本 0.10.9 可以：
 
 - 准备：环境检查、建客户工作目录、核对只读访问
 - 生成全部 6 份报告：**00 汇总**、**01 月度成本**、**02 虚拟机规格**、**03 可靠性与安全**、**04 卓越运营与性能效率**、**05 同类资源配置对比**（采集、分析、生成、核对）
@@ -187,7 +187,7 @@ python "<skill>/scripts/azinspect_cli.py" <命令> [参数]
    python "<skill>/scripts/azinspect_cli.py" crosscheck --workspace "<工作目录>" --month <YYYY-MM>
    ```
 
-   逐条处理“需要处理”的规则（明细在 `findings/crosscheck.json`，每条带建议做法），见 `references/cross-checks.md`：降配冲突写进 `narrative/02.json` 的 `crossCheckNotes`；不宜降档的数据库或缓存写进 `narrative/01.json` 的 `downsizeExclusions`。改完重新 build 再跑 crosscheck，直到没有“需要处理”。“需人工确认”的逐条看一遍，必要时改说明文件。
+   逐条处理“需要处理”的规则（明细在 `findings/crosscheck.json`，每条带建议做法），见 `references/cross-checks.md`：降配冲突写进 `narrative/02.json` 的 `crossCheckNotes`（决定暂不调整的加 `"keep": true`，然后重新运行 `analyze --offline` 再 build，这些机器才会从建议和节省里去掉）；不宜降档的数据库或缓存写进 `narrative/01.json` 的 `downsizeExclusions`。改完重新 build 再跑 crosscheck，直到没有“需要处理”。“需人工确认”的逐条看一遍，必要时改说明文件。
 
 6. **质量检查**：
 

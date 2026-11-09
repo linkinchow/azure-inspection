@@ -59,6 +59,14 @@ def daily_phrase(r, Lp):
     return f'日均变化{text}'
 
 
+def log_sources(w):
+    """The 01 log table's main sources of a workspace: the two largest, '来源查询失败' when that query failed, else '-'."""
+    rows_ = (w.get('topDataTypeBreakdown') or {}).get('rows') or []
+    src = '；'.join((x.get('Category') or x.get('ContainerName') or '') + (f' {x.get("BilledGB", 0):,.0f} GB' if x.get('BilledGB', 0) >= 1 else ' 不足1 GB')
+                   for x in rows_[:2])
+    return src or ('来源查询失败' if w.get('topDataTypeBreakdownError') else '-')
+
+
 def narrative_limitations(narrative):
     """Limitations the agent adds in narrative/01.json, written after the standard ones in section 8 and in Excel."""
     x = narrative.get('limitations') or []
@@ -659,10 +667,12 @@ def read_line(times, queried, Lp, Lc, snapshot):
 def forecast_note(sup, Lc):
     """Subscriptions without a forecast: a failed read (e.g. throttled) is not a subscription without costs."""
     missing = [s['next'] for s in sup['forecast']['subscriptions'] if s['next'].get('fullMonthEstimate') is None]
-    failed = sum(1 for n in missing if n.get('status') not in ('success', 'empty', None))
-    empty = len(missing) - failed
+    skipped = sum(1 for n in missing if n.get('status') == 'skipped')
+    failed = sum(1 for n in missing if n.get('status') not in ('success', 'empty', 'noForecastRows', 'skipped', None))
+    empty = len(missing) - failed - skipped
     return ((f'；{failed}个订阅的预测读取失败（如接口限流），未计入预测' if failed else '')
-            + (f'；{empty}个订阅没有返回预测结果（多为{Lc}无费用的订阅）' if empty else ''))
+            + (f'；{empty}个订阅没有返回预测结果（多为{Lc}无费用的订阅）' if empty else '')
+            + (f'；{skipped}个订阅{Lc}无费用，未读取预测' if skipped else ''))
 
 
 def _forecast_chart_scope(sup, m, dn, dc, Lc):
@@ -824,10 +834,9 @@ def markdown(cfg, period, labels, m, actions, sup, pngs, narrative, cs=None, cho
     tail = lg['period'].get('sourceWindow') or ['', '']
     lines += [f'|订阅|工作区|{Lc}费用USD|{Lc}可计费GB|主要数据类型|保留天数|主要来源（{cn_date(tail[0])}至{period.current.last.day}日）|', '|---|---|---:|---:|---|---:|---|']
     for w in [w for w in lg['workspaces'] if w.get('top3')]:
-        rows_ = (w.get('topDataTypeBreakdown') or {}).get('rows') or []
-        src = '；'.join((x.get('Category') or x.get('ContainerName') or '') + (f' {x.get("BilledGB", 0):,.0f} GB' if x.get('BilledGB', 0) >= 1 else ' 不足1 GB') for x in rows_[:2])
+        src = log_sources(w)
         top_type = (w.get('byDataType') or [{}])[0].get('DataType', '-')
-        lines.append(row([w['subscriptionName'], w['name'], amount(w['curCostUSD']), f'{w["billableGB"]:,.0f}', top_type, w.get('retentionInDays'), src or '-']))
+        lines.append(row([w['subscriptionName'], w['name'], amount(w['curCostUSD']), f'{w["billableGB"]:,.0f}', top_type, w.get('retentionInDays'), src]))
     dup = lg['coverage'].get('resourcesWithDuplicateDestinations', 0)
     lines += [''] + [f'- {x}' for x in (narrative.get('logNotes') or [])] + [
         f'- 检查了{lg["coverage"]["diagnosticSettingsChecked"]}个资源的诊断设置，' + (f'{dup}个资源有同一类日志发送到多个工作区，建议合并。' if dup else '没有发现同一类日志重复发送到多个工作区。'), '',

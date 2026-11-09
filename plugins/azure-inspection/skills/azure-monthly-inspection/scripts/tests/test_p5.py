@@ -510,9 +510,9 @@ class PartialWindowTests(unittest.TestCase):
     def test_partial_resources_are_failed_reads(self):
         from types import SimpleNamespace
         from azinspect.waf.performance.analyze import Analyzer
-        calls = [{'check': 'P9', 'target': 'lb-dip/s/regiona', 'status': 200}]
+        calls = [{'check': 'P9', 'target': 'lb-vip/s/regiona', 'status': 200}]
         files = {'index.json': {'calls': calls},
-                 'metrics/lb-dip.json': {'label': 'lb-dip', 'results': {'/lb1': {'m': [], '_partial': [['a', 'b']]}}}}
+                 'metrics/lb-vip.json': {'label': 'lb-vip', 'results': {'/lb1': {'m': [], '_partial': [['a', 'b']]}}}}
         a = object.__new__(Analyzer)
         a.raw = SimpleNamespace(load=lambda rel, default=None: files.get(rel, default))
         a.cov = {f'P{i}': {'attempted': 0, 'succeeded': 0, 'denied': 0, 'otherErrors': 0, 'notes': []} for i in range(1, 11)}
@@ -589,8 +589,8 @@ class CoverageNoteTextTests(unittest.TestCase):
     def test_partial_note_names_the_missing_days(self):
         from types import SimpleNamespace
         from azinspect.waf.performance.analyze import Analyzer
-        files = {'index.json': {'calls': [{'check': 'P9', 'target': 'lb-dip/s/regiona', 'status': 200}]},
-                 'metrics/lb-dip.json': {'label': 'lb-dip', 'results': {'/lb1': {'m': [], '_partial': [['2026-10-26T00:00:00Z', '2026-11-05T00:00:00Z']]}}}}
+        files = {'index.json': {'calls': [{'check': 'P9', 'target': 'lb-vip/s/regiona', 'status': 200}]},
+                 'metrics/lb-vip.json': {'label': 'lb-vip', 'results': {'/lb1': {'m': [], '_partial': [['2026-10-26T00:00:00Z', '2026-11-05T00:00:00Z']]}}}}
         a = object.__new__(Analyzer)
         a.raw = SimpleNamespace(load=lambda rel, default=None: files.get(rel, default))
         a.cov = {f'P{i}': {'attempted': 0, 'succeeded': 0, 'denied': 0, 'otherErrors': 0, 'notes': []} for i in range(1, 11)}

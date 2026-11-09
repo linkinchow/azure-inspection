@@ -174,18 +174,37 @@ class ReadOnlyClient:
         url = path_or_url if path_or_url.startswith('http') else f'https://{ARM_HOST}{path_or_url}'
         return self.request('GET', url, check, target, **kw)
 
-    def get_all(self, path_or_url: str, check: str, target: str = '', max_pages: int = 200):
-        """Follow nextLink. Returns (items or None if the first page failed, status, error)."""
+    def record(self, check: str, target: str, url: str, status, error: str):
+        """A failed read that is not one HTTP answer (e.g. paging cut off), so coverage counts it."""
+        with self._lock:
+            self.calls.append({'check': check, 'target': target, 'method': 'GET', 'url': _REDACT_URL.sub(r'\1REDACTED', url)[:600],
+                               'status': status, 'error': error, 'elapsed': 0, 'attempts': 0, 'waited': 0, 'throttled': 0,
+                               'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})
+
+    def get_all(self, path_or_url: str, check: str, target: str = '', max_pages: int = 200, report_truncation: bool = True,
+                deadline: float | None = None):
+        """Follow nextLink. Returns (items or None if the first page failed, status, error). Paging cut off at max_pages
+        (or, after the first page, at `deadline` on time.monotonic()) returns what was read with the error 'truncated after
+        N pages' and, unless the caller handles it, adds a failed read to the call log (the 200 answers alone would make an
+        incomplete read look complete)."""
         url = path_or_url if path_or_url.startswith('http') else f'https://{ARM_HOST}{path_or_url}'
         items, pages, status, error = [], 0, None, None
+        timed_out = False
         while url and pages < max_pages:
+            if pages and deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                break
             status, data, error = self.get(url, check, target)
             pages += 1
             if status != 200 or not isinstance(data, dict):
                 return (items or None), status, error
             items.extend(data.get('value') or [])
             url = data.get('nextLink') or data.get('@odata.nextLink')
-        return items, status, (f'truncated after {max_pages} pages' if url else error)
+        if url:
+            error = f'truncated after {pages} pages' + (' (time limit)' if timed_out else '')
+            if report_truncation:
+                self.record(check, target, path_or_url, None, error)
+        return items, status, error
 
     def arg(self, query: str, subscriptions: list[str], check: str, target: str = '', chunk: int = 500):
         """Resource Graph query with paging. Returns (rows or None if nothing could be read, status, error)."""

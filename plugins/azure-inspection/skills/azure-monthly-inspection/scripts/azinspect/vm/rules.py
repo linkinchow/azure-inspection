@@ -27,6 +27,7 @@ POLICY = {
     'capacityStep': '每项容量保持或减半；CPU/内存独立判断；同代保留a/d/s功能，仅允许E/D/低内存比切换',
     'aggregation': 'Average,Count / P1D', 'useMaxOrPercentiles': False,
     'singleDiskMetrics': False, 'hoursPerMonth': 730,
+    'runningHours': '每台机器的月小时数 = 730 × 观察窗口内实际运行的比例（按 CPU 样本数与同类整周运行的机器比较）；比例不低于 95% 或没有样本时按 730',
     'skuLookupKey': ['subscriptionId', 'region', 'size'],
     'unsupportedFamilies': '本轮未对该系列制定降档规则',
 }
@@ -199,6 +200,75 @@ def add_coverage(vms):
     return baseline
 
 
+FULL_WEEK = .95
+
+
+def running_share(vms):
+    """Share of the observation window each machine ran, from its CPU sample count against a machine of the same kind,
+    region and size that ran the whole week (add_coverage), else the largest count of its kind; 1.0 when nothing is known
+    (priced as a whole month, as before). Autoscaled nodes that ran part of the week are priced for that part."""
+    top = {}
+    for v in vms:
+        c = number(v.get('metrics', {}).get('Percentage CPU', {}), 'sampleCount', 0)
+        top[v.get('kind')] = max(top.get(v.get('kind'), 0), c)
+    out = []
+    for v in vms:
+        m = v.get('metrics', {}).get('Percentage CPU', {})
+        count = number(m, 'sampleCount', 0)
+        if not count:
+            share = 1.0                                  # no samples: unknown, priced as a whole month
+        elif m.get('coverage') is not None:
+            share = min(1.0, float(m['coverage']))
+        elif top.get(v.get('kind')):
+            share = min(1.0, count / top[v.get('kind')])
+        else:
+            share = 1.0
+        out.append(1.0 if share >= FULL_WEEK else share)   # a few missing samples are not a stop (same bar as add_coverage)
+    return out
+
+
+KEPT = '暂不调整：结合其他检查结果保持原规格'
+
+
+def apply_keep(records, notes):
+    """Machines a narrative crossCheckNote marks `keep` (e.g. 04 found the disk throughput 02 would reduce saturated)
+    leave the recommendation: no target, no saving, the note as the reason."""
+    for n in notes or []:
+        if not n.get('keep'):
+            continue
+        for r in records:
+            if _kept_by(n, r) and r.get('status') == RECOMMEND:
+                r['keptSavingUSD'] = r.get('monthlySavingsUSD') or 0
+                r.update(status=KEPT, targetSKU=None, monthlySavingsUSD=0, eligibleTargets=[])   # a pool changes together or not
+                r.setdefault('reasons', []).append('结合其他检查结果保持原规格（RI/SP 按原规格计算）：' + str(n.get('note') or ''))
+    return records
+
+
+def _kept_by(note, record):
+    return (record.get('subscriptionName') == note.get('subscription')
+            and str(record.get('name', '')).startswith(note.get('namePrefix', '\0')))
+
+
+def keep_effect(records, notes):
+    """Per keep note: (subscription/prefix, machines it kept, monthly saving left out). A wide prefix keeps far more
+    machines than the ones with a conflict."""
+    out = []
+    for n in notes or []:
+        if n.get('keep'):
+            kept = [r for r in records if _kept_by(n, r) and r.get('status') == KEPT]
+            pools = {str(r.get('pool')).lower() for r in kept if r.get('pool')}
+            others = [r for r in records if r.get('keptByPool') and str(r['keptByPool']).lower() in pools]
+            out.append((f"{n.get('subscription')}/{n.get('namePrefix')}", len(kept), round(sum(r.get('keptSavingUSD') or 0 for r in kept), 2),
+                        bool(pools), len(others), round(sum(r.get('keptSavingUSD') or 0 for r in others), 2)))
+    return out
+
+
+def stale_keep(records, notes):
+    """keep notes that still match a recommended machine: written after the last analyze."""
+    return [f"{n.get('subscription')}/{n.get('namePrefix')}" for n in notes or []
+            if n.get('keep') and any(_kept_by(n, r) and r.get('status') == RECOMMEND for r in records)]
+
+
 def _group_members(records, vms, clusters):
     groups = defaultdict(list)
     vm_lookup = {v['id'].lower(): v for v in vms}
@@ -230,7 +300,7 @@ def _group_members(records, vms, clusters):
     return groups
 
 
-def analyze(vms, sku_envelopes, clusters, catalog, subscriptions=(), manifest=None, price_date=None):
+def analyze(vms, sku_envelopes, clusters, catalog, subscriptions=(), manifest=None, price_date=None, keep=()):
     """Pure analysis API. Returns (updated_vms, records, trials, pools, summary)."""
     vms = copy.deepcopy(vms)
     identities = [str(v['id']).lower() for v in vms]
@@ -242,6 +312,7 @@ def analyze(vms, sku_envelopes, clusters, catalog, subscriptions=(), manifest=No
             raise ValueError('VM subscriptionId missing or inconsistent with ARM ID: ' + vm['id'])
     skus = sku_lookup(sku_envelopes)
     add_coverage(vms)
+    shares = {v['id'].lower(): s for v, s in zip(vms, running_share(vms))}
     possible = {v['id'].lower(): sizes_for(v, skus) for v in vms}
     records, trials = [], []
     trials_by_id = defaultdict(list)
@@ -258,6 +329,7 @@ def analyze(vms, sku_envelopes, clusters, catalog, subscriptions=(), manifest=No
             'cpuAverage': v['cpuAverage'], 'memoryAverage': v['memoryAverage'],
             'currentPriceUSDHour': p['retailPrice'] if p else None, 'priceSource': p['sourceUrl'] if p else None,
             'currentPriceQuote': p, 'osPriceBasis': os_price_basis(v), 'licenseType': v.get('licenseType'),
+            'runningShare': shares[v['id'].lower()], 'monthlyHours': round(730 * shares[v['id'].lower()], 2),
             'metricErrors': {m: value['error'] for m, value in v.get('metrics', {}).items() if value.get('error')},
             'targetSKU': None, 'candidate': None, 'monthlySavingsUSD': 0, 'status': None, 'reasons': [], 'eligibleTargets': [], 'pool': None,
         }
@@ -329,7 +401,7 @@ def analyze(vms, sku_envelopes, clusters, catalog, subscriptions=(), manifest=No
                     'projectedMemoryPercent': v['memoryAverage'] / rm, 'priceUSDHour': tp['retailPrice'] if tp else None,
                     'priceSource': tp['sourceUrl'] if tp else None, 'priceQuote': tp, 'caps': target,
                     'projectedIO': projected, 'ioApplicability': applicability, 'checks': checks, 'passed': not checks,
-                    'monthlyPriceDifferenceUSD': (p['retailPrice'] - tp['retailPrice']) * 730 if tp else None,
+                    'monthlyPriceDifferenceUSD': (p['retailPrice'] - tp['retailPrice']) * r['monthlyHours'] if tp else None,
                 }
                 trials.append(trial)
                 trials_by_id[v['id'].lower()].append(trial)
@@ -347,6 +419,7 @@ def analyze(vms, sku_envelopes, clusters, catalog, subscriptions=(), manifest=No
         if state == RUNNING and not shape(v.get('size')) and not any('本轮未对该系列制定降档规则' in text for text in r['reasons']):
             r['reasons'].append('本轮未对该系列制定降档规则；保持原规格，当前能力/指标/价格缺失不补0')
         records.append(r)
+    apply_keep(records, keep)
     groups = _group_members(records, vms, clusters)
     vm_lookup = {v['id'].lower(): v for v in vms}
     pools = []
@@ -366,8 +439,11 @@ def analyze(vms, sku_envelopes, clusters, catalog, subscriptions=(), manifest=No
                 r['reasons'] = [c['direction'] + '；拟减少的容量周平均<20%，目标VM级磁盘平均消耗率均≤50%，价格与已查兼容条件满足',
                                 '同池全部运行节点通过，目标规格一致；仍需业务确认Pod资源与故障余量']
         else:
+            kept_here = any(r['status'] == KEPT for r in members)
             for r in running:
                 if r['status'] == RECOMMEND:
+                    if kept_here:   # stopped only because a kept member does not change: counted with that keep note
+                        r.update(keptByPool=key, keptSavingUSD=r.get('monthlySavingsUSD') or 0)
                     r.update(status='暂不调整：整池条件未满足', targetSKU=None, monthlySavingsUSD=0)
                     r['reasons'].append('同池其他节点未通过、状态未确认或无共同目标SKU，不计单节点价差为整池收益')
         pools.append({'id': key, 'name': key.split('/')[-1], 'subscriptionId': members[0]['subscriptionId'],
