@@ -476,7 +476,7 @@ class ActivityTimeLimitTests(unittest.TestCase):
         pages = []
 
         class Fake:
-            def get(self, url, check, target=''):
+            def get(self, url, check, target='', **kw):
                 pages.append(url)
                 return 200, {'value': [1], 'nextLink': 'https://x/next'}, None
             record = lambda *a, **k: None
@@ -511,6 +511,130 @@ class ActivityTimeLimitTests(unittest.TestCase):
         run.coverage = {'R12': coverage_entry()}
         ra.r12(run)
         self.assertIn('10-20 05:00 至 10-30 14:00', ' '.join(run.coverage['R12']['limits']))
+
+
+class StuckRequestTests(unittest.TestCase):
+    # 0.10.9 online: two activity log requests ran almost six hours each (the server kept sending a little), the 30-minute
+    # limit was only checked between pages and the 120 s socket timeout never fired
+    class Resp:
+        def __init__(self, clock, step):
+            self.clock, self.step, self.status = clock, step, 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read1(self, n=-1):
+            self.clock[0] += self.step       # a few bytes, slowly, never the end
+            return b' '
+
+    def client(self, clock, step):
+        from azinspect.core import http
+        resp = self.Resp(clock, step)
+        opener = type('O', (), {'open': lambda self_, req, timeout=None: resp})()
+        tokens = type('T', (), {'get': lambda self_, aud: 'x'})()
+        return http.ReadOnlyClient(tokens, opener=opener)
+
+    URL = 'https://management.azure.com/subscriptions/s/resourcegroups?api-version=2021-04-01'
+
+    def test_one_request_stops_at_its_total_time(self):
+        from unittest import mock
+        clock = [0.0]
+        c = self.client(clock, 30)
+        with mock.patch('azinspect.core.http.time.monotonic', lambda: clock[0]), mock.patch('azinspect.core.http.time.sleep', lambda s: None):
+            status, data, error = c.get(self.URL, 'X', max_attempts=2, max_seconds=300)
+        self.assertIsNone(status)
+        self.assertIn('timed out', error)
+        self.assertLess(clock[0], 2 * 300 + 120)   # two attempts at most, each cut at its limit
+
+    def test_a_deadline_stops_the_request_without_retries(self):
+        from unittest import mock
+        clock = [0.0]
+        c = self.client(clock, 30)
+        with mock.patch('azinspect.core.http.time.monotonic', lambda: clock[0]), mock.patch('azinspect.core.http.time.sleep', lambda s: None):
+            items, status, error = c.get_all(self.URL, 'R12', max_pages=600, report_truncation=False, deadline=100)
+        self.assertEqual(items, [])                     # nothing read, but not a failed read: the time limit
+        self.assertIn('time limit', error)
+        self.assertEqual(c.calls[-1]['attempts'], 1)
+        self.assertLess(clock[0], 200)
+
+
+class R12ReasonTests(unittest.TestCase):
+    def run_r12(self, entry, calls=(), manifest=None):
+        from types import SimpleNamespace
+        import importlib
+        ra = importlib.import_module('azinspect.waf.reliability.analyze')
+        from azinspect.waf.common import coverage_entry
+        files = {'activity/failed-ops.json': [entry], 'manifest.json': manifest}
+        run = SimpleNamespace(raw=SimpleNamespace(load=lambda rel, default=None: files.get(rel, default)), coverage={'R12': coverage_entry()},
+                              window={'start': '2026-10-01T00:00:00Z', 'end': '2026-10-31T00:00:00Z', 'snapshot': '2026-10-30', 'days': 30},
+                              cover=lambda *a: None, add=lambda *a, **k: {}, inventory={}, subname=lambda x: 'sub1', calls=list(calls),
+                              env=lambda *a, **k: {'value': 'prod', 'label': '生产', 'basis': ''})
+        ra.r12(run)
+        return ' '.join(run.coverage['R12'].get('limits') or [])
+
+    def test_failed_read_is_not_too_many_records(self):
+        # a subscription answering 401 was written as "活动日志记录太多，在 30 分钟内没有读完……只读到约 279 小时"
+        text = self.run_r12({'subscriptionId': 's', 'subscriptionName': 'sub1', 'status': 401, 'error': 'HTTP 401', 'events': None,
+                             'timeLimited': True, 'truncated': [['2026-10-01T00:00:00Z', '2026-10-20T00:00:00Z']]})
+        self.assertNotIn('记录太多', text)
+
+    def test_nothing_read_in_time(self):
+        text = self.run_r12({'subscriptionId': 's', 'subscriptionName': 'sub1', 'status': 200, 'error': None, 'events': [],
+                             'timeLimited': True, 'truncated': [['2026-10-01T00:00:00Z', '2026-10-30T23:59:59Z']]})
+        self.assertIn('在 30 分钟内没有读到任何记录', text)
+        self.assertNotIn('记录太多', text)
+
+    def test_read_period_ends_when_reading_began(self):
+        # the collection ended the next day, so "read until" became the end of the window: about 7 hours too many
+        calls = [{'check': 'R12', 'target': 'sub1', 'at': '2026-10-30T16:45:00Z', 'elapsed': 240},
+                 {'check': 'R12', 'target': 'sub1', 'at': '2026-10-31T02:30:00Z', 'elapsed': 30000}]
+        text = self.run_r12({'subscriptionId': 's', 'subscriptionName': 'sub1', 'status': 200, 'error': None, 'events': [{'t': 'x'}],
+                             'timeLimited': True, 'readAt': '2026-10-31T02:30:30+00:00',
+                             'truncated': [['2026-10-01T00:00:00Z', '2026-10-30T10:00:00Z']]},
+                            calls, {'collectedAt': '2026-10-31T02:31:00+00:00'})
+        self.assertIn('10-30 10:00 至 16:41', text)      # reading began at 16:41 (the first request's start)
+        text = self.run_r12({'subscriptionId': 's', 'subscriptionName': 'sub1', 'status': 200, 'error': None, 'events': [{'t': 'x'}],
+                             'timeLimited': True, 'readStart': '2026-10-30T16:00:00Z',
+                             'truncated': [['2026-10-01T00:00:00Z', '2026-10-30T10:00:00Z']]})
+        self.assertIn('10-30 10:00 至 16:00', text)
+        self.assertIn('的活动日志在 30 分钟内没有读完', text)   # not "记录太多": a slow answer looks the same
+        self.assertNotIn('记录太多', text)
+
+
+class StoppedAtLimitWordingTests(unittest.TestCase):
+    def test_stop_at_time_limit_is_not_an_api_error(self):
+        # 0.10.10 rc1 online: "8 次读取：接口报错（HTTP None：stopped at time limit）" in the Excel coverage page
+        from azinspect.waf.common import plain_error
+        text = plain_error(None, 'stopped at time limit', 8)
+        self.assertNotIn('接口报错', text)
+        self.assertNotIn('stopped', text)
+        self.assertNotIn('None', text)
+        self.assertIn('时限', text)
+
+
+class R5StoppedServerTests(unittest.TestCase):
+    def test_stopped_server_is_not_a_failover_problem(self):
+        # a stopped PostgreSQL server: "高可用状态为 ，当前不能保证故障切换" as 高
+        from types import SimpleNamespace
+        import importlib
+        ra = importlib.import_module('azinspect.waf.reliability.analyze')
+        from azinspect.waf.common import coverage_entry
+        added = []
+        server = {'id': '/subscriptions/s/resourceGroups/rg/providers/Microsoft.DBforPostgreSQL/flexibleServers/pg1', 'name': 'pg1',
+                  'resourceGroup': 'rg', 'tags': {}, 'sku': {'name': 'D4', 'tier': 'GeneralPurpose'},
+                  'properties': {'state': 'Stopped', 'highAvailability': {'mode': 'ZoneRedundant', 'state': ''},
+                                 'backup': {'backupRetentionDays': 14, 'geoRedundantBackup': 'Enabled'}}}
+        run = SimpleNamespace(rows=lambda kind: [server] if kind == 'postgres' else [], coverage={'R5': coverage_entry()},
+                              cover=lambda *a: None, add=lambda *a, **k: added.append(a) or {}, inventory={}, subname=lambda x: 'sub1',
+                              env=lambda *a, **k: {'value': 'prod', 'label': '生产', 'basis': ''}, raw=SimpleNamespace(load=lambda *a, **k: None))
+        try:
+            ra.r5(run)
+        except Exception:
+            pass                                          # later parts of R5 need more inventory; the HA rows come first
+        self.assertFalse([a for a in added if a[1] == '高'], added)
 
 
 class MergedRowIdTests(unittest.TestCase):

@@ -435,7 +435,8 @@ def r5(run):
                         f"{label} 服务器 {r['name']} 的高可用为同可用区模式（主库在可用区 {row['zone']}，备库在同一可用区），整个可用区故障时主备会同时不可用。",
                         row, '如区域支持，改为跨可用区高可用（ZoneRedundant）：需先关闭再重新开启高可用，安排在维护窗口内。',
                         None if prodlike(de) else '确认该数据库是否为生产库。', key=f"{r['id']}|ha")
-            if ha.get('state') not in (None, 'Healthy', 'NotEnabled'):
+            # a stopped server has no failover to give (R11 reports the stopped server); an empty state says nothing
+            if ha.get('state') not in (None, '', 'Healthy', 'NotEnabled') and str(p.get('state') or '').lower() not in ('stopped', 'stopping', 'disabled'):
                 run.add('R5', '高', r['id'], rtype, r['name'], de, f"{label} 服务器 {r['name']} 高可用状态为 {ha.get('state')}，当前不能保证故障切换。",
                         row, '检查服务器高可用状态并联系 Azure 支持。', key=f"{r['id']}|ha-state")
             if (bk.get('backupRetentionDays') or 0) < 7:
@@ -946,12 +947,44 @@ def read_periods(cut, start, end):
     return hours, text
 
 
+def _reading_began(run, s):
+    """When reading this subscription's activity log began: nothing newer than that could be read. The time recorded by
+    the collector, else the start of its first request in the call log, else when the log or the collection finished."""
+    from datetime import datetime, timedelta
+    if s.get('readStart'):
+        return s['readStart']
+    starts = []
+    for c in getattr(run, 'calls', None) or []:
+        if c.get('check') == 'R12' and c.get('target') == s.get('subscriptionName') and c.get('at'):
+            try:
+                starts.append(datetime.fromisoformat(str(c['at']).replace('Z', '+00:00')) - timedelta(seconds=float(c.get('elapsed') or 0)))
+            except ValueError:
+                pass
+    if starts:
+        return min(starts).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return s.get('readAt') or (run.raw.load('manifest.json') or {}).get('collectedAt')
+
+
+def _pages_read(run, s):
+    """Pages of this subscription's activity log answered, or None when the data does not say (then nothing is claimed)."""
+    if 'pagesRead' in s:
+        return s['pagesRead']
+    if s.get('events'):
+        return 1
+    calls = getattr(run, 'calls', None)
+    if calls is None:
+        return None
+    return sum(1 for c in calls if c.get('check') == 'R12' and c.get('target') == s.get('subscriptionName') and c.get('status') == 200)
+
+
 def r12(run):
     run.cover(['R12'], 'R12')
     act = run.raw.load('activity/failed-ops.json') or []
     # activity log reads cut off at the page limit: newest first, so earlier failed operations were not read
     day = lambda x: str(x)[5:10]  # noqa: E731
     for s in act:
+        if s.get('events') is None:   # the read failed (e.g. no permission): a failed read in the call log, not "too many records"
+            continue
         cut = s.get('truncated')
         old = not cut and str(s.get('error') or '').startswith('truncated')   # collected before 0.10.9: no failed read recorded
         if not (cut or old):
@@ -963,16 +996,19 @@ def r12(run):
                     + (f"（{day(times[0])} 至 {day(times[-1])}）" if times else '') + '，更早的失败操作没有读到，结果可能不完整。')
         else:   # the ranges are the days not read (0.10.9: newest first, each subscription within a time limit)
             from .collect import ACTIVITY_MAX_SECONDS
-            why = f'在 {ACTIVITY_MAX_SECONDS // 60} 分钟内没有读完' if s.get('timeLimited') else '分页太多'
+            why = f'在 {ACTIVITY_MAX_SECONDS // 60} 分钟内没有读完' if s.get('timeLimited') else '分页太多，没有读完'   # slow or many: the time limit says which it was not
             start, end = run.window['start'], f"{run.window['snapshot']}T23:59:59Z"
-            # the log was read before the snapshot day ended: nothing after that moment exists to be read
-            read_at = s.get('readAt') or (run.raw.load('manifest.json') or {}).get('collectedAt')
-            if read_at:
-                at = str(read_at).replace('+00:00', 'Z')[:19] + 'Z'
-                end = min(end, at)
+            # reading began before the snapshot day ended: nothing after that moment exists to be read
+            began = _reading_began(run, s)
+            if began:
+                end = min(end, str(began).replace('+00:00', 'Z')[:19] + 'Z')
             hours, got = read_periods(cut, start, end)
-            text = (f"订阅 {s['subscriptionName']} 的活动日志记录太多，{why}：{run.window.get('days') or 30} 天里只读到约 "
-                    f"{hours:.0f} 小时" + (f'（{got}）' if got else '') + '的失败操作，其余时段没有读到，结果可能不完整。')
+            if s.get('timeLimited') and _pages_read(run, s) == 0:
+                text = (f"订阅 {s['subscriptionName']} 的活动日志在 {ACTIVITY_MAX_SECONDS // 60} 分钟内没有读到任何记录"
+                        '（请求长时间没有返回），失败操作没有检查。')
+            else:
+                text = (f"订阅 {s['subscriptionName']} 的活动日志{why}：{run.window.get('days') or 30} 天里只读到约 "
+                        f"{hours:.0f} 小时" + (f'（{got}）' if got else '') + '的失败操作，其余时段没有读到，结果可能不完整。')
         run.coverage['R12']['notes'].append(text)
         run.coverage['R12'].setdefault('limits', []).append(text)
     cnt, sample = Counter(), {}

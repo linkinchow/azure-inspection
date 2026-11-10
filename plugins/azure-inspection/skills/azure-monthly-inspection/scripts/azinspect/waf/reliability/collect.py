@@ -420,11 +420,13 @@ class _Collector:
         spans = [(cuts[i].strftime(fmt), (cuts[i + 1] - timedelta(seconds=0 if i == parts - 1 else 1)).strftime(fmt))
                  for i in range(parts)]
 
-        lock, started, timed, done = threading.Lock(), {}, set(), [0]
+        lock, started, started_at, timed, done = threading.Lock(), {}, {}, set(), [0]
 
         def deadline_of(s):
             with lock:
-                return started.setdefault(s['id'], _clock()) + ACTIVITY_MAX_SECONDS
+                if s['id'] not in started:
+                    started[s['id']], started_at[s['id']] = _clock(), now()   # nothing newer than this can be read
+                return started[s['id']] + ACTIVITY_MAX_SECONDS
 
         def unread_before(items, a, b):
             """The part of [a, b] older than the earliest event read (the API returns newest first)."""
@@ -480,9 +482,15 @@ class _Collector:
 
         def progress():
             while not stop.wait(ACTIVITY_PROGRESS_SECONDS):
-                pages = sum(1 for x in list(getattr(self.c, 'calls', None) or []) if x.get('check') == 'R12')
-                log(f'  可靠性 activity：活动日志已读 {pages} 页，{done[0]}/{len(jobs)} 段读完（同时读 {ACTIVITY_WORKERS} 段），'
-                    f'用时 {int((_clock() - t0) / 60)} 分钟；每个订阅最多读 {ACTIVITY_MAX_SECONDS // 60} 分钟')
+                try:   # a failing progress line must not end the progress lines
+                    pages = sum(1 for x in list(getattr(self.c, 'calls', None) or []) if x.get('check') == 'R12')
+                except Exception:
+                    pages = '?'
+                try:
+                    log(f'  可靠性 activity：活动日志已读 {pages} 页，{done[0]}/{len(jobs)} 段读完（同时读 {ACTIVITY_WORKERS} 段），'
+                        f'用时 {int((_clock() - t0) / 60)} 分钟；每个订阅最多读 {ACTIVITY_MAX_SECONDS // 60} 分钟')
+                except Exception:
+                    pass
         watcher = threading.Thread(target=progress, daemon=True) if log else None
         if watcher:
             watcher.start()
@@ -520,7 +528,10 @@ class _Collector:
                        'statusMessage': ((x.get('properties') or {}).get('statusMessage') or '')[:1500],
                        'caller': x.get('caller'), 'correlationId': x.get('correlationId')} for x in items or []]
             return {'subscriptionId': s['id'], 'subscriptionName': s['name'], 'status': st, 'error': e, 'events': events if items is not None else None,
-                    **({'truncated': cut} if cut else {}), **({'timeLimited': True} if s['id'] in timed else {}), 'readAt': now()}
+                    **({'truncated': cut} if cut else {}), **({'timeLimited': True} if s['id'] in timed and not bad else {}),
+                    'readStart': started_at.get(s['id']), 'readAt': now(),
+                    'pagesRead': sum(1 for x in list(getattr(self.c, 'calls', None) or [])
+                                     if x.get('check') == 'R12' and x.get('target') == s['name'] and x.get('status') == 200)}
 
         self.raw.save('activity/failed-ops.json', [one(s) for s in self.subs])
 

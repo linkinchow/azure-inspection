@@ -156,7 +156,8 @@ ERROR_MEANINGS = [
     (r'AuthorizationFailed|Forbidden|LinkedAuthorizationFailed', '没有读取权限'),
     (r'NoRegisteredProviderFound|SubscriptionNotRegistered|MissingSubscriptionRegistration', '订阅没有注册相关的资源提供程序'),
     (r'InvalidResourceType', '接口不认这种资源类型'),
-    (r'truncated after time limit', '记录太多，在时限内没有读完，较早的记录没有读到'),
+    (r'stopped at time limit', '到时限停止读取，这部分记录没有读到'),
+    (r'truncated after time limit', '在时限内没有读完，较早的记录没有读到'),
     (r'truncated after', '分页太多，只读到最近的一部分，较早的记录没有读到'),
 ]
 
@@ -169,7 +170,7 @@ def plain_error(status, error, count=1) -> str:
         meaning = ('接口限流' if status == 429 else '服务端错误' if isinstance(status, int) and status >= 500 else
                    '资源不存在或已删除' if status == 404 else '没有读取权限' if status in (401, 403) else '接口报错')
     detail = '' if not text or text == f'HTTP {status}' or re.fullmatch(r'None(: ?None)?', text.strip()) else text   # 'None: None': no text kept (before 0.10.4)
-    if text.startswith('truncated after'):   # recorded by the tool itself: the meaning says it all
+    if text.startswith(('truncated after', 'stopped at time limit')):   # recorded by the tool itself: the meaning says it all
         detail = ''
     if status is None and not detail:
         return f'{count} 次读取：{meaning}'

@@ -119,6 +119,26 @@ def _retry_wait(headers, attempt: int) -> float:
     return min(max(waits) if waits else 2 ** attempt, 120)
 
 
+class _TooSlow(Exception):
+    """A response still arriving at its time limit."""
+
+
+def _read_body(resp, limit: float) -> bytes:
+    """Read a response in pieces up to `limit` (time.monotonic()). The socket timeout only covers each wait for data: a
+    server sending a little at a time kept one activity log request open for almost six hours."""
+    read = getattr(resp, 'read1', None)
+    if read is None:
+        return resp.read()
+    chunks = []
+    while True:
+        if time.monotonic() >= limit:
+            raise _TooSlow()
+        piece = read(65536)
+        if not piece:
+            return b''.join(chunks)
+        chunks.append(piece)
+
+
 class ReadOnlyClient:
     def __init__(self, tokens: TokenProvider, user_agent: str = 'azure-inspection-readonly/0.1', opener=None):
         self.tokens = tokens
@@ -128,23 +148,39 @@ class ReadOnlyClient:
         self._opener = opener or urllib.request.build_opener(_NoRedirect)
 
     def request(self, method: str, url: str, check: str, target: str = '', body=None,
-                max_attempts: int = 6, timeout: int = 120):
-        """Returns (status, data, error). Never raises for HTTP errors; raises BlockedRequest for non-reads."""
+                max_attempts: int = 6, timeout: int = 120, max_seconds: float = 600, deadline: float | None = None):
+        """Returns (status, data, error). Never raises for HTTP errors; raises BlockedRequest for non-reads. Each attempt
+        stops after `max_seconds`; at `deadline` (time.monotonic()) the request stops without retrying."""
         url = urllib.parse.quote(url, safe=_URL_SAFE)   # e.g. spaces in $filter; existing %-escapes are kept
         audience = classify(method, url)
         headers = {'User-Agent': self.user_agent, 'Content-Type': 'application/json'}
         started, status, data, error = time.time(), None, None, None
         waited, throttled, attempt = 0.0, 0, 0
         for attempt in range(1, max_attempts + 1):
+            if deadline is not None and attempt > 1 and time.monotonic() >= deadline:
+                break
+            limit = time.monotonic() + max_seconds
+            if deadline is not None:
+                limit = min(limit, deadline)
             if audience:
                 headers['Authorization'] = 'Bearer ' + self.tokens.get(audience)
             req = urllib.request.Request(url, method=method.upper(), headers=headers,
                                          data=json.dumps(body).encode() if body is not None else None)
             try:
                 with self._opener.open(req, timeout=timeout) as resp:
-                    status, raw = resp.status, resp.read()
+                    status = resp.status
+                    raw = _read_body(resp, limit)
                     data, error = (json.loads(raw) if raw else None), None
                     break
+            except _TooSlow:
+                status, data = None, None
+                if deadline is not None and time.monotonic() >= deadline:
+                    error = 'stopped at time limit'
+                    break
+                error = f'timed out after {max_seconds:.0f} s'
+                if attempt < max_attempts:
+                    waited += min(30, 2 ** attempt)
+                    time.sleep(min(30, 2 ** attempt))
             except urllib.error.HTTPError as e:
                 status, raw = e.code, e.read()
                 if status == 429 or status >= 500:
@@ -194,8 +230,11 @@ class ReadOnlyClient:
             if pages and deadline is not None and time.monotonic() >= deadline:
                 timed_out = True
                 break
-            status, data, error = self.get(url, check, target)
+            status, data, error = self.get(url, check, target, **({'deadline': deadline} if deadline is not None else {}))
             pages += 1
+            if status is None and str(error).startswith('stopped at time limit'):   # what was read is kept
+                timed_out = True
+                break
             if status != 200 or not isinstance(data, dict):
                 return (items or None), status, error
             items.extend(data.get('value') or [])
